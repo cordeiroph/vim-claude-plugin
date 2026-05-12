@@ -54,6 +54,14 @@ command! ClaudeWinRight   call claude#win_move('l')
 command! ClaudeWinUp      call claude#win_move('k')
 command! ClaudeWinDown    call claude#win_move('j')
 
+" ── autocommands ─────────────────────────────────────────────────────────────
+
+augroup claude_plugin
+  autocmd!
+  " Stop all running Claude jobs before Vim exits to prevent E947.
+  autocmd VimLeavePre * call claude#close_all()
+augroup END
+
 " ── keymaps ──────────────────────────────────────────────────────────────────
 
 " All default mappings can be disabled by setting g:claude_no_default_mappings=1

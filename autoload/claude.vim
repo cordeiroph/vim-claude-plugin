@@ -94,6 +94,30 @@ function! claude#close() abort
   call s:cleanup_current()
 endfunction
 
+" Close all Claude sessions across every tab. Called on VimLeavePre so that
+" Vim 8 does not raise E947 (job still running) when :qall is used.
+function! claude#close_all() abort
+  if !s:tab_mode()
+    call claude#close()
+    return
+  endif
+  for l:tabnr in range(1, tabpagenr('$'))
+    let l:bufnr = gettabvar(l:tabnr, 'claude_bufnr', -1)
+    if l:bufnr == -1 || !bufexists(l:bufnr)
+      continue
+    endif
+    if !has('nvim') && has('terminal')
+      let l:job = term_getjob(l:bufnr)
+      if l:job isnot v:null && job_status(l:job) ==# 'run'
+        call job_stop(l:job)
+      endif
+    endif
+    execute 'bwipeout! ' . l:bufnr
+    call settabvar(l:tabnr, 'claude_bufnr',  -1)
+    call settabvar(l:tabnr, 'claude_chanid', -1)
+  endfor
+endfunction
+
 " Toggle the Claude window: hide it if visible, show it if hidden, open a new
 " session if none exists.
 function! claude#toggle() abort
