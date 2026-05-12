@@ -23,11 +23,27 @@ if !exists('g:claude_tab_sessions')
   let g:claude_tab_sessions = 1
 endif
 
+" g:claude_models: ordered list of model names offered by ClaudeModel
+if !exists('g:claude_models')
+  let g:claude_models = [
+        \ 'claude-opus-4-7',
+        \ 'claude-sonnet-4-6',
+        \ 'claude-haiku-4-5-20251001',
+        \ ]
+endif
+
+" g:claude_default_model: model sent as /model <name> on every new session.
+" Set to '' to keep Claude's own default.
+if !exists('g:claude_default_model')
+  let g:claude_default_model = 'claude-sonnet-4-6'
+endif
+
 " Commands
 command! ClaudeOpen    call claude#open()
 command! ClaudeToggle  call claude#toggle()
 command! ClaudeClose   call claude#close()
 command! ClaudeExplain call claude#explain('n')
+command! ClaudeModel   call claude#select_model()
 
 " Window navigation
 command! ClaudeFocus      call claude#focus()
@@ -46,6 +62,9 @@ if !exists('g:claude_no_default_mappings')
   " Explain: normal mode sends whole file, visual mode sends selection
   nnoremap <silent> <leader>ce :call claude#explain('n')<CR>
   xnoremap <silent> <leader>ce :<C-u>call claude#explain('v')<CR>
+
+  " Switch model for the current session
+  nnoremap <silent> <leader>cm :ClaudeModel<CR>
 
   " Move between windows (same as Ctrl-W hjkl but as leader shortcuts)
   nnoremap <silent> <leader>ch :ClaudeWinLeft<CR>

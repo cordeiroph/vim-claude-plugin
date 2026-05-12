@@ -32,6 +32,7 @@ function! s:set_session(bufnr, chanid) abort
   endif
 endfunction
 
+
 " ── public API ───────────────────────────────────────────────────────────────
 
 function! claude#open() abort
@@ -59,6 +60,11 @@ function! claude#open() abort
   endif
 
   call s:set_buf_options()
+
+  let l:model = get(g:, 'claude_default_model', '')
+  if !empty(l:model)
+    call s:switch_model_if_needed(l:model, 15)
+  endif
 endfunction
 
 function! claude#close() abort
@@ -146,10 +152,6 @@ function! s:cleanup_current() abort
   if l:chanid != -1
     unlet! s:chanid_to_tab[l:chanid]
   endif
-  let l:win = l:bufnr != -1 ? bufwinid(l:bufnr) : -1
-  if l:win != -1
-    call win_execute(l:win, 'close')
-  endif
   if l:bufnr != -1 && bufexists(l:bufnr)
     execute 'bwipeout! ' . l:bufnr
   endif
@@ -180,10 +182,6 @@ function! s:cleanup_for_tab(tabnr) abort
     call settabvar(a:tabnr, 'claude_chanid', -1)
   endif
 
-  let l:win = l:bufnr != -1 ? bufwinid(l:bufnr) : -1
-  if l:win != -1
-    call win_execute(l:win, 'close')
-  endif
   if l:bufnr != -1 && bufexists(l:bufnr)
     execute 'bwipeout! ' . l:bufnr
   endif
@@ -220,7 +218,7 @@ function! s:set_buf_options() abort
   " handles drag-selection at raw screen coordinates, crossing window borders.
   " Mapping <Esc> to terminal-normal mode lets Vim own the mouse again —
   " visual selection then stays bounded to this window.
-  tnoremap <buffer> <Esc> <C-\><C-n>
+  tnoremap <buffer> <Esc><Esc> <C-\><C-n>
 endfunction
 
 " ── explain ──────────────────────────────────────────────────────────────────
@@ -278,22 +276,37 @@ function! s:send_when_ready(text, retries) abort
   if !s:is_open()
     return
   endif
-  if s:terminal_has_output() || a:retries <= 0
+  if s:terminal_scan('\S') || a:retries <= 0
     call s:send(a:text)
   else
     call timer_start(300, {-> s:send_when_ready(a:text, a:retries - 1)})
   endif
 endfunction
 
-" Returns true once the terminal buffer contains at least one non-empty line.
-function! s:terminal_has_output() abort
-  let l:bufnr = s:get_bufnr()
-  if has('nvim')
-    let l:lines = nvim_buf_get_lines(l:bufnr, 0, 10, v:false)
-    return !empty(filter(copy(l:lines), {_, v -> v !=# ''}))
+function! s:switch_model_if_needed(model, retries) abort
+  if !s:is_open()
+    return
+  endif
+  if s:terminal_scan('\S') || a:retries <= 0
+    call s:send('/model ' . a:model)
   else
-    for l:i in range(1, 10)
-      if term_getline(l:bufnr, l:i) !=# ''
+    call timer_start(300, {-> s:switch_model_if_needed(a:model, a:retries - 1)})
+  endif
+endfunction
+
+" Scan up to 50 lines of the current session's terminal for lines matching
+" {pattern}. Returns true on the first match.
+function! s:terminal_scan(pattern) abort
+  let l:bufnr = s:get_bufnr()
+  if l:bufnr == -1
+    return v:false
+  endif
+  if has('nvim')
+    let l:lines = nvim_buf_get_lines(l:bufnr, 0, 50, v:false)
+    return !empty(filter(copy(l:lines), {_, v -> v =~# a:pattern}))
+  else
+    for l:i in range(1, 50)
+      if term_getline(l:bufnr, l:i) =~# a:pattern
         return v:true
       endif
     endfor
@@ -314,6 +327,39 @@ function! s:send(text) abort
     if l:bufnr != -1 && bufexists(l:bufnr)
       call term_sendkeys(l:bufnr, "\e[200~" . a:text . "\e[201~\r")
     endif
+  endif
+endfunction
+
+" ── model selection ──────────────────────────────────────────────────────────
+
+function! claude#select_model() abort
+  let l:models = get(g:, 'claude_models', [
+        \ 'claude-opus-4-7',
+        \ 'claude-sonnet-4-6',
+        \ 'claude-haiku-4-5-20251001',
+        \ ])
+
+  " Build the inputlist prompt: item 0 is the header, items 1..N are models
+  let l:menu = ['Switch Claude model:']
+  let l:i = 1
+  for l:m in l:models
+    call add(l:menu, printf('%d. %s', l:i, l:m))
+    let l:i += 1
+  endfor
+
+  let l:choice = inputlist(l:menu)
+  if l:choice < 1 || l:choice > len(l:models)
+    return
+  endif
+
+  let l:model = l:models[l:choice - 1]
+
+  if !s:is_open()
+    call claude#open()
+    call s:send_when_ready('/model ' . l:model, 15)
+  else
+    call claude#focus()
+    call s:send('/model ' . l:model)
   endif
 endfunction
 
