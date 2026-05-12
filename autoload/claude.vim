@@ -8,12 +8,7 @@ function! claude#open() abort
   endif
 
   let l:prev_win = win_getid()
-
-  if g:claude_split_direction ==# 'horizontal'
-    execute g:claude_split_size . 'split'
-  else
-    execute 'vertical ' . g:claude_split_size . 'split'
-  endif
+  execute s:split_cmd()
 
   " Open a new terminal running the claude CLI
   if has('nvim')
@@ -21,7 +16,8 @@ function! claude#open() abort
     let s:claude_bufnr = bufnr('%')
     startinsert
   elseif has('terminal')
-    execute 'terminal ' . g:claude_cmd
+    " ++curwin runs the terminal inside the current split instead of opening another window
+    execute 'terminal ++curwin ' . g:claude_cmd
     let s:claude_bufnr = bufnr('%')
   else
     echoerr 'claude.vim: terminal support required (Vim 8+ or Neovim)'
@@ -37,13 +33,17 @@ function! claude#close() abort
     return
   endif
 
-  let l:win = bufwinid(s:claude_bufnr)
-  if l:win != -1
-    call win_execute(l:win, 'close')
+  " Stop the running job before wiping — bwipeout! alone can still error on
+  " an active terminal buffer in Vim 8.
+  if !has('nvim') && has('terminal')
+    let l:job = term_getjob(s:claude_bufnr)
+    if l:job isnot v:null && job_status(l:job) ==# 'run'
+      call job_stop(l:job)
+    endif
   endif
 
   if bufexists(s:claude_bufnr)
-    execute 'bdelete! ' . s:claude_bufnr
+    execute 'bwipeout! ' . s:claude_bufnr
   endif
 
   let s:claude_bufnr = -1
@@ -62,11 +62,7 @@ function! claude#toggle() abort
     call win_execute(l:win, 'hide')
   else
     " Buffer exists but window is hidden — reopen the split
-    if g:claude_split_direction ==# 'horizontal'
-      execute g:claude_split_size . 'split'
-    else
-      execute 'vertical ' . g:claude_split_size . 'split'
-    endif
+    execute s:split_cmd()
     execute 'buffer ' . s:claude_bufnr
     call s:set_buf_options()
     if has('nvim')
@@ -104,15 +100,45 @@ function! s:is_open() abort
   return s:claude_bufnr != -1 && bufexists(s:claude_bufnr)
 endfunction
 
+" Returns the Ex split command for the configured anchor position.
+" botright/topleft pin the window to the very edge of the screen.
+function! s:split_cmd() abort
+  let l:size = g:claude_split_size
+  let l:anchor = get(g:, 'claude_split_anchor', 'right')
+  if l:anchor ==# 'left'
+    return 'topleft vertical ' . l:size . 'split'
+  elseif l:anchor ==# 'top'
+    return 'topleft ' . l:size . 'split'
+  elseif l:anchor ==# 'bottom'
+    return 'botright ' . l:size . 'split'
+  else
+    return 'botright vertical ' . l:size . 'split'
+  endif
+endfunction
+
 function! s:set_buf_options() abort
   setlocal nobuflisted
   setlocal nonumber
   setlocal norelativenumber
   setlocal signcolumn=no
-  setlocal winfixwidth
+  let l:anchor = get(g:, 'claude_split_anchor', 'right')
+  if l:anchor ==# 'left' || l:anchor ==# 'right'
+    setlocal winfixwidth
+  else
+    setlocal winfixheight
+  endif
+  " In terminal-mode Vim gives up mouse reporting so the terminal emulator
+  " handles drag-selection at raw screen coordinates, crossing window borders.
+  " Mapping <Esc> to terminal-normal mode lets Vim own the mouse again —
+  " visual selection then stays bounded to this window.
+  tnoremap <buffer> <Esc> <C-\><C-n>
 endfunction
 
 function! s:on_exit(job_id, code, event) abort
   " Neovim callback when the claude process exits
   let s:claude_bufnr = -1
+endfunction
+
+function! claude#split_cmd() abort
+  return s:split_cmd()
 endfunction

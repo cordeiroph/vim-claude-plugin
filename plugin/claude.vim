@@ -4,8 +4,9 @@ endif
 let g:loaded_claude_plugin = 1
 
 " Default configuration
-if !exists('g:claude_split_direction')
-  let g:claude_split_direction = 'vertical'  " 'vertical' or 'horizontal'
+" g:claude_split_anchor: where the Claude window is pinned — 'right' (default), 'left', 'top', 'bottom'
+if !exists('g:claude_split_anchor')
+  let g:claude_split_anchor = 'right'
 endif
 
 if !exists('g:claude_split_size')
