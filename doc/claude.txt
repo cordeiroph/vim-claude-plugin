@@ -1,0 +1,275 @@
+*claude.txt*  Claude CLI integration for Vim and Neovim
+
+==============================================================================
+CONTENTS                                                        *claude-contents*
+
+  1. Introduction .............. |claude-introduction|
+  2. Requirements .............. |claude-requirements|
+  3. Configuration ............. |claude-configuration|
+  4. Commands .................. |claude-commands|
+  5. Mappings .................. |claude-mappings|
+  6. Tab sessions .............. |claude-tab-sessions|
+  7. Model selection ........... |claude-models|
+  8. Input window .............. |claude-input|
+  9. License ................... |claude-license|
+
+==============================================================================
+1. INTRODUCTION                                             *claude-introduction*
+
+claude.vim opens the Claude CLI in a terminal split inside Vim or Neovim. Each
+editor tab gets its own independent Claude session by default. You can send the
+current file or a visual selection to Claude for explanation, switch models
+on the fly, and navigate between your code and the Claude window using a small
+set of commands and key mappings.
+
+==============================================================================
+2. REQUIREMENTS                                             *claude-requirements*
+
+  - Vim 8.1+ (with |+terminal|) or Neovim 0.5+
+  - The `claude` CLI installed and on $PATH
+    (https://docs.anthropic.com/en/docs/claude-code)
+
+==============================================================================
+3. CONFIGURATION                                           *claude-configuration*
+
+All variables are optional. Set them in your |vimrc| before the plugin loads.
+
+------------------------------------------------------------------------------
+                                                          *g:claude_split_anchor*
+g:claude_split_anchor~
+  Which screen edge the Claude window is pinned to.
+
+  Values:   'right' (default), 'left', 'top', 'bottom'
+  Example: >
+    let g:claude_split_anchor = 'bottom'
+<
+------------------------------------------------------------------------------
+                                                           *g:claude_split_size*
+g:claude_split_size~
+  Width in columns for left/right splits, or height in lines for top/bottom
+  splits.
+
+  Default: 80
+  Example: >
+    let g:claude_split_size = 100
+<
+------------------------------------------------------------------------------
+                                                                 *g:claude_cmd*
+g:claude_cmd~
+  Shell command used to launch the Claude CLI.
+
+  Default: 'claude'
+  Example: >
+    let g:claude_cmd = '/usr/local/bin/claude'
+<
+------------------------------------------------------------------------------
+                                                        *g:claude_tab_sessions*
+g:claude_tab_sessions~
+  When set to 1 (default), each tab page maintains its own Claude session.
+  Set to 0 to share a single session across all tabs.
+
+  Default: 1
+  Example: >
+    let g:claude_tab_sessions = 0
+<
+  See also: |claude-tab-sessions|
+
+------------------------------------------------------------------------------
+                                                              *g:claude_models*
+g:claude_models~
+  Ordered list of model names shown by |:ClaudeModel|.
+
+  Default: >
+    let g:claude_models = [
+          \ 'claude-opus-4-7',
+          \ 'claude-sonnet-4-6',
+          \ 'claude-haiku-4-5-20251001',
+          \ ]
+<
+------------------------------------------------------------------------------
+                                                        *g:claude_default_model*
+g:claude_default_model~
+  Model to activate automatically on every new Claude session via `/model`.
+  Set to an empty string to keep Claude's own default.
+
+  Default: 'claude-sonnet-4-6'
+  Example: >
+    let g:claude_default_model = 'claude-opus-4-7'
+    " or disable auto-switching:
+    let g:claude_default_model = ''
+<
+------------------------------------------------------------------------------
+                                                  *g:claude_no_default_mappings*
+g:claude_no_default_mappings~
+  Set to 1 before the plugin loads to suppress all default key mappings.
+
+  Example: >
+    let g:claude_no_default_mappings = 1
+<
+
+==============================================================================
+4. COMMANDS                                                     *claude-commands*
+
+------------------------------------------------------------------------------
+                                                                  *:ClaudeOpen*
+:ClaudeOpen
+  Open a new Claude terminal in a split window. If a session already exists
+  for the current tab, focus it instead.
+
+------------------------------------------------------------------------------
+                                                                *:ClaudeToggle*
+:ClaudeToggle
+  Toggle the Claude window. Hides it if currently visible; shows it if hidden;
+  opens a new session if none exists. The Claude process keeps running while
+  the window is hidden.
+
+------------------------------------------------------------------------------
+                                                                 *:ClaudeClose*
+:ClaudeClose
+  Close the Claude terminal and wipe its buffer. The Claude process is
+  terminated.
+
+------------------------------------------------------------------------------
+                                                               *:ClaudeExplain*
+:ClaudeExplain
+  Send the entire current file to Claude with an "Explain this file" prompt.
+  Opens Claude first if no session exists. Use the visual-mode mapping
+  (|<leader>ce|) to explain a selection instead.
+
+------------------------------------------------------------------------------
+                                                                 *:ClaudeModel*
+:ClaudeModel
+  Open an interactive numbered list to switch the model for the current
+  session. Sends `/model <name>` to Claude after selection. Opens Claude
+  first if no session is running.
+
+  See also: |claude-models|, |g:claude_models|
+
+------------------------------------------------------------------------------
+                                                                 *:ClaudeInput*
+:ClaudeInput
+  Open a floating input window (Neovim) or a horizontal split (Vim 8) for
+  composing a multi-line message. Press <C-s> to send the text to Claude;
+  press <Esc> or `q` (normal mode) to discard and close.
+
+  Opens a new Claude session automatically if none is running.
+
+  See also: |claude-input|
+
+------------------------------------------------------------------------------
+                                                                 *:ClaudeFocus*
+:ClaudeFocus
+  Move the cursor to the Claude window. Opens a new session if none exists,
+  or reveals a hidden window if the session is alive but not displayed.
+
+------------------------------------------------------------------------------
+                                                               *:ClaudeWinLeft*
+:ClaudeWinLeft
+  Move the cursor to the window on the left (equivalent to <C-w>h).
+
+------------------------------------------------------------------------------
+                                                              *:ClaudeWinRight*
+:ClaudeWinRight
+  Move the cursor to the window on the right (equivalent to <C-w>l).
+
+------------------------------------------------------------------------------
+                                                                *:ClaudeWinUp*
+:ClaudeWinUp
+  Move the cursor to the window above (equivalent to <C-w>k).
+
+------------------------------------------------------------------------------
+                                                              *:ClaudeWinDown*
+:ClaudeWinDown
+  Move the cursor to the window below (equivalent to <C-w>j).
+
+==============================================================================
+5. MAPPINGS                                                     *claude-mappings*
+
+Default mappings (disabled when |g:claude_no_default_mappings| is set):
+
+  <leader>co    Open Claude (|:ClaudeOpen|)
+  <leader>ct    Toggle Claude window (|:ClaudeToggle|)
+  <leader>cx    Close Claude (|:ClaudeClose|)
+  <leader>cf    Focus Claude window (|:ClaudeFocus|)
+  <leader>ce    Explain current file (normal mode) or selection (visual mode)
+  <leader>ci    Open floating input window (|:ClaudeInput|)
+  <leader>cm    Switch model (|:ClaudeModel|)
+  <leader>ch    Move cursor left  (|:ClaudeWinLeft|)
+  <leader>cl    Move cursor right (|:ClaudeWinRight|)
+  <leader>ck    Move cursor up    (|:ClaudeWinUp|)
+  <leader>cj    Move cursor down  (|:ClaudeWinDown|)
+
+Inside the Claude terminal window:
+
+  <Esc><Esc>    Enter terminal-normal mode (lets Vim handle mouse and
+                selection). Single <Esc> is passed through to Claude so it
+                can dismiss pagers and menus.
+
+To define your own mappings after disabling defaults: >
+  let g:claude_no_default_mappings = 1
+  nnoremap <silent> <F5> :ClaudeToggle<CR>
+  xnoremap <silent> <F5> :<C-u>call claude#explain('v')<CR>
+<
+
+==============================================================================
+6. TAB SESSIONS                                             *claude-tab-sessions*
+
+By default (|g:claude_tab_sessions| = 1) each Vim tab page owns a separate
+Claude session. Opening a new tab and running |:ClaudeOpen| starts a fresh
+Claude process; closing the tab automatically terminates that process and
+reclaims its buffer.
+
+Set |g:claude_tab_sessions| = 0 to use a single shared session for all tabs.
+This is useful when you want Claude context to persist as you switch tabs.
+
+==============================================================================
+7. MODEL SELECTION                                              *claude-models*
+
+claude.vim can switch Claude models without leaving Vim.
+
+Automatic switch on open~
+  When a new session starts, claude.vim waits for the CLI to finish its
+  startup output and then sends `/model <g:claude_default_model>`. Set
+  |g:claude_default_model| to control which model is used, or set it to ''
+  to keep whichever model Claude defaults to.
+
+Interactive picker~
+  |:ClaudeModel| (or |<leader>cm|) presents a numbered list built from
+  |g:claude_models| and sends `/model <name>` for the chosen entry. You can
+  call this at any point during a session to switch models mid-conversation.
+
+==============================================================================
+8. INPUT WINDOW                                                   *claude-input*
+
+|:ClaudeInput| (or |<leader>ci|) opens a dedicated buffer for composing
+multi-line prompts without the noise of the terminal interface.
+
+Neovim~
+  A centred floating window opens with rounded borders. On Neovim 0.9+ the
+  title bar reads "Claude Input"; on 0.10+ the footer shows the key hints.
+  The buffer uses `filetype=markdown` so syntax highlighting works out of the
+  box.
+
+Vim 8~
+  A 10-line horizontal split opens at the bottom of the screen. The
+  statusline shows the send/cancel keys.
+
+Keys inside the input window~
+  <C-s>    Send the buffer contents to Claude and close the window.
+           Opens a new session automatically if Claude is not running.
+  <Esc>    Cancel and close (normal mode).
+  q        Cancel and close (normal mode).
+
+Sending behaviour~
+  Text is sent using the same bracketed-paste mechanism as |:ClaudeExplain|,
+  so embedded newlines are preserved and do not trigger premature submission.
+  If Claude is not yet running, the plugin opens a session and waits up to
+  4.5 seconds for it to initialise before sending.
+
+==============================================================================
+9. LICENSE                                                       *claude-license*
+
+MIT License. Copyright (c) 2024 pedro cordeiro.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:

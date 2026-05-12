@@ -1,27 +1,37 @@
 " ── session storage ──────────────────────────────────────────────────────────
-" When g:claude_tab_sessions=1 (default) each tab gets its own session stored
-" in the t: namespace. t: variables are automatically scoped to the current
-" tab, so no manual tab-tracking is needed for reads/writes.
-" When g:claude_tab_sessions=0 a single global session is kept in s:.
+" Per-tab mode (default): each tab stores its session in the t: namespace.
+" t: variables are automatically scoped to the current tab, so no manual
+" tab-tracking is needed for reads/writes. When the tab is closed, Vim
+" garbage-collects its t: variables automatically.
 "
-" Neovim on_exit fires outside the originating tab's context, so we keep a
-" chanid→tabnr map to route cleanup to the right tab.
-let s:g_bufnr      = -1   " global-mode fallback
-let s:g_chanid     = -1
-let s:chanid_to_tab = {}  " nvim: chanid → tabnr (0 = global mode)
+" Global mode (g:claude_tab_sessions=0): a single session is kept in s: vars.
+"
+" Neovim's on_exit callback fires outside the originating tab's context, so
+" we maintain a chanid→tabnr map to route cleanup to the correct tab.
+let s:g_bufnr       = -1  " buffer nr for the global-mode terminal
+let s:g_chanid      = -1  " channel id for the global-mode terminal (nvim only)
+let s:chanid_to_tab = {}  " nvim: maps chanid → tabnr (0 = global mode)
+let s:post_model_switch_send = ''  " text queued to send right after model switch
 
+" Returns 1 when per-tab sessions are enabled (the default).
 function! s:tab_mode() abort
   return get(g:, 'claude_tab_sessions', 1)
 endfunction
 
+" Returns the buffer number of the active Claude terminal for the current tab
+" (or the global buffer in global mode). -1 when no session exists.
 function! s:get_bufnr() abort
   return s:tab_mode() ? get(t:, 'claude_bufnr', -1) : s:g_bufnr
 endfunction
 
+" Returns the channel id of the active Claude terminal (Neovim only).
+" -1 when not set or in Vim 8 mode.
 function! s:get_chanid() abort
   return s:tab_mode() ? get(t:, 'claude_chanid', -1) : s:g_chanid
 endfunction
 
+" Stores the buffer number and channel id for the current session.
+" In tab mode writes to t: (tab-local); in global mode writes to s:.
 function! s:set_session(bufnr, chanid) abort
   if s:tab_mode()
     let t:claude_bufnr  = a:bufnr
@@ -35,22 +45,27 @@ endfunction
 
 " ── public API ───────────────────────────────────────────────────────────────
 
+" Open a new Claude terminal in a split window. If a session is already open
+" for this tab, focus it instead of opening a second one.
 function! claude#open() abort
   if s:is_open()
     call claude#focus()
     return
   endif
 
+  " Create the split window at the configured anchor position.
   execute s:split_cmd()
 
   if has('nvim')
     let l:tabnr  = tabpagenr()
+    " termopen() starts the job and returns a channel id used for sending input.
     let l:chanid = termopen(g:claude_cmd, {'on_exit': function('s:on_exit')})
     call s:set_session(bufnr('%'), l:chanid)
+    " Record which tab owns this channel so on_exit can clean up the right tab.
     let s:chanid_to_tab[l:chanid] = s:tab_mode() ? l:tabnr : 0
     startinsert
   elseif has('terminal')
-    " ++curwin runs the terminal inside the current split instead of opening another window
+    " ++curwin reuses the current window instead of opening a new one.
     execute 'terminal ++curwin ' . g:claude_cmd
     call s:set_session(bufnr('%'), -1)
   else
@@ -61,19 +76,22 @@ function! claude#open() abort
 
   call s:set_buf_options()
 
+  " Send /model <name> once the terminal has produced output, so Claude starts
+  " on the configured default model.
   let l:model = get(g:, 'claude_default_model', '')
   if !empty(l:model)
     call s:switch_model_if_needed(l:model, 15)
   endif
 endfunction
 
+" Close the Claude terminal for the current tab and wipe its buffer.
 function! claude#close() abort
   if !s:is_open()
     return
   endif
 
-  " Stop the running job before wiping — bwipeout! alone can still error on
-  " an active terminal buffer in Vim 8.
+  " In Vim 8, bwipeout! on a running terminal can still error, so we stop
+  " the job first before wiping.
   if !has('nvim') && has('terminal')
     let l:job = term_getjob(s:get_bufnr())
     if l:job isnot v:null && job_status(l:job) ==# 'run'
@@ -84,6 +102,8 @@ function! claude#close() abort
   call s:cleanup_current()
 endfunction
 
+" Toggle the Claude window: hide it if visible, show it if hidden, open a new
+" session if none exists.
 function! claude#toggle() abort
   if !s:is_open()
     call claude#open()
@@ -93,8 +113,10 @@ function! claude#toggle() abort
   let l:win = bufwinid(s:get_bufnr())
 
   if l:win != -1
+    " Window is visible — hide it (buffer stays alive, session continues).
     call win_execute(l:win, 'hide')
   else
+    " Session exists but window is not visible — reopen the split and show it.
     execute s:split_cmd()
     execute 'buffer ' . s:get_bufnr()
     call s:set_buf_options()
@@ -104,6 +126,8 @@ function! claude#toggle() abort
   endif
 endfunction
 
+" Move the cursor to the Claude window. Opens a new session if none exists,
+" or reveals a hidden window if the session is alive but not displayed.
 function! claude#focus() abort
   if !s:is_open()
     call claude#open()
@@ -117,23 +141,29 @@ function! claude#focus() abort
       startinsert
     endif
   else
+    " Session alive but no visible window — toggle will reopen the split.
     call claude#toggle()
   endif
 endfunction
 
+" Move the cursor to an adjacent window using standard Vim wincmd directions
+" (h=left, l=right, k=up, j=down).
 function! claude#win_move(dir) abort
   execute 'wincmd ' . a:dir
 endfunction
 
 " ── private helpers ──────────────────────────────────────────────────────────
 
+" Returns true when a live Claude session exists for the current tab.
+" Also cleans up stale state if the buffer no longer exists or the job is dead.
 function! s:is_open() abort
   let l:bufnr = s:get_bufnr()
   if l:bufnr == -1 || !bufexists(l:bufnr)
     call s:set_session(-1, -1)
     return v:false
   endif
-  " Vim 8 has no on_exit hook for ++curwin terminals; detect a dead job here.
+  " Vim 8 has no on_exit hook for ++curwin terminals, so we detect a dead job
+  " here by polling job_status on every is_open() call.
   if !has('nvim') && has('terminal')
     let l:job = term_getjob(l:bufnr)
     if l:job is v:null || job_status(l:job) ==# 'dead'
@@ -144,10 +174,12 @@ function! s:is_open() abort
   return v:true
 endfunction
 
-" Clean up the session that belongs to the current tab (or global session).
+" Wipe the terminal buffer for the current tab's session (or global session).
+" bwipeout! closes any window displaying the buffer automatically.
 function! s:cleanup_current() abort
   let l:bufnr  = s:get_bufnr()
   let l:chanid = s:get_chanid()
+  " Clear session state before wiping so re-entrant calls see no session.
   call s:set_session(-1, -1)
   if l:chanid != -1
     unlet! s:chanid_to_tab[l:chanid]
@@ -157,26 +189,29 @@ function! s:cleanup_current() abort
   endif
 endfunction
 
-" Neovim on_exit: fires outside the originating tab's context, so we look up
-" the tab via s:chanid_to_tab and use gettabvar/settabvar to reach its state.
+" Neovim on_exit callback. Fires asynchronously and outside the originating
+" tab's context, so we look up the tab via s:chanid_to_tab and defer the
+" actual cleanup with timer_start(0) to avoid re-entrancy issues.
 function! s:on_exit(job_id, code, event) abort
   let l:tabnr = get(s:chanid_to_tab, a:job_id, -1)
   unlet! s:chanid_to_tab[a:job_id]
   call timer_start(0, {-> s:cleanup_for_tab(l:tabnr)})
 endfunction
 
-" Clean up a session by explicit tabnr (Neovim on_exit path).
-" tabnr=0 means global mode; tabnr=-1 means unknown (no-op).
+" Clean up a session identified by tab number (Neovim on_exit path).
+" tabnr=0 means global mode; tabnr=-1 means unknown tab (no-op).
 function! s:cleanup_for_tab(tabnr) abort
   if a:tabnr == -1
     return
   endif
 
   if a:tabnr == 0
+    " Global mode: read and clear the script-local vars directly.
     let l:bufnr    = s:g_bufnr
     let s:g_bufnr  = -1
     let s:g_chanid = -1
   else
+    " Tab mode: use gettabvar/settabvar to reach the target tab's variables.
     let l:bufnr = gettabvar(a:tabnr, 'claude_bufnr', -1)
     call settabvar(a:tabnr, 'claude_bufnr',  -1)
     call settabvar(a:tabnr, 'claude_chanid', -1)
@@ -187,8 +222,9 @@ function! s:cleanup_for_tab(tabnr) abort
   endif
 endfunction
 
-" Returns the Ex split command for the configured anchor position.
-" botright/topleft pin the window to the very edge of the screen.
+" Returns the Ex command that creates the split at the configured anchor.
+" botright/topleft pin the new window to the very edge of the screen so it
+" doesn't push other splits around.
 function! s:split_cmd() abort
   let l:size   = g:claude_split_size
   let l:anchor = get(g:, 'claude_split_anchor', 'right')
@@ -203,28 +239,30 @@ function! s:split_cmd() abort
   endif
 endfunction
 
+" Apply buffer-local options to the Claude terminal window.
 function! s:set_buf_options() abort
-  setlocal nobuflisted
-  setlocal nonumber
+  setlocal nobuflisted      " hide from buffer list
+  setlocal nonumber         " no line numbers
   setlocal norelativenumber
-  setlocal signcolumn=no
+  setlocal signcolumn=no    " no sign column
   let l:anchor = get(g:, 'claude_split_anchor', 'right')
   if l:anchor ==# 'left' || l:anchor ==# 'right'
-    setlocal winfixwidth
+    setlocal winfixwidth    " prevent the vertical split from being resized
   else
-    setlocal winfixheight
+    setlocal winfixheight   " prevent the horizontal split from being resized
   endif
-  " In terminal-mode Vim gives up mouse reporting so the terminal emulator
-  " handles drag-selection at raw screen coordinates, crossing window borders.
-  " Mapping <Esc> to terminal-normal mode lets Vim own the mouse again —
-  " visual selection then stays bounded to this window.
+  " In terminal-insert mode Vim surrenders mouse events to the terminal
+  " emulator, which handles drag-selection at raw screen coordinates and lets
+  " selections cross window borders. Double-Esc enters terminal-normal mode
+  " so Vim regains mouse ownership and selection stays within this window.
+  " Single Esc is left unbound so it reaches Claude (e.g. to dismiss pagers).
   tnoremap <buffer> <Esc><Esc> <C-\><C-n>
 endfunction
 
 " ── explain ──────────────────────────────────────────────────────────────────
 
-" claude#explain('n') — explain current file
-" claude#explain('v') — explain visual selection
+" Send an explain prompt to Claude for the current file (mode='n') or the
+" current visual selection (mode='v'). Opens Claude if not already running.
 function! claude#explain(mode) abort
   let l:ft = &filetype
 
@@ -237,6 +275,7 @@ function! claude#explain(mode) abort
     let l:desc  = empty(l:fname) ? 'this code' : 'the file ' . l:fname
   endif
 
+  " Wrap the code in a fenced code block so Claude gets syntax context.
   let l:fence  = '```' . l:ft
   let l:prompt = 'Explain ' . l:desc . ":\n\n" . l:fence . "\n"
         \ . join(l:lines, "\n") . "\n```"
@@ -251,12 +290,14 @@ function! claude#explain(mode) abort
   if l:already_open
     call s:send(l:prompt)
   else
-    " Poll until Claude has produced output (startup UI visible = input ready).
-    " Max 15 attempts × 300 ms = 4.5 s before giving up.
+    " Claude needs a moment to initialise before it can accept input.
+    " Poll until output appears (max 15 × 300 ms = 4.5 s) then send.
     call s:send_when_ready(l:prompt, 15)
   endif
 endfunction
 
+" Return the lines covered by the most recent visual selection, trimmed to the
+" exact character columns that were selected.
 function! s:get_visual_selection() abort
   let [l:l1, l:c1] = getpos("'<")[1:2]
   let [l:l2, l:c2] = getpos("'>")[1:2]
@@ -264,14 +305,15 @@ function! s:get_visual_selection() abort
   if empty(l:lines)
     return []
   endif
-  " Clamp columns to actual selection bounds
+  " Clamp last and first lines to the selection boundaries.
   let l:lines[-1] = l:lines[-1][:l:c2 - 1]
   let l:lines[0]  = l:lines[0][l:c1 - 1:]
   return l:lines
 endfunction
 
-" Retry sending every 300 ms until the terminal has produced output,
-" meaning Claude has finished initialising and enabled bracketed-paste mode.
+" Poll the terminal every 300 ms until output appears (Claude's startup UI is
+" visible), then send {text}. Gives up and sends anyway after {retries} tries
+" so the caller is never silently dropped.
 function! s:send_when_ready(text, retries) abort
   if !s:is_open()
     return
@@ -283,19 +325,29 @@ function! s:send_when_ready(text, retries) abort
   endif
 endfunction
 
+" Poll the terminal every 300 ms until output appears, then send the /model
+" command. Used on session open to ensure Claude starts on the right model.
+" After the switch, fires any text queued by s:send_input (with a short delay
+" so Claude finishes processing the model change before receiving user input).
 function! s:switch_model_if_needed(model, retries) abort
   if !s:is_open()
+    let s:post_model_switch_send = ''
     return
   endif
   if s:terminal_scan('\S') || a:retries <= 0
     call s:send('/model ' . a:model)
+    if !empty(s:post_model_switch_send)
+      let l:text = s:post_model_switch_send
+      let s:post_model_switch_send = ''
+      call timer_start(300, {-> s:send_when_ready(l:text, 15)})
+    endif
   else
     call timer_start(300, {-> s:switch_model_if_needed(a:model, a:retries - 1)})
   endif
 endfunction
 
-" Scan up to 50 lines of the current session's terminal for lines matching
-" {pattern}. Returns true on the first match.
+" Scan up to 50 lines of the Claude terminal buffer for lines matching
+" {pattern}. Returns true on the first match, false if none found.
 function! s:terminal_scan(pattern) abort
   let l:bufnr = s:get_bufnr()
   if l:bufnr == -1
@@ -314,8 +366,9 @@ function! s:terminal_scan(pattern) abort
   endif
 endfunction
 
-" Send text to the Claude terminal using bracketed-paste so embedded newlines
-" are not treated as Enter/submit by Claude's input handler.
+" Send {text} to the Claude terminal using bracketed-paste escape sequences.
+" Bracketed paste tells Claude's input handler to treat the entire block as
+" pasted text, so embedded newlines don't trigger premature submission.
 function! s:send(text) abort
   if has('nvim')
     let l:chanid = s:get_chanid()
@@ -332,6 +385,8 @@ endfunction
 
 " ── model selection ──────────────────────────────────────────────────────────
 
+" Present a numbered list of models from g:claude_models and send /model
+" for the chosen one. Opens Claude first if no session is running.
 function! claude#select_model() abort
   let l:models = get(g:, 'claude_models', [
         \ 'claude-opus-4-7',
@@ -339,7 +394,7 @@ function! claude#select_model() abort
         \ 'claude-haiku-4-5-20251001',
         \ ])
 
-  " Build the inputlist prompt: item 0 is the header, items 1..N are models
+  " inputlist() expects item 0 to be a header and items 1..N to be choices.
   let l:menu = ['Switch Claude model:']
   let l:i = 1
   for l:m in l:models
@@ -356,6 +411,7 @@ function! claude#select_model() abort
 
   if !s:is_open()
     call claude#open()
+    " Session just started; wait for Claude to initialise before sending.
     call s:send_when_ready('/model ' . l:model, 15)
   else
     call claude#focus()
@@ -363,6 +419,206 @@ function! claude#select_model() abort
   endif
 endfunction
 
+" Expose s:split_cmd() publicly so it can be used in tests.
 function! claude#split_cmd() abort
   return s:split_cmd()
+endfunction
+
+" ── input window ─────────────────────────────────────────────────────────────
+
+let s:input_winid  = -1  " nvim: win id of the open input float (-1 = none)
+let s:input_bufnr8 = -1  " vim8: bufnr of the open input split  (-1 = none)
+let s:input_saved  = []  " draft lines preserved across toggle-off
+
+" Open or toggle the input window. If it is already visible, close it and save
+" the current text as a draft; the draft is restored on the next open.
+function! claude#input() abort
+  if has('nvim')
+    if s:input_winid != -1 && nvim_win_is_valid(s:input_winid)
+      call s:input_float_save_and_close()
+    else
+      call s:input_float()
+    endif
+  else
+    if s:input_bufnr8 != -1 && bufexists(s:input_bufnr8)
+      call s:input_split_save_and_close()
+    else
+      call s:input_split()
+    endif
+  endif
+endfunction
+
+" ── Neovim floating window ────────────────────────────────────────────────────
+
+function! s:input_float() abort
+  let l:buf = nvim_create_buf(v:false, v:true)
+  call nvim_buf_set_option(l:buf, 'filetype', 'markdown')
+
+  let l:width  = min([max([40, &columns - 20]), 100])
+  let l:height = min([max([8,  &lines   - 10]), 20])
+  let l:row    = (&lines   - l:height) / 2
+  let l:col    = (&columns - l:width)  / 2
+
+  let l:opts = {
+        \ 'relative': 'editor',
+        \ 'width':    l:width,
+        \ 'height':   l:height,
+        \ 'row':      l:row,
+        \ 'col':      l:col,
+        \ 'style':    'minimal',
+        \ 'border':   'rounded',
+        \ }
+  if has('nvim-0.9')
+    let l:opts.title     = ' Claude Input '
+    let l:opts.title_pos = 'center'
+  endif
+  if has('nvim-0.10')
+    let l:opts.footer     = ' <C-s> send  ·  <Esc> cancel '
+    let l:opts.footer_pos = 'center'
+  endif
+
+  let l:win = nvim_open_win(l:buf, v:true, l:opts)
+  call nvim_win_set_option(l:win, 'wrap', v:true)
+  call nvim_win_set_option(l:win, 'linebreak', v:true)
+  call nvim_buf_set_var(l:buf, 'claude_input_win', l:win)
+  let s:input_winid = l:win
+
+  " Reset winid if the window is closed by any means (e.g. :q).
+  execute 'autocmd WinClosed ' . l:win . ' ++once let s:input_winid = -1'
+
+  " Restore saved draft if one exists.
+  if !empty(s:input_saved)
+    call nvim_buf_set_lines(l:buf, 0, -1, v:false, s:input_saved)
+    call nvim_win_set_cursor(l:win, [len(s:input_saved), 0])
+  endif
+
+  for l:mode in ['n', 'i']
+    call nvim_buf_set_keymap(l:buf, l:mode, '<C-s>',
+          \ '<Cmd>call claude#_input_submit()<CR>',
+          \ {'noremap': v:true, 'silent': v:true})
+  endfor
+  call nvim_buf_set_keymap(l:buf, 'n', '<Esc>',
+        \ '<Cmd>call claude#_input_cancel()<CR>',
+        \ {'noremap': v:true, 'silent': v:true})
+  call nvim_buf_set_keymap(l:buf, 'n', 'q',
+        \ '<Cmd>call claude#_input_cancel()<CR>',
+        \ {'noremap': v:true, 'silent': v:true})
+
+  startinsert!
+endfunction
+
+" Toggle-off: save current float content as draft then close.
+function! s:input_float_save_and_close() abort
+  let l:lines = nvim_buf_get_lines(nvim_win_get_buf(s:input_winid), 0, -1, v:false)
+  while !empty(l:lines) && l:lines[-1] =~# '^\s*$'
+    call remove(l:lines, -1)
+  endwhile
+  let s:input_saved = l:lines
+  call nvim_win_close(s:input_winid, v:true)
+  " s:input_winid is reset by the WinClosed autocmd.
+endfunction
+
+" Send: collect content, close, send to Claude, clear draft.
+function! claude#_input_submit() abort
+  let l:buf   = bufnr('%')
+  let l:win   = nvim_buf_get_var(l:buf, 'claude_input_win')
+  let l:lines = nvim_buf_get_lines(l:buf, 0, -1, v:false)
+
+  while !empty(l:lines) && l:lines[-1] =~# '^\s*$'
+    call remove(l:lines, -1)
+  endwhile
+
+  if nvim_win_is_valid(l:win)
+    call nvim_win_close(l:win, v:true)
+  endif
+  let s:input_saved = []
+
+  if !empty(l:lines)
+    call s:send_input(join(l:lines, "\n"))
+  endif
+endfunction
+
+" Cancel: discard the draft and close.
+function! claude#_input_cancel() abort
+  let l:win = nvim_buf_get_var(bufnr('%'), 'claude_input_win')
+  if nvim_win_is_valid(l:win)
+    call nvim_win_close(l:win, v:true)
+  endif
+  let s:input_saved = []
+endfunction
+
+" ── Vim 8 split fallback ──────────────────────────────────────────────────────
+
+function! s:input_split() abort
+  botright 10new
+  setlocal buftype=nofile bufhidden=wipe nobuflisted noswapfile filetype=markdown
+  setlocal statusline=Claude\ Input\ ——\ <C-s>\ send,\ <Esc>\ cancel
+
+  let s:input_bufnr8 = bufnr('%')
+
+  " Restore saved draft if one exists.
+  if !empty(s:input_saved)
+    call setline(1, s:input_saved)
+    execute len(s:input_saved)
+  endif
+
+  nnoremap <buffer> <silent> <C-s> :call claude#_input_submit_split()<CR>
+  inoremap <buffer> <silent> <C-s> <Esc>:call claude#_input_submit_split()<CR>
+  nnoremap <buffer> <silent> <Esc> :call claude#_input_cancel_split()<CR>
+  nnoremap <buffer> <silent> q     :call claude#_input_cancel_split()<CR>
+
+  startinsert!
+endfunction
+
+" Toggle-off: save split content as draft then close.
+function! s:input_split_save_and_close() abort
+  let l:lines = getbufline(s:input_bufnr8, 1, '$')
+  while !empty(l:lines) && l:lines[-1] =~# '^\s*$'
+    call remove(l:lines, -1)
+  endwhile
+  let s:input_saved = l:lines
+  execute 'bwipeout! ' . s:input_bufnr8
+  let s:input_bufnr8 = -1
+endfunction
+
+" Send: collect content, close, send to Claude, clear draft.
+function! claude#_input_submit_split() abort
+  let l:lines = getline(1, '$')
+  while !empty(l:lines) && l:lines[-1] =~# '^\s*$'
+    call remove(l:lines, -1)
+  endwhile
+  bwipeout!
+  let s:input_bufnr8 = -1
+  let s:input_saved  = []
+  if !empty(l:lines)
+    call s:send_input(join(l:lines, "\n"))
+  endif
+endfunction
+
+" Cancel: discard the draft and close.
+function! claude#_input_cancel_split() abort
+  bwipeout!
+  let s:input_bufnr8 = -1
+  let s:input_saved  = []
+endfunction
+
+" ── common ────────────────────────────────────────────────────────────────────
+
+" Open or focus Claude then send {text}, waiting for startup if needed.
+" When a default model is configured, the text is queued and sent by
+" s:switch_model_if_needed after the model switch settles, avoiding the race
+" condition where both sends fire simultaneously and the user text gets dropped.
+function! s:send_input(text) abort
+  if !s:is_open()
+    if !empty(get(g:, 'claude_default_model', ''))
+      let s:post_model_switch_send = a:text
+      call claude#open()
+    else
+      call claude#open()
+      call s:send_when_ready(a:text, 15)
+    endif
+  else
+    call claude#focus()
+    call s:send(a:text)
+  endif
 endfunction
