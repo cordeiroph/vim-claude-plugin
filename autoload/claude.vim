@@ -98,7 +98,38 @@ endfunction
 " ── private helpers ──────────────────────────────────────────────────────────
 
 function! s:is_open() abort
-  return s:claude_bufnr != -1 && bufexists(s:claude_bufnr)
+  if s:claude_bufnr == -1 || !bufexists(s:claude_bufnr)
+    let s:claude_bufnr  = -1
+    let s:claude_chanid = -1
+    return v:false
+  endif
+  " Vim 8 has no on_exit hook for ++curwin terminals; detect a dead job here.
+  if !has('nvim') && has('terminal')
+    let l:job = term_getjob(s:claude_bufnr)
+    if l:job is v:null || job_status(l:job) ==# 'dead'
+      call s:cleanup_dead_terminal()
+      return v:false
+    endif
+  endif
+  return v:true
+endfunction
+
+" Close the dead terminal window and wipe its buffer so the next
+" claude#open() starts from a clean state.
+function! s:cleanup_dead_terminal() abort
+  let l:bufnr = s:claude_bufnr
+  let s:claude_bufnr  = -1
+  let s:claude_chanid = -1
+  if l:bufnr == -1
+    return
+  endif
+  let l:win = bufwinid(l:bufnr)
+  if l:win != -1
+    call win_execute(l:win, 'close')
+  endif
+  if bufexists(l:bufnr)
+    execute 'bwipeout! ' . l:bufnr
+  endif
 endfunction
 
 " Returns the Ex split command for the configured anchor position.
@@ -136,8 +167,8 @@ function! s:set_buf_options() abort
 endfunction
 
 function! s:on_exit(job_id, code, event) abort
-  let s:claude_bufnr  = -1
-  let s:claude_chanid = -1
+  " Defer cleanup so Neovim finishes settling the terminal buffer state first.
+  call timer_start(0, {-> s:cleanup_dead_terminal()})
 endfunction
 
 " ── explain ──────────────────────────────────────────────────────────────────
