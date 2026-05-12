@@ -129,9 +129,7 @@ function! claude#focus() abort
   let l:win = bufwinid(s:get_bufnr())
   if l:win != -1
     call win_gotoid(l:win)
-    if has('nvim')
-      startinsert
-    endif
+    startinsert
   else
     " Session alive but no visible window — toggle will reopen the split.
     call claude#toggle()
@@ -353,6 +351,7 @@ function! s:send(text) abort
       call term_sendkeys(l:bufnr, "\e[200~" . a:text . "\e[201~\r")
     endif
   endif
+  call claude#focus()
 endfunction
 
 " ── model selection ──────────────────────────────────────────────────────────
