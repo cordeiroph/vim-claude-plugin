@@ -18,9 +18,10 @@ if !exists('g:claude_cmd')
 endif
 
 " Commands
-command! ClaudeOpen   call claude#open()
-command! ClaudeToggle call claude#toggle()
-command! ClaudeClose  call claude#close()
+command! ClaudeOpen    call claude#open()
+command! ClaudeToggle  call claude#toggle()
+command! ClaudeClose   call claude#close()
+command! ClaudeExplain call claude#explain('n')
 
 " Window navigation
 command! ClaudeFocus      call claude#focus()
@@ -35,6 +36,10 @@ if !exists('g:claude_no_default_mappings')
   nnoremap <silent> <leader>ct :ClaudeToggle<CR>
   nnoremap <silent> <leader>cx :ClaudeClose<CR>
   nnoremap <silent> <leader>cf :ClaudeFocus<CR>
+
+  " Explain: normal mode sends whole file, visual mode sends selection
+  nnoremap <silent> <leader>ce :call claude#explain('n')<CR>
+  xnoremap <silent> <leader>ce :<C-u>call claude#explain('v')<CR>
 
   " Move between windows (same as Ctrl-W hjkl but as leader shortcuts)
   nnoremap <silent> <leader>ch :ClaudeWinLeft<CR>

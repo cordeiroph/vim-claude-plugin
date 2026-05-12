@@ -1,5 +1,6 @@
-" Tracks the terminal buffer number
-let s:claude_bufnr = -1
+" Tracks the terminal buffer number and (Neovim) the job channel id
+let s:claude_bufnr  = -1
+let s:claude_chanid = -1
 
 function! claude#open() abort
   if s:is_open()
@@ -12,8 +13,8 @@ function! claude#open() abort
 
   " Open a new terminal running the claude CLI
   if has('nvim')
-    call termopen(g:claude_cmd, {'on_exit': function('s:on_exit')})
-    let s:claude_bufnr = bufnr('%')
+    let s:claude_chanid = termopen(g:claude_cmd, {'on_exit': function('s:on_exit')})
+    let s:claude_bufnr  = bufnr('%')
     startinsert
   elseif has('terminal')
     " ++curwin runs the terminal inside the current split instead of opening another window
@@ -135,8 +136,99 @@ function! s:set_buf_options() abort
 endfunction
 
 function! s:on_exit(job_id, code, event) abort
-  " Neovim callback when the claude process exits
-  let s:claude_bufnr = -1
+  let s:claude_bufnr  = -1
+  let s:claude_chanid = -1
+endfunction
+
+" ── explain ──────────────────────────────────────────────────────────────────
+
+" claude#explain('n') — explain current file
+" claude#explain('v') — explain visual selection
+function! claude#explain(mode) abort
+  let l:ft = &filetype
+
+  if a:mode ==# 'v'
+    let l:lines = s:get_visual_selection()
+    let l:desc  = 'the selected text'
+  else
+    let l:lines = getline(1, '$')
+    let l:fname = expand('%:t')
+    let l:desc  = empty(l:fname) ? 'this code' : 'the file ' . l:fname
+  endif
+
+  let l:fence  = '```' . l:ft
+  let l:prompt = 'Explain ' . l:desc . ":\n\n" . l:fence . "\n"
+        \ . join(l:lines, "\n") . "\n```"
+
+  let l:already_open = s:is_open()
+  if !l:already_open
+    call claude#open()
+  else
+    call claude#focus()
+  endif
+
+  if l:already_open
+    call s:send(l:prompt)
+  else
+    " Poll until Claude has produced output (startup UI visible = input ready).
+    " Max 15 attempts × 300 ms = 4.5 s before giving up.
+    call s:send_when_ready(l:prompt, 15)
+  endif
+endfunction
+
+function! s:get_visual_selection() abort
+  let [l:l1, l:c1] = getpos("'<")[1:2]
+  let [l:l2, l:c2] = getpos("'>")[1:2]
+  let l:lines = getline(l:l1, l:l2)
+  if empty(l:lines)
+    return []
+  endif
+  " Clamp columns to actual selection bounds
+  let l:lines[-1] = l:lines[-1][:l:c2 - 1]
+  let l:lines[0]  = l:lines[0][l:c1 - 1:]
+  return l:lines
+endfunction
+
+" Retry sending every 300 ms until the terminal has produced output,
+" meaning Claude has finished initialising and enabled bracketed-paste mode.
+function! s:send_when_ready(text, retries) abort
+  if !s:is_open()
+    return
+  endif
+  if s:terminal_has_output() || a:retries <= 0
+    call s:send(a:text)
+  else
+    call timer_start(300, {-> s:send_when_ready(a:text, a:retries - 1)})
+  endif
+endfunction
+
+" Returns true once the terminal buffer contains at least one non-empty line.
+function! s:terminal_has_output() abort
+  if has('nvim')
+    let l:lines = nvim_buf_get_lines(s:claude_bufnr, 0, 10, v:false)
+    return !empty(filter(copy(l:lines), {_, v -> v !=# ''}))
+  else
+    for l:i in range(1, 10)
+      if term_getline(s:claude_bufnr, l:i) !=# ''
+        return v:true
+      endif
+    endfor
+    return v:false
+  endif
+endfunction
+
+" Send text to the Claude terminal using bracketed-paste so embedded newlines
+" are not treated as Enter/submit by Claude's input handler.
+function! s:send(text) abort
+  if has('nvim')
+    if s:claude_chanid != -1
+      call chansend(s:claude_chanid, "\e[200~" . a:text . "\e[201~\n")
+    endif
+  else
+    if bufexists(s:claude_bufnr)
+      call term_sendkeys(s:claude_bufnr, "\e[200~" . a:text . "\e[201~\r")
+    endif
+  endif
 endfunction
 
 function! claude#split_cmd() abort
