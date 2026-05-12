@@ -1,6 +1,38 @@
-" Tracks the terminal buffer number and (Neovim) the job channel id
-let s:claude_bufnr  = -1
-let s:claude_chanid = -1
+" ── session storage ──────────────────────────────────────────────────────────
+" When g:claude_tab_sessions=1 (default) each tab gets its own session stored
+" in the t: namespace. t: variables are automatically scoped to the current
+" tab, so no manual tab-tracking is needed for reads/writes.
+" When g:claude_tab_sessions=0 a single global session is kept in s:.
+"
+" Neovim on_exit fires outside the originating tab's context, so we keep a
+" chanid→tabnr map to route cleanup to the right tab.
+let s:g_bufnr      = -1   " global-mode fallback
+let s:g_chanid     = -1
+let s:chanid_to_tab = {}  " nvim: chanid → tabnr (0 = global mode)
+
+function! s:tab_mode() abort
+  return get(g:, 'claude_tab_sessions', 1)
+endfunction
+
+function! s:get_bufnr() abort
+  return s:tab_mode() ? get(t:, 'claude_bufnr', -1) : s:g_bufnr
+endfunction
+
+function! s:get_chanid() abort
+  return s:tab_mode() ? get(t:, 'claude_chanid', -1) : s:g_chanid
+endfunction
+
+function! s:set_session(bufnr, chanid) abort
+  if s:tab_mode()
+    let t:claude_bufnr  = a:bufnr
+    let t:claude_chanid = a:chanid
+  else
+    let s:g_bufnr  = a:bufnr
+    let s:g_chanid = a:chanid
+  endif
+endfunction
+
+" ── public API ───────────────────────────────────────────────────────────────
 
 function! claude#open() abort
   if s:is_open()
@@ -8,18 +40,18 @@ function! claude#open() abort
     return
   endif
 
-  let l:prev_win = win_getid()
   execute s:split_cmd()
 
-  " Open a new terminal running the claude CLI
   if has('nvim')
-    let s:claude_chanid = termopen(g:claude_cmd, {'on_exit': function('s:on_exit')})
-    let s:claude_bufnr  = bufnr('%')
+    let l:tabnr  = tabpagenr()
+    let l:chanid = termopen(g:claude_cmd, {'on_exit': function('s:on_exit')})
+    call s:set_session(bufnr('%'), l:chanid)
+    let s:chanid_to_tab[l:chanid] = s:tab_mode() ? l:tabnr : 0
     startinsert
   elseif has('terminal')
     " ++curwin runs the terminal inside the current split instead of opening another window
     execute 'terminal ++curwin ' . g:claude_cmd
-    let s:claude_bufnr = bufnr('%')
+    call s:set_session(bufnr('%'), -1)
   else
     echoerr 'claude.vim: terminal support required (Vim 8+ or Neovim)'
     close
@@ -37,17 +69,13 @@ function! claude#close() abort
   " Stop the running job before wiping — bwipeout! alone can still error on
   " an active terminal buffer in Vim 8.
   if !has('nvim') && has('terminal')
-    let l:job = term_getjob(s:claude_bufnr)
+    let l:job = term_getjob(s:get_bufnr())
     if l:job isnot v:null && job_status(l:job) ==# 'run'
       call job_stop(l:job)
     endif
   endif
 
-  if bufexists(s:claude_bufnr)
-    execute 'bwipeout! ' . s:claude_bufnr
-  endif
-
-  let s:claude_bufnr = -1
+  call s:cleanup_current()
 endfunction
 
 function! claude#toggle() abort
@@ -56,15 +84,13 @@ function! claude#toggle() abort
     return
   endif
 
-  let l:win = bufwinid(s:claude_bufnr)
+  let l:win = bufwinid(s:get_bufnr())
 
   if l:win != -1
-    " Window is visible — hide it (close the window, keep the buffer)
     call win_execute(l:win, 'hide')
   else
-    " Buffer exists but window is hidden — reopen the split
     execute s:split_cmd()
-    execute 'buffer ' . s:claude_bufnr
+    execute 'buffer ' . s:get_bufnr()
     call s:set_buf_options()
     if has('nvim')
       startinsert
@@ -78,19 +104,17 @@ function! claude#focus() abort
     return
   endif
 
-  let l:win = bufwinid(s:claude_bufnr)
+  let l:win = bufwinid(s:get_bufnr())
   if l:win != -1
     call win_gotoid(l:win)
     if has('nvim')
       startinsert
     endif
   else
-    " Buffer hidden — bring it back and focus
     call claude#toggle()
   endif
 endfunction
 
-" Move from any window in the given direction (standard Ctrl-W navigation)
 function! claude#win_move(dir) abort
   execute 'wincmd ' . a:dir
 endfunction
@@ -98,36 +122,69 @@ endfunction
 " ── private helpers ──────────────────────────────────────────────────────────
 
 function! s:is_open() abort
-  if s:claude_bufnr == -1 || !bufexists(s:claude_bufnr)
-    let s:claude_bufnr  = -1
-    let s:claude_chanid = -1
+  let l:bufnr = s:get_bufnr()
+  if l:bufnr == -1 || !bufexists(l:bufnr)
+    call s:set_session(-1, -1)
     return v:false
   endif
   " Vim 8 has no on_exit hook for ++curwin terminals; detect a dead job here.
   if !has('nvim') && has('terminal')
-    let l:job = term_getjob(s:claude_bufnr)
+    let l:job = term_getjob(l:bufnr)
     if l:job is v:null || job_status(l:job) ==# 'dead'
-      call s:cleanup_dead_terminal()
+      call s:cleanup_current()
       return v:false
     endif
   endif
   return v:true
 endfunction
 
-" Close the dead terminal window and wipe its buffer so the next
-" claude#open() starts from a clean state.
-function! s:cleanup_dead_terminal() abort
-  let l:bufnr = s:claude_bufnr
-  let s:claude_bufnr  = -1
-  let s:claude_chanid = -1
-  if l:bufnr == -1
-    return
+" Clean up the session that belongs to the current tab (or global session).
+function! s:cleanup_current() abort
+  let l:bufnr  = s:get_bufnr()
+  let l:chanid = s:get_chanid()
+  call s:set_session(-1, -1)
+  if l:chanid != -1
+    unlet! s:chanid_to_tab[l:chanid]
   endif
-  let l:win = bufwinid(l:bufnr)
+  let l:win = l:bufnr != -1 ? bufwinid(l:bufnr) : -1
   if l:win != -1
     call win_execute(l:win, 'close')
   endif
-  if bufexists(l:bufnr)
+  if l:bufnr != -1 && bufexists(l:bufnr)
+    execute 'bwipeout! ' . l:bufnr
+  endif
+endfunction
+
+" Neovim on_exit: fires outside the originating tab's context, so we look up
+" the tab via s:chanid_to_tab and use gettabvar/settabvar to reach its state.
+function! s:on_exit(job_id, code, event) abort
+  let l:tabnr = get(s:chanid_to_tab, a:job_id, -1)
+  unlet! s:chanid_to_tab[a:job_id]
+  call timer_start(0, {-> s:cleanup_for_tab(l:tabnr)})
+endfunction
+
+" Clean up a session by explicit tabnr (Neovim on_exit path).
+" tabnr=0 means global mode; tabnr=-1 means unknown (no-op).
+function! s:cleanup_for_tab(tabnr) abort
+  if a:tabnr == -1
+    return
+  endif
+
+  if a:tabnr == 0
+    let l:bufnr    = s:g_bufnr
+    let s:g_bufnr  = -1
+    let s:g_chanid = -1
+  else
+    let l:bufnr = gettabvar(a:tabnr, 'claude_bufnr', -1)
+    call settabvar(a:tabnr, 'claude_bufnr',  -1)
+    call settabvar(a:tabnr, 'claude_chanid', -1)
+  endif
+
+  let l:win = l:bufnr != -1 ? bufwinid(l:bufnr) : -1
+  if l:win != -1
+    call win_execute(l:win, 'close')
+  endif
+  if l:bufnr != -1 && bufexists(l:bufnr)
     execute 'bwipeout! ' . l:bufnr
   endif
 endfunction
@@ -135,7 +192,7 @@ endfunction
 " Returns the Ex split command for the configured anchor position.
 " botright/topleft pin the window to the very edge of the screen.
 function! s:split_cmd() abort
-  let l:size = g:claude_split_size
+  let l:size   = g:claude_split_size
   let l:anchor = get(g:, 'claude_split_anchor', 'right')
   if l:anchor ==# 'left'
     return 'topleft vertical ' . l:size . 'split'
@@ -164,11 +221,6 @@ function! s:set_buf_options() abort
   " Mapping <Esc> to terminal-normal mode lets Vim own the mouse again —
   " visual selection then stays bounded to this window.
   tnoremap <buffer> <Esc> <C-\><C-n>
-endfunction
-
-function! s:on_exit(job_id, code, event) abort
-  " Defer cleanup so Neovim finishes settling the terminal buffer state first.
-  call timer_start(0, {-> s:cleanup_dead_terminal()})
 endfunction
 
 " ── explain ──────────────────────────────────────────────────────────────────
@@ -235,12 +287,13 @@ endfunction
 
 " Returns true once the terminal buffer contains at least one non-empty line.
 function! s:terminal_has_output() abort
+  let l:bufnr = s:get_bufnr()
   if has('nvim')
-    let l:lines = nvim_buf_get_lines(s:claude_bufnr, 0, 10, v:false)
+    let l:lines = nvim_buf_get_lines(l:bufnr, 0, 10, v:false)
     return !empty(filter(copy(l:lines), {_, v -> v !=# ''}))
   else
     for l:i in range(1, 10)
-      if term_getline(s:claude_bufnr, l:i) !=# ''
+      if term_getline(l:bufnr, l:i) !=# ''
         return v:true
       endif
     endfor
@@ -252,12 +305,14 @@ endfunction
 " are not treated as Enter/submit by Claude's input handler.
 function! s:send(text) abort
   if has('nvim')
-    if s:claude_chanid != -1
-      call chansend(s:claude_chanid, "\e[200~" . a:text . "\e[201~\n")
+    let l:chanid = s:get_chanid()
+    if l:chanid != -1
+      call chansend(l:chanid, "\e[200~" . a:text . "\e[201~\n")
     endif
   else
-    if bufexists(s:claude_bufnr)
-      call term_sendkeys(s:claude_bufnr, "\e[200~" . a:text . "\e[201~\r")
+    let l:bufnr = s:get_bufnr()
+    if l:bufnr != -1 && bufexists(l:bufnr)
+      call term_sendkeys(l:bufnr, "\e[200~" . a:text . "\e[201~\r")
     endif
   endif
 endfunction

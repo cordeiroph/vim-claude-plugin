@@ -17,6 +17,12 @@ if !exists('g:claude_cmd')
   let g:claude_cmd = 'claude'
 endif
 
+" g:claude_tab_sessions: 1 = each tab gets its own Claude session (default)
+"                        0 = single shared session across all tabs
+if !exists('g:claude_tab_sessions')
+  let g:claude_tab_sessions = 1
+endif
+
 " Commands
 command! ClaudeOpen    call claude#open()
 command! ClaudeToggle  call claude#toggle()
