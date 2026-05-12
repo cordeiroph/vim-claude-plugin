@@ -1,10 +1,10 @@
 # claude.vim
 
-A Vim/Neovim plugin that opens the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) in a terminal split, giving you a persistent AI session alongside your code.
+A Vim plugin that opens the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) in a terminal split, giving you a persistent AI session alongside your code.
 
 ## Requirements
 
-- Vim 8.1+ (with `+terminal`) or Neovim 0.5+
+- Vim 8.1+ (with `+terminal`)
 - The `claude` CLI on your `$PATH`
 
 ## Installation
@@ -15,13 +15,7 @@ Using [vim-plug](https://github.com/junegunn/vim-plug):
 Plug 'pedrocordeiro/claude.vim'
 ```
 
-Using [lazy.nvim](https://github.com/folke/lazy.nvim):
-
-```lua
-{ 'pedrocordeiro/claude.vim' }
-```
-
-Or copy `plugin/claude.vim` and `autoload/claude.vim` into your plugin directory manually.
+Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into your plugin directory manually.
 
 ## Usage
 
@@ -30,31 +24,33 @@ Or copy `plugin/claude.vim` and `autoload/claude.vim` into your plugin directory
 | `<leader>co` | `:ClaudeOpen` | Open Claude in a split |
 | `<leader>ct` | `:ClaudeToggle` | Show/hide the Claude window |
 | `<leader>cx` | `:ClaudeClose` | Close Claude and end the session |
-| `<leader>cf` | `:ClaudeFocus` | Move cursor to the Claude window |
+| `<leader>cf` | `:ClaudeFocus` | Move cursor to the Claude window (enters insert mode) |
 | `<leader>ce` | `:ClaudeExplain` | Explain the current file (normal) or selection (visual) |
-| `<leader>ci` | `:ClaudeInput` | Open floating input window for multi-line messages |
+| `<leader>ci` | `:ClaudeInput` | Toggle the input window for multi-line messages |
 | `<leader>cm` | `:ClaudeModel` | Switch model interactively |
 | `<leader>ch/l/k/j` | `:ClaudeWin*` | Navigate between windows |
 
 Inside the Claude terminal, press `<Esc><Esc>` to enter terminal-normal mode (so Vim handles the cursor and mouse). Single `<Esc>` is passed through to Claude.
 
-## Floating input window
+## Input window
 
-`<leader>ci` opens a dedicated buffer for writing long, multi-line prompts:
+`<leader>ci` toggles a dedicated buffer for writing long, multi-line prompts. It opens as a 10-line split at the bottom. Pressing `<leader>ci` again discards the content and closes the window. To preserve your text, press `<Esc>` instead — it saves a draft and hides the window; reopening restores it.
 
-- **Neovim**: a centred floating window with rounded borders. Title bar shows "Claude Input"; on Neovim 0.10+ the footer shows the key hints.
-- **Vim 8**: a 10-line horizontal split at the bottom; the statusline shows the hints.
+The buffer is a `.md` file, so syntax highlighting and Copilot completions work out of the box.
 
 | Key | Action |
 |-----|--------|
 | `<C-s>` (insert or normal) | Send the message and close the window |
-| `<Esc>` / `q` (normal) | Cancel and close without sending |
+| `<Esc>` (normal) | Save draft and hide the window |
+| `q` (normal) | Discard draft and close |
+
+Type `/` to trigger slash-command completion. Type `@` to complete file paths or agent names — file completions require [`rg`](https://github.com/BurntSushi/ripgrep) on your `$PATH` and support basename matching (e.g. `@cla` matches `doc/claude.txt`).
 
 Claude is opened automatically if no session is running.
 
 ## Configuration
 
-All settings are optional. Add them to your `vimrc` / `init.vim`:
+All settings are optional. Add them to your `vimrc`:
 
 ```vim
 " Which edge the Claude window appears on: 'right' (default), 'left', 'top', 'bottom'

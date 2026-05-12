@@ -45,7 +45,7 @@ command! ClaudeToggle  call claude#toggle()
 command! ClaudeClose   call claude#close()
 command! ClaudeExplain call claude#explain('n')
 command! ClaudeModel   call claude#select_model()
-command! ClaudeInput   call claude#input()
+command! ClaudeInput   call claude#input#open()
 
 " Window navigation commands (wrappers around wincmd h/l/k/j).
 command! ClaudeFocus      call claude#focus()
@@ -58,7 +58,10 @@ command! ClaudeWinDown    call claude#win_move('j')
 
 augroup claude_plugin
   autocmd!
-  " Stop all running Claude jobs before Vim exits to prevent E947.
+  " QuitPre fires before Vim's terminal-job check, so stopping jobs here
+  " prevents E947 from aborting :q / :qall.
+  autocmd QuitPre     * call claude#_stop_jobs()
+  " VimLeavePre fires after Vim commits to exiting; wipe the buffers then.
   autocmd VimLeavePre * call claude#close_all()
 augroup END
 

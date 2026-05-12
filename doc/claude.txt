@@ -1,4 +1,4 @@
-*claude.txt*  Claude CLI integration for Vim and Neovim
+*claude.txt*  Claude CLI integration for Vim
 
 ==============================================================================
 CONTENTS                                                        *claude-contents*
@@ -16,7 +16,7 @@ CONTENTS                                                        *claude-contents
 ==============================================================================
 1. INTRODUCTION                                             *claude-introduction*
 
-claude.vim opens the Claude CLI in a terminal split inside Vim or Neovim. Each
+claude.vim opens the Claude CLI in a terminal split inside Vim. Each
 editor tab gets its own independent Claude session by default. You can send the
 current file or a visual selection to Claude for explanation, switch models
 on the fly, and navigate between your code and the Claude window using a small
@@ -25,9 +25,11 @@ set of commands and key mappings.
 ==============================================================================
 2. REQUIREMENTS                                             *claude-requirements*
 
-  - Vim 8.1+ (with |+terminal|) or Neovim 0.5+
+  - Vim 8.1+ (with |+terminal|)
   - The `claude` CLI installed and on $PATH
     (https://docs.anthropic.com/en/docs/claude-code)
+  - `rg` (ripgrep) on $PATH for @ file completions in the input window
+    (https://github.com/BurntSushi/ripgrep)
 
 ==============================================================================
 3. CONFIGURATION                                           *claude-configuration*
@@ -136,9 +138,12 @@ g:claude_no_default_mappings~
 ------------------------------------------------------------------------------
                                                                  *:ClaudeInput*
 :ClaudeInput
-  Open a floating input window (Neovim) or a horizontal split (Vim 8) for
-  composing a multi-line message. Press <C-s> to send the text to Claude;
-  press <Esc> or `q` (normal mode) to discard and close.
+  Toggle the input window for composing multi-line messages. If the window is
+  already open, the content is discarded and the window closes.
+
+  Press <C-s> to send the buffer contents to Claude; press <Esc> (normal
+  mode) to save the draft and hide the window; press `q` (normal mode) to
+  discard the draft and close.
 
   Opens a new Claude session automatically if none is running.
 
@@ -147,8 +152,9 @@ g:claude_no_default_mappings~
 ------------------------------------------------------------------------------
                                                                  *:ClaudeFocus*
 :ClaudeFocus
-  Move the cursor to the Claude window. Opens a new session if none exists,
-  or reveals a hidden window if the session is alive but not displayed.
+  Move the cursor to the Claude window and enter insert mode. Opens a new
+  session if none exists, or reveals a hidden window if the session is alive
+  but not displayed.
 
 ------------------------------------------------------------------------------
                                                                *:ClaudeWinLeft*
@@ -180,7 +186,7 @@ Default mappings (disabled when |g:claude_no_default_mappings| is set):
   <leader>cx    Close Claude (|:ClaudeClose|)
   <leader>cf    Focus Claude window (|:ClaudeFocus|)
   <leader>ce    Explain current file (normal mode) or selection (visual mode)
-  <leader>ci    Open floating input window (|:ClaudeInput|)
+  <leader>ci    Toggle input window (|:ClaudeInput|)
   <leader>cm    Switch model (|:ClaudeModel|)
   <leader>ch    Move cursor left  (|:ClaudeWinLeft|)
   <leader>cl    Move cursor right (|:ClaudeWinRight|)
@@ -221,30 +227,41 @@ mid-conversation. Opens a new session first if none is running.
 ==============================================================================
 8. INPUT WINDOW                                                   *claude-input*
 
-|:ClaudeInput| (or |<leader>ci|) opens a dedicated buffer for composing
-multi-line prompts without the noise of the terminal interface.
+|:ClaudeInput| (or |<leader>ci|) toggles a dedicated buffer for composing
+multi-line prompts. A 10-line horizontal split opens at the bottom of the
+screen.
 
-Neovim~
-  A centred floating window opens with rounded borders. On Neovim 0.9+ the
-  title bar reads "Claude Input"; on 0.10+ the footer shows the key hints.
-  The buffer uses `filetype=markdown` so syntax highlighting works out of the
-  box.
+Pressing |<leader>ci| again discards the content and closes the window.
+To preserve work-in-progress text, press <Esc> instead — it saves the current
+text as a draft and hides the window. The draft is automatically restored the
+next time the window opens.
 
-Vim 8~
-  A 10-line horizontal split opens at the bottom of the screen. The
-  statusline shows the send/cancel keys.
+The buffer is backed by a temporary `.md` file, so filetype-aware features
+work: syntax highlighting, spell checking, and Copilot completions (if
+vim-copilot is installed).
 
 Keys inside the input window~
   <C-s>    Send the buffer contents to Claude and close the window.
            Opens a new session automatically if Claude is not running.
-  <Esc>    Cancel and close (normal mode).
-  q        Cancel and close (normal mode).
+  <Esc>    Save the draft and hide the window (normal mode).
+  q        Discard the draft and close (normal mode).
+
+Completions~
+  /        Trigger slash-command completion. Built-in Claude commands plus
+           any custom commands found in `.claude/commands/` (project-level)
+           or `~/.claude/commands/` (user-level) are listed.
+  @        Trigger file and agent completion. File completions require `rg`
+           (ripgrep) on $PATH and honour `.gitignore`. Both full-path and
+           basename prefix matches are returned (e.g. `@cla` will match
+           `doc/claude.txt`). Custom agents from `.claude/agents/` and
+           `~/.claude/agents/` are also listed.
 
 Sending behaviour~
   Text is sent using the same bracketed-paste mechanism as |:ClaudeExplain|,
   so embedded newlines are preserved and do not trigger premature submission.
   If Claude is not yet running, the plugin opens a session and waits up to
-  4.5 seconds for it to initialise before sending.
+  4.5 seconds for it to initialise before sending. After sending, the cursor
+  moves to the Claude terminal automatically.
 
 ==============================================================================
 9. LICENSE                                                       *claude-license*
