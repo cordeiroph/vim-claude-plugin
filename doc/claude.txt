@@ -87,18 +87,6 @@ g:claude_models~
           \ ]
 <
 ------------------------------------------------------------------------------
-                                                        *g:claude_default_model*
-g:claude_default_model~
-  Model to activate automatically on every new Claude session via `/model`.
-  Set to an empty string to keep Claude's own default.
-
-  Default: 'claude-sonnet-4-6'
-  Example: >
-    let g:claude_default_model = 'claude-opus-4-7'
-    " or disable auto-switching:
-    let g:claude_default_model = ''
-<
-------------------------------------------------------------------------------
                                                   *g:claude_no_default_mappings*
 g:claude_no_default_mappings~
   Set to 1 before the plugin loads to suppress all default key mappings.
@@ -225,18 +213,10 @@ This is useful when you want Claude context to persist as you switch tabs.
 ==============================================================================
 7. MODEL SELECTION                                              *claude-models*
 
-claude.vim can switch Claude models without leaving Vim.
-
-Automatic switch on open~
-  When a new session starts, claude.vim waits for the CLI to finish its
-  startup output and then sends `/model <g:claude_default_model>`. Set
-  |g:claude_default_model| to control which model is used, or set it to ''
-  to keep whichever model Claude defaults to.
-
-Interactive picker~
-  |:ClaudeModel| (or |<leader>cm|) presents a numbered list built from
-  |g:claude_models| and sends `/model <name>` for the chosen entry. You can
-  call this at any point during a session to switch models mid-conversation.
+|:ClaudeModel| (or |<leader>cm|) presents a numbered list built from
+|g:claude_models| and sends `/model <name>` to Claude for the chosen entry.
+You can call this at any point during a session to switch models
+mid-conversation. Opens a new session first if none is running.
 
 ==============================================================================
 8. INPUT WINDOW                                                   *claude-input*

@@ -38,12 +38,6 @@ if !exists('g:claude_models')
         \ ]
 endif
 
-" g:claude_default_model — model sent as '/model <name>' on every new session.
-" Set to '' to keep Claude's own default without switching.
-if !exists('g:claude_default_model')
-  let g:claude_default_model = 'claude-sonnet-4-6'
-endif
-
 " ── commands ─────────────────────────────────────────────────────────────────
 
 command! ClaudeOpen    call claude#open()

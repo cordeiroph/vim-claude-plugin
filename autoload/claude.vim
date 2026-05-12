@@ -11,7 +11,6 @@
 let s:g_bufnr       = -1  " buffer nr for the global-mode terminal
 let s:g_chanid      = -1  " channel id for the global-mode terminal (nvim only)
 let s:chanid_to_tab = {}  " nvim: maps chanid → tabnr (0 = global mode)
-let s:post_model_switch_send = ''  " text queued to send right after model switch
 
 " Returns 1 when per-tab sessions are enabled (the default).
 function! s:tab_mode() abort
@@ -75,13 +74,6 @@ function! claude#open() abort
   endif
 
   call s:set_buf_options()
-
-  " Send /model <name> once the terminal has produced output, so Claude starts
-  " on the configured default model.
-  let l:model = get(g:, 'claude_default_model', '')
-  if !empty(l:model)
-    call s:switch_model_if_needed(l:model, 15)
-  endif
 endfunction
 
 " Close the Claude terminal for the current tab and wipe its buffer.
@@ -325,26 +317,6 @@ function! s:send_when_ready(text, retries) abort
   endif
 endfunction
 
-" Poll the terminal every 300 ms until output appears, then send the /model
-" command. Used on session open to ensure Claude starts on the right model.
-" After the switch, fires any text queued by s:send_input (with a short delay
-" so Claude finishes processing the model change before receiving user input).
-function! s:switch_model_if_needed(model, retries) abort
-  if !s:is_open()
-    let s:post_model_switch_send = ''
-    return
-  endif
-  if s:terminal_scan('\S') || a:retries <= 0
-    call s:send('/model ' . a:model)
-    if !empty(s:post_model_switch_send)
-      let l:text = s:post_model_switch_send
-      let s:post_model_switch_send = ''
-      call timer_start(300, {-> s:send_when_ready(l:text, 15)})
-    endif
-  else
-    call timer_start(300, {-> s:switch_model_if_needed(a:model, a:retries - 1)})
-  endif
-endfunction
 
 " Scan up to 50 lines of the Claude terminal buffer for lines matching
 " {pattern}. Returns true on the first match, false if none found.
@@ -605,18 +577,10 @@ endfunction
 " ── common ────────────────────────────────────────────────────────────────────
 
 " Open or focus Claude then send {text}, waiting for startup if needed.
-" When a default model is configured, the text is queued and sent by
-" s:switch_model_if_needed after the model switch settles, avoiding the race
-" condition where both sends fire simultaneously and the user text gets dropped.
 function! s:send_input(text) abort
   if !s:is_open()
-    if !empty(get(g:, 'claude_default_model', ''))
-      let s:post_model_switch_send = a:text
-      call claude#open()
-    else
-      call claude#open()
-      call s:send_when_ready(a:text, 15)
-    endif
+    call claude#open()
+    call s:send_when_ready(a:text, 15)
   else
     call claude#focus()
     call s:send(a:text)

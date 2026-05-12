@@ -76,9 +76,6 @@ let g:claude_models = [
       \ 'claude-haiku-4-5-20251001',
       \ ]
 
-" Model activated automatically on every new session; '' to keep Claude's default
-let g:claude_default_model = 'claude-sonnet-4-6'
-
 " Set to 1 to disable all default mappings
 let g:claude_no_default_mappings = 0
 ```
@@ -89,7 +86,7 @@ By default each Vim tab page gets its own Claude session. Opening a new tab and 
 
 ## Model switching
 
-On session start the plugin waits for the CLI to finish initialising and then sends `/model <g:claude_default_model>`. During a session `:ClaudeModel` (or `<leader>cm`) shows a numbered picker and switches models without interrupting the conversation.
+`:ClaudeModel` (or `<leader>cm`) shows a numbered picker and switches models without interrupting the conversation. Opens a new session first if none is running.
 
 ## Help
 
