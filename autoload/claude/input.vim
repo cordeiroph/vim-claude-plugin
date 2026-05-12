@@ -25,6 +25,14 @@ let s:slash_commands_base = [
       \ {'word': '/vim',          'menu': 'Enter Vim mode'},
       \ ]
 
+let s:agents_base = [
+      \ {'word': '@claude',          'abbr': 'claude',          'menu': '[Built-in Agent]'},
+      \ {'word': '@Explore',         'abbr': 'Explore',         'menu': '[Built-in Agent]'},
+      \ {'word': '@general-purpose', 'abbr': 'general-purpose', 'menu': '[Built-in Agent]'},
+      \ {'word': '@Plan',            'abbr': 'Plan',            'menu': '[Built-in Agent]'},
+      \ {'word': '@statusline-setup','abbr': 'statusline-setup','menu': '[Built-in Agent]'},
+      \ ]
+
 " Script-level storage for global mode (g:claude_tab_sessions=0).
 let s:g_commands = []
 let s:g_agents   = []
@@ -58,8 +66,8 @@ function! claude#input#collect_data() abort
   endfor
   call s:set_session_commands(l:cmds)
 
-  " Agents: project-level + user-level.
-  let l:agents = []
+  " Agents: built-ins + project-level + user-level.
+  let l:agents = copy(s:agents_base)
   for l:f in glob(getcwd() . '/.claude/agents/*.md', 0, 1)
         \ + glob(expand('~') . '/.claude/agents/*.md', 0, 1)
     call add(l:agents, {
