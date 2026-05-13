@@ -12,7 +12,7 @@ A Vim plugin that opens the [Claude CLI](https://docs.anthropic.com/en/docs/clau
 Using [vim-plug](https://github.com/junegunn/vim-plug):
 
 ```vim
-Plug 'pedrocordeiro/claude.vim'
+Plug 'cordeiroph/claude.vim'
 ```
 
 Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into your plugin directory manually.
