@@ -1,0 +1,43 @@
+" Tests for claude#split_cmd() — pure function, no side effects.
+
+Before:
+  let g:_test_saved_anchor = get(g:, 'claude_split_anchor', 'right')
+  let g:_test_saved_size   = get(g:, 'claude_split_size',   80)
+
+After:
+  let g:claude_split_anchor = g:_test_saved_anchor
+  let g:claude_split_size   = g:_test_saved_size
+
+" ── anchor variants ──────────────────────────────────────────────────────────
+
+Execute (right anchor is the default when g:claude_split_anchor is unset):
+  unlet! g:claude_split_anchor
+  let g:claude_split_size = 80
+  AssertEqual 'botright vertical 80split', claude#split_cmd()
+
+Execute (right anchor — explicit):
+  let g:claude_split_anchor = 'right'
+  let g:claude_split_size   = 100
+  AssertEqual 'botright vertical 100split', claude#split_cmd()
+
+Execute (left anchor):
+  let g:claude_split_anchor = 'left'
+  let g:claude_split_size   = 60
+  AssertEqual 'topleft vertical 60split', claude#split_cmd()
+
+Execute (top anchor):
+  let g:claude_split_anchor = 'top'
+  let g:claude_split_size   = 20
+  AssertEqual 'topleft 20split', claude#split_cmd()
+
+Execute (bottom anchor):
+  let g:claude_split_anchor = 'bottom'
+  let g:claude_split_size   = 15
+  AssertEqual 'botright 15split', claude#split_cmd()
+
+" ── size is embedded correctly ───────────────────────────────────────────────
+
+Execute (custom size is reflected in the command):
+  let g:claude_split_anchor = 'right'
+  let g:claude_split_size   = 120
+  AssertEqual 'botright vertical 120split', claude#split_cmd()

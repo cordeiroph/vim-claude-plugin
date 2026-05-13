@@ -1,0 +1,115 @@
+" Tests for claude#input#complete() — the slash-command and @-file/agent
+" completion function used in the input window.
+"
+" findstart mode (a:findstart=1): scans the current line, returns the column
+" where the completion token begins, or -3 to opt out.
+"
+" base mode (a:findstart=0): filters commands/agents/files by a:base prefix.
+" Session data is seeded via claude#input#collect_data() in the Before block.
+
+Before:
+  " Global session mode so data goes to s: vars, no tab-local state needed.
+  let g:_test_saved_tab_mode = get(g:, 'claude_tab_sessions', 1)
+  let g:claude_tab_sessions = 0
+
+  " Temp project dir with one custom command and one custom agent.
+  let g:_test_dir = tempname()
+  call mkdir(g:_test_dir . '/.claude/commands', 'p')
+  call mkdir(g:_test_dir . '/.claude/agents',   'p')
+  call writefile([], g:_test_dir . '/.claude/commands/deploy.md')
+  call writefile([], g:_test_dir . '/.claude/agents/my-reviewer.md')
+
+  let g:_test_orig_cwd = getcwd()
+  execute 'cd ' . fnameescape(g:_test_dir)
+  call claude#input#collect_data()
+  execute 'cd ' . fnameescape(g:_test_orig_cwd)
+
+After:
+  let g:claude_tab_sessions = g:_test_saved_tab_mode
+  call delete(g:_test_dir, 'rf')
+
+" ── findstart: no trigger character ──────────────────────────────────────────
+
+Execute (plain text with no trigger returns -3):
+  enew
+  call setline(1, 'hello world')
+  call cursor(1, 11)
+  AssertEqual -3, claude#input#complete(1, '')
+
+Execute (slash not at word start returns -3):
+  enew
+  call setline(1, 'a/clear')
+  call cursor(1, 7)
+  AssertEqual -3, claude#input#complete(1, '')
+
+" ── findstart: slash trigger ─────────────────────────────────────────────────
+
+Execute (slash at start of line triggers completion at column 0):
+  enew
+  call setline(1, '/clear')
+  call cursor(1, 6)
+  AssertEqual 0, claude#input#complete(1, '')
+
+Execute (slash after a space triggers completion at slash position):
+  enew
+  call setline(1, 'hello /clear')
+  call cursor(1, 12)
+  " 'hello /clear' — '/' is at 0-indexed position 6
+  AssertEqual 6, claude#input#complete(1, '')
+
+" ── findstart: @ trigger ─────────────────────────────────────────────────────
+
+Execute (at-sign at line start triggers at column 0):
+  enew
+  call setline(1, '@src')
+  call cursor(1, 4)
+  AssertEqual 0, claude#input#complete(1, '')
+
+Execute (at-sign after text triggers at at-sign position):
+  enew
+  call setline(1, 'fix @src')
+  call cursor(1, 8)
+  " 'fix @src' — '@' is at 0-indexed position 4
+  AssertEqual 4, claude#input#complete(1, '')
+
+" ── base mode: slash commands ────────────────────────────────────────────────
+
+Execute (slash prefix returns built-in commands matching the prefix):
+  let results = claude#input#complete(0, '/cl')
+  let words = map(copy(results), {_, c -> c.word})
+  Assert index(words, '/clear') >= 0, '/clear not found in results for /cl'
+
+Execute (slash prefix returns custom command loaded from disk):
+  let results = claude#input#complete(0, '/dep')
+  let words = map(copy(results), {_, c -> c.word})
+  Assert index(words, '/deploy') >= 0, '/deploy not found in results for /dep'
+
+Execute (slash prefix with no match returns empty list):
+  let results = claude#input#complete(0, '/zzz_no_such_command')
+  AssertEqual [], results
+
+Execute (slash prefix is case-sensitive — uppercase does not match):
+  let results = claude#input#complete(0, '/CL')
+  AssertEqual [], results
+
+" ── base mode: @ agents ──────────────────────────────────────────────────────
+
+Execute (at prefix returns matching built-in agent):
+  let results = claude#input#complete(0, '@Ex')
+  let agent_results = filter(copy(results),
+        \ {_, r -> get(r, 'menu', '') =~# '\[.*Agent\]'})
+  let abbrs = map(copy(agent_results), {_, a -> a.abbr})
+  Assert index(abbrs, 'Explore') >= 0, 'Explore not found in results for @Ex'
+
+Execute (at prefix returns custom agent loaded from disk):
+  let results = claude#input#complete(0, '@my')
+  let agent_results = filter(copy(results),
+        \ {_, r -> get(r, 'menu', '') =~# '\[.*Agent\]'})
+  let abbrs = map(copy(agent_results), {_, a -> a.abbr})
+  Assert index(abbrs, 'my-reviewer') >= 0, 'my-reviewer not found for @my'
+
+Execute (at prefix with no agent match returns no agent items):
+  let results = claude#input#complete(0, '@zzz_no_such_agent')
+  let agent_results = filter(copy(results),
+        \ {_, r -> get(r, 'menu', '') =~# '\[.*Agent\]'})
+  AssertEqual [], agent_results

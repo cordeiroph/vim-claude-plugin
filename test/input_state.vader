@@ -1,0 +1,84 @@
+" Tests for the input window state management:
+"   claude#input#open()   — opens the split, sets t:claude_input_bufnr
+"   claude#input#cancel() — discards draft, resets state
+"   claude#input#submit() — clears state; does NOT call _send_input when
+"                           the buffer is empty
+
+Before:
+  " Reset tab-local input state before each test.
+  let t:claude_input_bufnr = -1
+  let t:claude_input_saved = []
+  " Use per-tab sessions (default).
+  let g:claude_tab_sessions = 1
+
+After:
+  stopinsert
+  " If a stray input buffer survived, wipe it.
+  let stray = get(t:, 'claude_input_bufnr', -1)
+  if stray != -1 && bufexists(stray)
+    execute 'bwipeout! ' . stray
+  endif
+  let t:claude_input_bufnr = -1
+  let t:claude_input_saved = []
+
+" ── open ─────────────────────────────────────────────────────────────────────
+
+Execute (open sets t:claude_input_bufnr to a valid buffer number):
+  call claude#input#open()
+  let bufnr = get(t:, 'claude_input_bufnr', -1)
+  Assert bufnr != -1, 'claude_input_bufnr should be set after open()'
+  Assert bufexists(bufnr), 'buffer should exist after open()'
+
+Execute (calling open a second time when panel is visible discards and closes it):
+  call claude#input#open()
+  let first = get(t:, 'claude_input_bufnr', -1)
+  Assert first != -1, 'first open should create buffer'
+  " Second open on an existing panel calls cancel(), resetting state.
+  call claude#input#open()
+  AssertEqual -1, get(t:, 'claude_input_bufnr', -1)
+
+" ── cancel ───────────────────────────────────────────────────────────────────
+
+Execute (cancel resets bufnr to -1):
+  call claude#input#open()
+  call claude#input#cancel()
+  AssertEqual -1, get(t:, 'claude_input_bufnr', -1)
+
+Execute (cancel clears any saved draft):
+  let t:claude_input_saved = ['some previous draft']
+  call claude#input#open()
+  call claude#input#cancel()
+  AssertEqual [], get(t:, 'claude_input_saved', ['not cleared'])
+
+Execute (cancel wipes the input buffer):
+  call claude#input#open()
+  let bufnr = get(t:, 'claude_input_bufnr', -1)
+  call claude#input#cancel()
+  Assert !bufexists(bufnr), 'buffer should be wiped after cancel()'
+
+" ── submit ───────────────────────────────────────────────────────────────────
+
+Execute (submit with empty buffer resets state without calling _send_input):
+  call claude#input#open()
+  " The buffer contains one blank line by default; submit should skip send.
+  " If _send_input were called it would try to launch Claude and would error
+  " visibly, failing the test. Verifying state cleanup is sufficient.
+  call claude#input#submit()
+  AssertEqual -1, get(t:, 'claude_input_bufnr', -1)
+  AssertEqual [], get(t:, 'claude_input_saved', ['not cleared'])
+
+Execute (submit clears the saved draft):
+  let t:claude_input_saved = ['leftover draft']
+  call claude#input#open()
+  call claude#input#submit()
+  AssertEqual [], get(t:, 'claude_input_saved', ['not cleared'])
+
+" ── draft persistence ─────────────────────────────────────────────────────────
+
+Execute (open restores a previously saved draft into the buffer):
+  let t:claude_input_saved = ['line one', 'line two']
+  call claude#input#open()
+  let bufnr = get(t:, 'claude_input_bufnr', -1)
+  Assert bufnr != -1, 'buffer should exist'
+  let lines = getbufline(bufnr, 1, '$')
+  AssertEqual ['line one', 'line two'], lines
