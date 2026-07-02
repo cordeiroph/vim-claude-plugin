@@ -372,6 +372,70 @@ function! claude#select_model() abort
   endif
 endfunction
 
+" ── session resume ───────────────────────────────────────────────────────────
+
+" Present the 10 most recent Claude sessions for the current working directory
+" and reopen the chosen one with `claude --resume <id>`. If a session is
+" already running in this tab, the resumed session opens in a new tab.
+function! claude#resume() abort
+  let l:slug = substitute(getcwd(), '/', '-', 'g')
+  let l:dir  = expand('~/.claude/projects/') . l:slug
+
+  let l:raw   = system('ls -t ' . shellescape(l:dir) . '/*.jsonl 2>/dev/null | head -10')
+  let l:paths = filter(split(l:raw, "\n"), 'v:val !=# ""')
+
+  if empty(l:paths)
+    echom 'No previous sessions found for this directory.'
+    return
+  endif
+
+  let l:menu = ['Resume Claude session:']
+  let l:i = 1
+  for l:path in l:paths
+    let l:ts = strftime('%Y-%m-%d %H:%M', getftime(l:path))
+    let l:snippet = system(
+          \ 'python3 -c "import json,sys;'
+          \ . '[print(next((e[\"message\"][\"content\"][:60]'
+          \ . ' if isinstance(e[\"message\"][\"content\"],str)'
+          \ . ' else next((b[\"text\"][:60] for b in e[\"message\"][\"content\"]'
+          \ . ' if b.get(\"type\")==\"text\"),\"...\"),'
+          \ . ' for e in (json.loads(l) for l in open(sys.argv[1]) if l.strip())'
+          \ . ' if e.get(\"type\")==\"user\"),\"(no message)\")),'
+          \ . 'None]" ' . shellescape(l:path) . ' 2>/dev/null')
+    let l:snippet = substitute(l:snippet, '\n', '', 'g')
+    if empty(l:snippet)
+      let l:snippet = '(no message)'
+    endif
+    call add(l:menu, printf('%d. %s — %s', l:i, l:ts, l:snippet))
+    let l:i += 1
+  endfor
+
+  let l:choice = inputlist(l:menu)
+  if l:choice < 1 || l:choice > len(l:paths)
+    return
+  endif
+
+  let l:session_id = fnamemodify(l:paths[l:choice - 1], ':t:r')
+
+  if s:is_open()
+    tabnew
+  endif
+
+  execute s:split_cmd()
+
+  if has('terminal')
+    execute 'terminal ++curwin ' . g:claude_cmd . ' --resume ' . l:session_id
+    call s:set_session(bufnr('%'))
+    call claude#input#collect_data()
+  else
+    echoerr 'claude.vim: terminal support required (Vim 8+)'
+    close
+    return
+  endif
+
+  call s:set_buf_options()
+endfunction
+
 " Expose s:split_cmd() publicly so it can be used in tests.
 function! claude#split_cmd() abort
   return s:split_cmd()

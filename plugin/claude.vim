@@ -45,6 +45,7 @@ command! ClaudeToggle  call claude#toggle()
 command! ClaudeClose   call claude#close()
 command! ClaudeExplain call claude#explain('n')
 command! ClaudeModel   call claude#select_model()
+command! ClaudeResume  call claude#resume()
 command! ClaudeInput   call claude#input#open()
 
 " Window navigation commands (wrappers around wincmd h/l/k/j).
@@ -81,6 +82,9 @@ if !exists('g:claude_no_default_mappings')
 
   " Switch model for the current session.
   nnoremap <silent> <leader>cm :ClaudeModel<CR>
+
+  " Resume a previous session from the last 10 for this directory.
+  nnoremap <silent> <leader>cr :ClaudeResume<CR>
 
   " Floating input window for composing multi-line messages.
   nnoremap <silent> <leader>ci :ClaudeInput<CR>
