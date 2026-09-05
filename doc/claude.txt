@@ -216,6 +216,11 @@ reclaims its buffer.
 Set |g:claude_tab_sessions| = 0 to use a single shared session for all tabs.
 This is useful when you want Claude context to persist as you switch tabs.
 
+A session ends only when you run |:ClaudeClose|, close its tab, or quit Vim.
+Closing an ordinary split window leaves it running, and so does hiding the
+Claude window with `:q` or |:ClaudeToggle| — the process keeps working and the
+window can be brought back with |:ClaudeToggle| or |:ClaudeFocus|.
+
 ==============================================================================
 7. MODEL SELECTION                                              *claude-models*
 

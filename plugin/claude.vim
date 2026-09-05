@@ -59,9 +59,18 @@ command! ClaudeWinDown    call claude#win_move('j')
 
 augroup claude_plugin
   autocmd!
-  " QuitPre fires before Vim's terminal-job check, so stopping jobs here
-  " prevents E947 from aborting :q / :qall.
-  autocmd QuitPre     * call claude#_stop_jobs()
+  " Vim refuses to exit while a terminal job is running (E947), so the jobs
+  " must be stopped before that check runs. ExitPre fires just after QuitPre
+  " but only for a :q / :wq / :qall that actually ends the session, so a live
+  " session survives closing an ordinary split. QuitPre must not be used here:
+  " it fires for every window close and would kill the session each time.
+  if exists('##ExitPre')
+    autocmd ExitPre * call claude#_stop_jobs()
+  else
+    " Vim 8.1 before patch 8.1.0446 has no ExitPre; fall back to QuitPre with
+    " a guard so only the quit that closes the last window stops the jobs.
+    autocmd QuitPre * call claude#_quit_pre()
+  endif
   " VimLeavePre fires after Vim commits to exiting; wipe the buffers then.
   autocmd VimLeavePre * call claude#close_all()
 augroup END

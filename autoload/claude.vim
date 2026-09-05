@@ -73,7 +73,7 @@ function! s:job_stop_wait(bufnr) abort
 endfunction
 
 " Stop all running Claude jobs without wiping their buffers. Called from
-" QuitPre — before Vim's E947 check — so :q / :qall can proceed cleanly.
+" ExitPre — before Vim's E947 check — so :q / :qall can proceed cleanly.
 " VimLeavePre then calls close_all() to do the final buffer wipeout.
 function! claude#_stop_jobs() abort
   if !s:tab_mode()
@@ -90,6 +90,29 @@ function! claude#_stop_jobs() abort
   endfor
 endfunction
 
+" QuitPre fallback for Vim builds without ExitPre (before patch 8.1.0446).
+" QuitPre also fires when closing an ordinary split, which must leave the
+" session alone, so approximate ExitPre: stop the jobs only when the window
+" being quit is the last one that isn't a Claude terminal, since after that
+" nothing but Claude windows would remain and Vim is on its way out. This is
+" best-effort — with several tabs open QuitPre can't tell :q from :qall, so
+" it defers to VimLeavePre and E947 may still surface on those old builds.
+function! claude#_quit_pre() abort
+  if tabpagenr('$') > 1
+    return
+  endif
+  let l:claude_bufnr = s:get_bufnr()
+  let l:others = 0
+  for l:winnr in range(1, winnr('$'))
+    if winbufnr(l:winnr) != l:claude_bufnr
+      let l:others += 1
+    endif
+  endfor
+  if l:others <= 1
+    call claude#_stop_jobs()
+  endif
+endfunction
+
 " Close the Claude terminal for the current tab and wipe its buffer.
 function! claude#close() abort
   if !s:is_open()
@@ -100,7 +123,7 @@ function! claude#close() abort
 endfunction
 
 " Wipe all Claude terminal buffers across every tab. Called from VimLeavePre
-" after jobs have already been stopped by claude#_stop_jobs() in QuitPre.
+" after jobs have already been stopped by claude#_stop_jobs() in ExitPre.
 function! claude#close_all() abort
   if !s:tab_mode()
     call claude#close()

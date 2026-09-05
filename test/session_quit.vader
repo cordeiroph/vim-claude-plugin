@@ -1,0 +1,80 @@
+" Tests that a live Claude session survives closing an ordinary split window.
+"
+" Regression: the exit hook used to be registered on QuitPre, which fires for
+" every :q — so closing any unrelated split stopped the Claude job. It now
+" lives on ExitPre, which only fires when the quit really ends the session.
+
+Before:
+  " Use per-tab sessions (default) and a stand-in for the Claude CLI so the
+  " tests never launch the real binary.
+  let g:claude_tab_sessions = 1
+  let g:_test_saved_cmd = get(g:, 'claude_cmd', 'claude')
+  let g:claude_cmd = 'sleep 30'
+
+After:
+  " Stop and wipe whatever terminal the test left behind.
+  let stray = get(t:, 'claude_bufnr', -1)
+  if stray != -1 && bufexists(stray)
+    call claude#close()
+  endif
+  let t:claude_bufnr = -1
+  let g:claude_cmd = g:_test_saved_cmd
+
+" ── autocommand registration ─────────────────────────────────────────────────
+
+Execute (jobs are stopped from ExitPre, never from a bare QuitPre):
+  redir => quitpre
+  silent! autocmd claude_plugin QuitPre
+  redir END
+  Assert quitpre !~# '_stop_jobs',
+        \ 'QuitPre must not stop jobs directly: it fires on every window close'
+  if exists('##ExitPre')
+    redir => exitpre
+    silent autocmd claude_plugin ExitPre
+    redir END
+    Assert exitpre =~# '_stop_jobs',
+          \ 'ExitPre should stop the jobs before Vim checks for E947'
+  endif
+
+" ── closing other windows ────────────────────────────────────────────────────
+
+Execute (closing an unrelated split leaves the Claude job running):
+  call claude#open()
+  let bufnr = get(t:, 'claude_bufnr', -1)
+  Assert bufnr != -1, 'claude_bufnr should be set after open()'
+  " Leave the Claude window, open an unrelated split and close it again.
+  wincmd p
+  split
+  quit
+  AssertEqual 'run', job_status(term_getjob(bufnr)),
+        \ 'closing an unrelated split must not stop the Claude job'
+  Assert bufexists(bufnr), 'the terminal buffer should survive'
+
+Execute (closing the Claude window itself keeps the session alive):
+  call claude#open()
+  let bufnr = get(t:, 'claude_bufnr', -1)
+  call win_gotoid(bufwinid(bufnr))
+  quit
+  AssertEqual 'run', job_status(term_getjob(bufnr)),
+        \ ':q in the Claude window should only hide it (bufhidden=hide)'
+  AssertEqual -1, bufwinid(bufnr), 'the Claude window should be hidden'
+  " The session is still reachable: toggle brings the same buffer back.
+  call claude#toggle()
+  AssertEqual bufnr, get(t:, 'claude_bufnr', -1)
+  Assert bufwinid(bufnr) != -1, 'toggle should re-show the hidden session'
+
+" ── legacy QuitPre fallback (Vim without ExitPre) ────────────────────────────
+
+Execute (the fallback ignores quits that only close a split):
+  call claude#open()
+  let bufnr = get(t:, 'claude_bufnr', -1)
+  wincmd p
+  split
+  " Two ordinary windows besides Claude: this quit only closes a split, so the
+  " session must survive. (The other half of the guard — stopping the jobs when
+  " the last ordinary window goes — can't be exercised here: Vader runs each
+  " suite in its own tab and the fallback defers whenever tabs are open.)
+  call claude#_quit_pre()
+  AssertEqual 'run', job_status(term_getjob(bufnr)),
+        \ 'the fallback must ignore quits that only close a split'
+  quit
