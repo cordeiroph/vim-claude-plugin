@@ -1,0 +1,327 @@
+" Tests for how the diff tree is drawn: hierarchy, directory collapsing,
+" status marks, colours, filtering and the empty states.
+
+Before:
+  call claude#difftree#_reset()
+  let g:_cwd  = getcwd()
+  let g:_repo = tempname()
+  call mkdir(g:_repo . '/src/api', 'p')
+  call mkdir(g:_repo . '/deep/nested/only', 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['x'], g:_repo . '/keep.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  call system(g:_g . 'checkout -q -b feature')
+  call writefile(['x'], g:_repo . '/src/api/handler.go')
+  call writefile(['x'], g:_repo . '/src/main.go')
+  call writefile(['x'], g:_repo . '/deep/nested/only/leaf.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm work')
+  call writefile(['dirty'], g:_repo . '/src/main.go')
+  call writefile(['new'],   g:_repo . '/untracked.txt')
+  execute 'cd ' . fnameescape(g:_repo)
+  let g:_saved_collapse = get(g:, 'claude_difftree_collapse_dirs', 1)
+
+  function! Text() abort
+    return join(claude#difftree#_lines(), "\n")
+  endfunction
+
+  " Write and source a stand-in nerdtree-git-plugin, so the runtime-preference
+  " path can be exercised without the real plugin installed.
+  let g:_stubdir = tempname()
+  call mkdir(g:_stubdir . '/autoload', 'p')
+  call writefile([
+        \ 'function! gitstatus#getIndicator(status) abort',
+        \ '  return "Z" . a:status[0]',
+        \ 'endfunction'], g:_stubdir . '/autoload/gitstatus.vim')
+
+  function! StubPlugin() abort
+    execute 'source ' . fnameescape(g:_stubdir . '/autoload/gitstatus.vim')
+  endfunction
+
+  function! UnstubPlugin() abort
+    if exists('*gitstatus#getIndicator')
+      delfunction gitstatus#getIndicator
+    endif
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  let g:claude_difftree_collapse_dirs = g:_saved_collapse
+  call UnstubPlugin()
+  call claude#difftree#_reset()
+  call delete(g:_repo, 'rf')
+  call delete(g:_stubdir, 'rf')
+  silent! only
+
+" ── hierarchy ────────────────────────────────────────────────────────────────
+
+Execute (the header carries the base branch):
+  call claude#difftree#open()
+  Assert claude#difftree#_lines()[0] =~# '^Git Diff',  'expected a header'
+  Assert claude#difftree#_lines()[0] =~# 'main$',      'expected the base branch'
+
+Execute (files nest under project, branch and directory nodes):
+  call claude#difftree#open()
+  let t = Text()
+  Assert t =~# '▾ ' . fnamemodify(g:_repo, ':t'), 'project node missing: ' . t
+  Assert t =~# '  ▾ feature',                     'branch node missing: '  . t
+  Assert t =~# '    ▾ src',                       'directory node missing: ' . t
+  Assert t =~# 'handler\.go',                     'nested file missing'
+  Assert t =~# 'untracked\.txt',                  'root-level file missing'
+
+Execute (a directory is indented under its parent):
+  call claude#difftree#open()
+  let t = Text()
+  Assert t =~# '    ▾ src\n      ▾ api\n', 'expected api nested under src: ' . t
+
+" ── directory collapsing ─────────────────────────────────────────────────────
+
+Execute (runs of single-child directories are merged into one node):
+  let g:claude_difftree_collapse_dirs = 1
+  call claude#difftree#open()
+  Assert Text() =~# '▾ deep/nested/only',
+        \ 'expected the single-child run to collapse: ' . Text()
+
+Execute (collapsing can be turned off):
+  let g:claude_difftree_collapse_dirs = 0
+  call claude#difftree#open()
+  call claude#difftree#refresh()
+  let t = Text()
+  Assert t !~# 'deep/nested/only', 'the run should stay split'
+  Assert t =~# '▾ deep',           'each level should be its own node: ' . t
+
+Execute (a directory with files of its own is never collapsed):
+  let g:claude_difftree_collapse_dirs = 1
+  call claude#difftree#open()
+  " src holds main.go as well as the api/ subdirectory.
+  Assert Text() !~# 'src/api', 'src has its own file and must not merge'
+
+" ── status marks ─────────────────────────────────────────────────────────────
+
+Execute (each file carries the right nerdtree-git-plugin glyph):
+  call claude#difftree#open()
+  let t = Text()
+  let staged    = claude#difftree#indicator('Staged')
+  let modified  = claude#difftree#indicator('Modified')
+  let untracked = claude#difftree#indicator('Untracked')
+  " handler.go was added on the branch and is clean in the working tree.
+  Assert t =~# '\[' . staged . '\]   handler\.go',
+        \ 'expected a bracketed staged glyph: ' . t
+  " main.go was added on the branch and then modified: both slots, separated.
+  Assert t =~# '\[' . staged . '|' . modified . '\] main\.go',
+        \ 'expected both slots with a separator: ' . t
+  " untracked.txt has no branch state, so the first slot is kept blank rather
+  " than collapsing to a lone glyph that could not say which column it is.
+  Assert t =~# '\[ |' . untracked . '\] untracked\.txt',
+        \ 'expected an empty first slot: ' . t
+
+Execute (the indicator field is a fixed width, so names stay aligned):
+  " Files at different depths sit at different indents; what must hold is that
+  " every row spends exactly the same width on indicators, blank or not, so
+  " names line up within a directory. The indent cannot be recovered with a
+  " greedy /^ */ — that would swallow a blank first column — so it is taken
+  " from the node the row was built from.
+  call claude#difftree#open()
+  let lines   = claude#difftree#_lines()
+  let nodes   = claude#difftree#_nodes()
+  let offsets = {}
+  for i in range(len(nodes))
+    if nodes[i].kind !=# 'file'
+      continue
+    endif
+    " Character-based, not byte-based: the glyphs are multi-byte UTF-8.
+    let rest = strcharpart(lines[i], strchars(nodes[i].indent))
+    let name = matchstr(rest, '\S\+$')
+    let offsets[strchars(rest) - strchars(name)] = 1
+  endfor
+  AssertEqual 1, len(keys(offsets)),
+        \ 'the field must be one width whatever it holds, got '
+        \ . string(keys(offsets))
+
+Execute (the glyphs come from nerdtree-git-plugin when it is installed):
+  " An autoload function has to be defined by a file whose name matches its
+  " prefix, so the stand-in plugin is written out and sourced.
+  call StubPlugin()
+  AssertEqual 'ZM', claude#difftree#indicator('Modified')
+  AssertEqual 'ZS', claude#difftree#indicator('Staged')
+  call claude#difftree#open()
+  Assert Text() =~# 'ZS', 'the plugin glyph should be rendered: ' . Text()
+  call UnstubPlugin()
+
+Execute (the embedded copy is used when the plugin is absent):
+  Assert !exists('*gitstatus#getIndicator'), 'precondition: plugin not loaded'
+  " nerdtree-git-plugin's own utf-8 defaults.
+  AssertEqual nr2char(10041), claude#difftree#indicator('Modified')
+  AssertEqual nr2char(10010), claude#difftree#indicator('Staged')
+  AssertEqual nr2char(10029), claude#difftree#indicator('Untracked')
+  AssertEqual nr2char(10140), claude#difftree#indicator('Renamed')
+  AssertEqual nr2char(9552),  claude#difftree#indicator('Unmerged')
+  AssertEqual nr2char(10006), claude#difftree#indicator('Deleted')
+
+Execute (ascii mode uses their ascii set, even with the plugin installed):
+  call StubPlugin()
+  let g:claude_panel_ascii = 1
+  AssertEqual '*', claude#difftree#indicator('Modified')
+  AssertEqual '+', claude#difftree#indicator('Staged')
+  AssertEqual '!', claude#difftree#indicator('Untracked')
+  call claude#difftree#open()
+  Assert Text() =~# '\[+\]   handler\.go', Text()
+  let g:claude_panel_ascii = 0
+  call UnstubPlugin()
+
+Execute (nerd-font glyphs are used when that mode is on):
+  let g:NERDTreeGitStatusUseNerdFonts = 1
+  AssertEqual nr2char(61545), claude#difftree#indicator('Modified')
+  AssertEqual nr2char(61543), claude#difftree#indicator('Staged')
+  let g:NERDTreeGitStatusUseNerdFonts = 0
+
+" ── colours ──────────────────────────────────────────────────────────────────
+
+Execute (tree elements are highlighted):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  let seen = {}
+  for l in range(1, line('$'))
+    for c in range(1, max([1, strlen(getline(l))]))
+      let n = synIDattr(synID(l, c, 1), 'name')
+      if !empty(n) | let seen[n] = 1 | endif
+    endfor
+  endfor
+  for g in ['ClaudeDiffHeader', 'ClaudeDiffProject', 'ClaudeDiffBranch',
+        \ 'ClaudeDiffDir', 'ClaudeDiffMarker', 'ClaudeDiffHelp']
+    Assert has_key(seen, g), g . ' was not applied to any text'
+  endfor
+
+Execute (colours fall back to the groups NERDTree uses):
+  call claude#difftree#open()
+  Assert execute('highlight ClaudeDiffDir')       =~# 'links to Directory'
+  Assert execute('highlight ClaudeDiffCommitted') =~# 'links to Normal'
+  Assert execute('highlight ClaudeDiffHeader')    =~# 'links to Statement'
+
+Execute (status colours fall back to nerdtree-git-plugin's own sources):
+  call claude#difftree#open()
+  Assert execute('highlight ClaudeDiffModified')  =~# 'links to Special'
+  Assert execute('highlight ClaudeDiffStaged')    =~# 'links to Function'
+  Assert execute('highlight ClaudeDiffUntracked') =~# 'links to Comment'
+  Assert execute('highlight ClaudeDiffRenamed')   =~# 'links to Title'
+  Assert execute('highlight ClaudeDiffUnmerged')  =~# 'links to Label'
+  Assert execute('highlight ClaudeDiffDeleted')   =~# 'links to Operator'
+
+Execute (nerdtree-git-plugin's own groups win when they exist):
+  call claude#difftree#open()
+  Assert execute('highlight ClaudeDiffModified') =~# 'links to Special'
+  highlight default link NERDTreeGitStatusModified Special
+  call claude#difftree#_relink()
+  Assert execute('highlight ClaudeDiffModified')
+        \ =~# 'links to NERDTreeGitStatusModified',
+        \ 'the fallback should be upgraded to the plugin''s group'
+  highlight link NERDTreeGitStatusModified NONE
+
+Execute (a colour the user chose is never overwritten):
+  call claude#difftree#open()
+  highlight! link ClaudeDiffStaged ErrorMsg
+  highlight default link NERDTreeGitStatusStaged Function
+  call claude#difftree#_relink()
+  Assert execute('highlight ClaudeDiffStaged') =~# 'links to ErrorMsg'
+  highlight link ClaudeDiffStaged NONE
+  highlight link NERDTreeGitStatusStaged NONE
+
+Execute (both indicator columns are highlighted, not just the first):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  let seen = {}
+  for l in range(1, line('$'))
+    for c in range(1, max([1, strlen(getline(l))]))
+      let n = synIDattr(synID(l, c, 1), 'name')
+      if !empty(n) | let seen[n] = 1 | endif
+    endfor
+  endfor
+  " main.go is staged on the branch and modified in the tree: one row, two
+  " different glyph groups. A ^-anchored pattern per column would only ever
+  " colour the first.
+  Assert has_key(seen, 'ClaudeDiffStaged'),   'first column not highlighted'
+  Assert has_key(seen, 'ClaudeDiffModified'), 'second column not highlighted'
+  Assert has_key(seen, 'ClaudeDiffCommitted'),   'clean filename not coloured'
+  Assert has_key(seen, 'ClaudeDiffUncommitted'), 'dirty filename not coloured'
+
+" ── filtering ────────────────────────────────────────────────────────────────
+
+Execute (a filter narrows the tree to matching paths):
+  call claude#difftree#open()
+  call claude#difftree#set_filter('handler')
+  let t = Text()
+  Assert t =~# 'handler\.go',     'the match must survive'
+  Assert t !~# 'untracked\.txt',  'non-matches must be hidden: ' . t
+  Assert t !~# 'leaf\.txt',       'non-matches must be hidden'
+
+Execute (the active filter is shown in the header):
+  call claude#difftree#open()
+  call claude#difftree#set_filter('handler')
+  Assert claude#difftree#_lines()[0] =~# '/handler',
+        \ 'the header should show the filter: ' . claude#difftree#_lines()[0]
+
+Execute (filtering is case-insensitive for a lowercase pattern):
+  call claude#difftree#open()
+  call claude#difftree#set_filter('handler')
+  let lower = Text()
+  call claude#difftree#set_filter('HANDLER')
+  Assert lower =~# 'handler\.go', 'lowercase should match'
+  Assert Text() !~# 'handler\.go', 'an uppercase pattern is taken literally'
+
+Execute (a filter force-expands the directories holding a match):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  " Collapse everything by folding the project node.
+  call cursor(3, 1)
+  normal za
+  Assert Text() !~# 'handler\.go', 'precondition: the tree is folded shut'
+  call claude#difftree#set_filter('handler')
+  Assert Text() =~# 'handler\.go',
+        \ 'a match must be revealed regardless of fold state'
+
+Execute (clearing the filter restores the whole tree):
+  call claude#difftree#open()
+  call claude#difftree#set_filter('handler')
+  call claude#difftree#set_filter('')
+  let t = Text()
+  Assert t =~# 'handler\.go'
+  Assert t =~# 'untracked\.txt', 'everything comes back'
+
+Execute (a filter matching nothing says so):
+  call claude#difftree#open()
+  call claude#difftree#set_filter('zzz-no-such-file')
+  Assert Text() =~# 'no files match /zzz-no-such-file', Text()
+
+" ── empty states ─────────────────────────────────────────────────────────────
+
+Execute (a repository with no changes says so):
+  call system(g:_g . 'checkout -q -f main')
+  call system(g:_g . 'clean -qfd')
+  call claude#difftree#_reset()
+  call claude#difftree#open()
+  Assert Text() =~# 'no changes vs main', Text()
+
+Execute (outside a repository the panel says so):
+  let plain = tempname()
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  call claude#difftree#_reset()
+  call claude#difftree#open()
+  Assert Text() =~# 'not a git repository', Text()
+  execute 'cd ' . fnameescape(g:_repo)
+  call delete(plain, 'rf')
+
+Execute (with no resolvable base the panel explains how to set one):
+  let plain = tempname()
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  call claude#difftree#_reset()
+  " Pretend we are in a repo but no base could be found.
+  call claude#difftree#open()
+  Assert Text() =~# 'not a git repository\|no base branch', Text()
+  execute 'cd ' . fnameescape(g:_repo)
+  call delete(plain, 'rf')

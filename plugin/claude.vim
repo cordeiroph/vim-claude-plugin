@@ -116,6 +116,41 @@ if !exists('g:claude_session_flags')
   let g:claude_session_flags = -1
 endif
 
+" ── git diff tree configuration ──────────────────────────────────────────────
+
+" g:claude_difftree_height — height in the shared sidebar column, applied when
+" it first comes to share one. A starting size, not an enforced one.
+if !exists('g:claude_difftree_height')
+  let g:claude_difftree_height = 15
+endif
+
+" g:claude_difftree_width — width when the diff tree is the only sidebar.
+if !exists('g:claude_difftree_width')
+  let g:claude_difftree_width = 35
+endif
+
+" g:claude_difftree_base — branch to diff against. Empty auto-detects:
+" origin/HEAD, then main, then master.
+if !exists('g:claude_difftree_base')
+  let g:claude_difftree_base = ''
+endif
+
+" g:claude_difftree_show_untracked — include untracked files.
+if !exists('g:claude_difftree_show_untracked')
+  let g:claude_difftree_show_untracked = 1
+endif
+
+" g:claude_difftree_auto_refresh — re-run git on :write while the panel is open.
+if !exists('g:claude_difftree_auto_refresh')
+  let g:claude_difftree_auto_refresh = 1
+endif
+
+" g:claude_difftree_collapse_dirs — merge runs of single-child directories, so
+" `autoload/claude` is one node rather than two.
+if !exists('g:claude_difftree_collapse_dirs')
+  let g:claude_difftree_collapse_dirs = 1
+endif
+
 " ── commands ─────────────────────────────────────────────────────────────────
 
 command! ClaudeOpen    call claude#open()
@@ -132,6 +167,14 @@ command!          ClaudeSessionsOpen  call claude#panel#open()
 command!          ClaudeSessionsClose call claude#panel#close()
 command! -nargs=? ClaudeNew           call claude#new(<q-args>)
 command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
+
+" Git diff tree.
+command! ClaudeDiff        call claude#difftree#toggle()
+command! ClaudeDiffOpen    call claude#difftree#open()
+command! ClaudeDiffClose   call claude#difftree#close()
+command! ClaudeDiffRefresh call claude#difftree#refresh()
+command! -nargs=1 -complete=customlist,claude#difftree#complete_branch
+      \ ClaudeDiffBase call claude#difftree#set_base(<q-args>)
 
 " Window navigation commands (wrappers around wincmd h/l/k/j).
 command! ClaudeFocus      call claude#focus()
@@ -170,6 +213,9 @@ augroup claude_plugin
   " NERDTree's highlight groups only exist once its syntax file has been
   " sourced, so pick them up the first time a tree appears.
   autocmd FileType nerdtree call claude#panel#_relink()
+  autocmd FileType nerdtree call claude#difftree#_relink()
+  " A save is the one event that reliably changes the uncommitted set.
+  autocmd BufWritePost * call claude#difftree#_on_write()
   autocmd User NERDTreeInit call claude#panel#_nerdtree_init()
   if exists('##WinClosed')
     autocmd WinClosed * call claude#panel#_win_closed(expand('<amatch>'))
@@ -188,6 +234,9 @@ if !exists('g:claude_no_default_mappings')
 
   " Toggle the session panel.
   nnoremap <silent> <leader>cs :ClaudeSessions<CR>
+
+  " Toggle the git diff tree.
+  nnoremap <silent> <leader>cd :ClaudeDiff<CR>
 
   " Explain: normal mode sends the whole file; visual mode sends the selection.
   nnoremap <silent> <leader>ce :call claude#explain('n')<CR>

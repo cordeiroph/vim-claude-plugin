@@ -153,6 +153,60 @@ The panel and NERDTree would otherwise form two columns and swallow most of the 
 
 It works whichever opens first, and closing either one hands the column to the other. The panel starts at `g:claude_panel_height` lines and NERDTree takes the rest; resize either by hand and it stays put, since the size is applied only when the two first come together. While stacked the column is NERDTree's width, since NERDTree resets its own width on every redraw. Set `g:claude_panel_nerdtree_stack = 0` to opt out.
 
+### Git diff tree
+
+`<leader>cd` opens a tree of every file that differs from the base branch — committed and uncommitted together — grouped by worktree and directory:
+
+```
+Git Diff                      main
+
+▾ claude-pluing
+  ▾ feature/agent-session-panel
+    ▾ autoload/claude
+      [✚|✹] panel.vim
+      [✚]   session.vim
+      [✹]   input.vim
+      [ |✭] difftree.vim
+    ▾ doc
+      [✚]   design/git-diff-tree.md
+      [✹]   claude.txt
+```
+
+Each row carries a bracketed field with **two slots**. The first says what the branch did to the file relative to the base; the second what the working tree has done since:
+
+| Field | Meaning |
+|---|---|
+| `[✚]` | added on this branch, clean in the working tree |
+| `[✹]` | modified on this branch, clean in the working tree |
+| `[ \|✹]` | untouched by the branch, modified in the working tree |
+| `[✚\|✹]` | added on this branch **and** modified since |
+| blank | neither |
+
+The empty slot is kept when only the working tree changed — a lone `[✹]` could not say which of the two slots it came from.
+
+The glyphs come from [nerdtree-git-plugin](https://github.com/Xuyuanp/nerdtree-git-plugin), so the diff tree and NERDTree describe git state in the same alphabet:
+
+| Column | Git letter | Status | Glyph | ASCII | Colour source |
+|---|---|---|---|---|---|
+| branch vs base | `A` | Staged | `✚` | `+` | `NERDTreeGitStatusStaged` → `Function` |
+| branch vs base | `M` | Modified | `✹` | `*` | `NERDTreeGitStatusModified` → `Special` |
+| branch vs base | `D` | Deleted | `✖` | `D` | `NERDTreeGitStatusDeleted` → `Operator` |
+| branch vs base | `R` `C` | Renamed | `➜` | `R` | `NERDTreeGitStatusRenamed` → `Title` |
+| working tree | `M` | Modified | `✹` | `*` | `NERDTreeGitStatusModified` → `Special` |
+| working tree | `A` | Staged | `✚` | `+` | `NERDTreeGitStatusStaged` → `Function` |
+| working tree | `D` | Deleted | `✖` | `D` | `NERDTreeGitStatusDeleted` → `Operator` |
+| working tree | `R` `C` | Renamed | `➜` | `R` | `NERDTreeGitStatusRenamed` → `Title` |
+| working tree | untracked | Untracked | `✭` | `!` | `NERDTreeGitStatusUntracked` → `Comment` |
+| either | — | none | blank | blank | — |
+
+`A → Staged` is nerdtree-git-plugin's own rule (`x =~# '[MA]'`), not an invention here.
+
+If the plugin is installed, its `gitstatus#getIndicator()` is called directly, so `g:NERDTreeGitStatusUseNerdFonts` and any `g:NERDTreeGitStatusIndicatorMapCustom` you set carry over automatically. Without it, an embedded copy of its defaults is used. `g:claude_panel_ascii` selects its ASCII set.
+
+Colours prefer the plugin's own `NERDTreeGitStatus*` groups when its syntax file has been sourced, falling back to the groups it links them to — so restyling one restyles the other. A link you set yourself is never overwritten.
+
+> **Limitation:** the tree uses `git diff --name-status`, not `git status --porcelain`, so staged-but-uncommitted work cannot be told apart from unstaged (both show `✹`/`✚` by letter, not by index state), and `═ Unmerged` never appears. Ignored and clean files are not listed at all.
+
 ### Session names
 
 New sessions prompt for a name, which is passed to the Claude CLI too, so it shows up in Claude's own prompt box and `/resume` picker. Names are stored in `data/sessions.json` inside the plugin directory.

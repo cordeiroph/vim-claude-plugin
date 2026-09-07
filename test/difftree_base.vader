@@ -1,0 +1,116 @@
+" Tests for base-branch resolution: which branch the diff is taken against,
+" and how an explicit choice overrides a detected one.
+
+Before:
+  call claude#difftree#_reset()
+  let g:_cwd  = getcwd()
+  let g:_repo = tempname()
+  call mkdir(g:_repo, 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['one'], g:_repo . '/a.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  let g:_saved_base = get(g:, 'claude_difftree_base', '')
+  let g:claude_difftree_base = ''
+  execute 'cd ' . fnameescape(g:_repo)
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  let g:claude_difftree_base = g:_saved_base
+  call claude#difftree#_reset()
+  call delete(g:_repo, 'rf')
+
+" ── detection ────────────────────────────────────────────────────────────────
+
+Execute (main is detected when there is no remote):
+  AssertEqual 'main', claude#difftree#base()
+
+Execute (master is detected when there is no main):
+  call system(g:_g . 'branch -m main master')
+  call claude#difftree#_reset()
+  AssertEqual 'master', claude#difftree#base()
+
+Execute (origin/HEAD wins over the main/master guesses):
+  " Point a fake remote's HEAD at a branch named neither main nor master.
+  call system(g:_g . 'checkout -q -b trunk')
+  call system(g:_g . 'update-ref refs/remotes/origin/trunk refs/heads/trunk')
+  call system(g:_g . 'symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk')
+  call claude#difftree#_reset()
+  AssertEqual 'trunk', claude#difftree#base(),
+        \ 'origin/HEAD is the most authoritative source'
+
+Execute (nothing resolvable outside a repository):
+  let plain = tempname()
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  call claude#difftree#_reset()
+  AssertEqual '', claude#difftree#base()
+  execute 'cd ' . fnameescape(g:_repo)
+  call delete(plain, 'rf')
+
+" ── configuration and override ───────────────────────────────────────────────
+
+Execute (the configured default wins over detection):
+  let g:claude_difftree_base = 'configured-branch'
+  AssertEqual 'configured-branch', claude#difftree#base()
+  let g:claude_difftree_base = ''
+
+Execute (an explicit :ClaudeDiffBase wins over the configured default):
+  " The command is a deliberate act; the global is only a starting point.
+  let g:claude_difftree_base = 'configured-branch'
+  call claude#difftree#set_base('chosen-branch')
+  AssertEqual 'chosen-branch', claude#difftree#base()
+  let g:claude_difftree_base = ''
+
+Execute (the override survives a refresh):
+  call claude#difftree#set_base('sticky')
+  call claude#difftree#refresh()
+  AssertEqual 'sticky', claude#difftree#base()
+
+Execute (a reset clears the override and detection runs again):
+  call claude#difftree#set_base('temporary')
+  call claude#difftree#_reset()
+  AssertEqual 'main', claude#difftree#base()
+
+" ── a base that does not exist ───────────────────────────────────────────────
+
+Execute (a non-existent base yields no files rather than throwing):
+  call claude#difftree#set_base('no-such-branch')
+  AssertEqual 'no-such-branch', claude#difftree#base()
+  " git fails; the committed set is simply empty and nothing is raised.
+  AssertEqual [], claude#difftree#files()
+
+" ── completion ───────────────────────────────────────────────────────────────
+
+Execute (branch completion offers the repository's branches):
+  call system(g:_g . 'branch feature-x')
+  let names = claude#difftree#complete_branch('', '', 0)
+  Assert index(names, 'main') >= 0, 'expected main in ' . string(names)
+  Assert index(names, 'feature-x') >= 0, 'expected feature-x in ' . string(names)
+
+Execute (completion filters by the typed prefix):
+  call system(g:_g . 'branch feature-x')
+  let names = claude#difftree#complete_branch('feat', '', 0)
+  AssertEqual ['feature-x'], names
+
+Execute (completion outside a repository is empty, not an error):
+  let plain = tempname()
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  AssertEqual [], claude#difftree#complete_branch('', '', 0)
+  execute 'cd ' . fnameescape(g:_repo)
+  call delete(plain, 'rf')
+
+" ── gitgutter is left alone ──────────────────────────────────────────────────
+
+Execute (g:gitgutter_diff_base is never read or written):
+  " The two settings are deliberately independent: changing the tree's base
+  " must not silently restyle every buffer's gitgutter signs.
+  let g:gitgutter_diff_base = 'sentinel'
+  call claude#difftree#set_base('other-branch')
+  AssertEqual 'sentinel', g:gitgutter_diff_base
+  AssertEqual 'other-branch', claude#difftree#base()
+  unlet g:gitgutter_diff_base

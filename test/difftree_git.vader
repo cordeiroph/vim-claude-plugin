@@ -1,0 +1,148 @@
+" Tests for the diff tree's git layer: which files it finds and how it
+" classifies them. Everything runs against a fixture repository built in a
+" temp directory, so nothing depends on this repository's own state.
+"
+" The fixture, on branch `feature` cut from `main`:
+"   a.txt        modified and committed        -> committed  M
+"   dir1/c.txt   added and committed           -> committed  A
+"   dir1/b.txt   modified, not committed       -> uncommitted M
+"   u.txt        untracked                     -> uncommitted ?
+"   both.txt     committed AND dirty           -> both
+
+Before:
+  call claude#difftree#_reset()
+  let g:_cwd  = getcwd()
+  let g:_repo = tempname()
+  call mkdir(g:_repo . '/dir1', 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['one'],  g:_repo . '/a.txt')
+  call writefile(['two'],  g:_repo . '/dir1/b.txt')
+  call writefile(['both'], g:_repo . '/both.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  call system(g:_g . 'checkout -q -b feature')
+  call writefile(['one changed'],  g:_repo . '/a.txt')
+  call writefile(['three'],        g:_repo . '/dir1/c.txt')
+  call writefile(['both changed'], g:_repo . '/both.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm work')
+  " Left dirty in the working tree.
+  call writefile(['two changed'],  g:_repo . '/dir1/b.txt')
+  call writefile(['both again'],   g:_repo . '/both.txt')
+  call writefile(['untracked'],    g:_repo . '/u.txt')
+  execute 'cd ' . fnameescape(g:_repo)
+
+  function! ByPath() abort
+    let l:out = {}
+    for l:r in claude#difftree#files()
+      let l:out[l:r.path] = l:r
+    endfor
+    return l:out
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  call claude#difftree#_reset()
+  call delete(g:_repo, 'rf')
+
+" ── discovery ────────────────────────────────────────────────────────────────
+
+Execute (the repository and its base branch are found):
+  Assert claude#difftree#is_repo()
+  AssertEqual 'main', claude#difftree#base()
+
+Execute (every changed file is listed, and nothing else):
+  AssertEqual ['a.txt', 'both.txt', 'dir1/b.txt', 'dir1/c.txt', 'u.txt'],
+        \ sort(keys(ByPath()))
+
+" ── classification ───────────────────────────────────────────────────────────
+
+Execute (a file committed on the branch is committed):
+  let r = ByPath()['a.txt']
+  AssertEqual 'M', r.committed
+  AssertEqual '',  r.dirty
+  AssertEqual 'committed', claude#difftree#status(r)
+
+Execute (an added file carries the A letter):
+  AssertEqual 'A', ByPath()['dir1/c.txt'].committed
+  AssertEqual 'committed', claude#difftree#status(ByPath()['dir1/c.txt'])
+
+Execute (a file dirty in the working tree is uncommitted):
+  let r = ByPath()['dir1/b.txt']
+  AssertEqual '',  r.committed
+  AssertEqual 'M', r.dirty
+  AssertEqual 'uncommitted', claude#difftree#status(r)
+
+Execute (an untracked file is uncommitted, marked ?):
+  let r = ByPath()['u.txt']
+  AssertEqual '?', r.dirty
+  AssertEqual 'uncommitted', claude#difftree#status(r)
+
+Execute (a file both committed and dirty is reported as both):
+  let r = ByPath()['both.txt']
+  Assert !empty(r.committed), 'should be in the committed set'
+  Assert !empty(r.dirty),     'should also be dirty'
+  AssertEqual 'both', claude#difftree#status(r)
+
+Execute (each record carries its worktree and branch):
+  let r = ByPath()['a.txt']
+  AssertEqual 'feature', r.branch
+  AssertEqual resolve(g:_repo), resolve(r.worktree)
+
+" ── configuration ────────────────────────────────────────────────────────────
+
+Execute (untracked files can be excluded):
+  let g:claude_difftree_show_untracked = 0
+  call claude#difftree#refresh()
+  let paths = sort(keys(ByPath()))
+  let g:claude_difftree_show_untracked = 1
+  AssertEqual -1, index(paths, 'u.txt')
+  Assert index(paths, 'a.txt') >= 0, 'other files must still be listed'
+
+" ── worktrees ────────────────────────────────────────────────────────────────
+
+Execute (a second worktree contributes its own branch node):
+  let wt = g:_repo . '-wt'
+  call system(g:_g . 'worktree add -q -b other ' . shellescape(wt))
+  call writefile(['other work'], wt . '/a.txt')
+  call system('git -C ' . shellescape(wt) . ' commit -qam other')
+  call claude#difftree#refresh()
+  let branches = map(claude#difftree#tree(), {_, t -> t.branch})
+  call system(g:_g . 'worktree remove --force ' . shellescape(wt))
+  Assert index(branches, 'feature') >= 0, 'expected feature, got ' . string(branches)
+  Assert index(branches, 'other')   >= 0, 'expected other, got '   . string(branches)
+
+Execute (a worktree sitting on the base branch is skipped):
+  " The fixture's main worktree is on `feature`; put a second one on `main`.
+  let wt = g:_repo . '-base'
+  call system(g:_g . 'worktree add -q ' . shellescape(wt) . ' main')
+  call claude#difftree#refresh()
+  let branches = map(claude#difftree#tree(), {_, t -> t.branch})
+  call system(g:_g . 'worktree remove --force ' . shellescape(wt))
+  AssertEqual -1, index(branches, 'main'),
+        \ 'a worktree on the base branch diffs against itself and is skipped'
+
+" ── outside a repository ─────────────────────────────────────────────────────
+
+Execute (a non-git directory yields nothing and does not error):
+  let plain = tempname()
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  call claude#difftree#_reset()
+  AssertEqual 0,  claude#difftree#is_repo()
+  AssertEqual [], claude#difftree#files()
+  AssertEqual [], claude#difftree#tree()
+  execute 'cd ' . fnameescape(g:_repo)
+  call delete(plain, 'rf')
+
+Execute (a repository with no changes vs base lists nothing):
+  " -f is needed: both.txt is dirty and differs between the branches, so a
+  " plain checkout would be refused and the fixture would stay on `feature`.
+  call system(g:_g . 'checkout -q -f main')
+  call system(g:_g . 'clean -qfd')
+  call claude#difftree#_reset()
+  AssertEqual 'main', claude#difftree#base()
+  AssertEqual [], claude#difftree#tree()

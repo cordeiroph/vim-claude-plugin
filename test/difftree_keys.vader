@@ -1,0 +1,195 @@
+" Tests for the diff tree's window and keys: buffer options, hiding, folding,
+" and the four ways of opening a file — which must never replace a sidebar.
+
+Before:
+  call claude#difftree#_reset()
+  call claude#panel#_reset()
+  call claude#sidebar#_reset()
+  let g:_cwd  = getcwd()
+  let g:_repo = tempname()
+  call mkdir(g:_repo . '/src', 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['x'], g:_repo . '/keep.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  call system(g:_g . 'checkout -q -b feature')
+  call writefile(['hello'], g:_repo . '/src/main.go')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm work')
+  execute 'cd ' . fnameescape(g:_repo)
+
+  " Line of the file row labelled {name}, or -1.
+  function! FileLine(name) abort
+    let l:nodes = claude#difftree#_nodes()
+    for l:i in range(len(l:nodes))
+      if l:nodes[l:i].kind ==# 'file' && l:nodes[l:i].label ==# a:name
+        return l:i + 1
+      endif
+    endfor
+    return -1
+  endfunction
+
+  function! GotoFile(name) abort
+    call win_gotoid(bufwinid(claude#difftree#bufnr()))
+    let l:line = FileLine(a:name)
+    Assert l:line > 0, a:name . ' is not in the tree'
+    call cursor(l:line, 1)
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  call claude#difftree#_reset()
+  call claude#panel#_reset()
+  call claude#sidebar#_reset()
+  call delete(g:_repo, 'rf')
+  silent! only
+
+" ── the window ───────────────────────────────────────────────────────────────
+
+Execute (the panel is a fixed-width scratch buffer):
+  call claude#difftree#open()
+  Assert claude#difftree#is_open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  AssertEqual 'nofile', &buftype
+  AssertEqual 'hide',   &bufhidden
+  AssertEqual 0, &modifiable
+  AssertEqual 0, &buflisted
+  AssertEqual 0, &swapfile
+  AssertEqual 1, &winfixwidth
+  AssertEqual 'claudedifftree', &filetype
+
+Execute (toggle opens and hides it):
+  call claude#difftree#toggle()
+  Assert claude#difftree#is_open()
+  call claude#difftree#toggle()
+  Assert !claude#difftree#is_open()
+
+Execute (opening an already-open panel focuses it rather than duplicating it):
+  call claude#difftree#open()
+  let before = winnr('$')
+  call claude#difftree#open()
+  AssertEqual before, winnr('$')
+  AssertEqual bufwinid(claude#difftree#bufnr()), win_getid()
+
+Execute (q hides the panel):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  normal q
+  Assert !claude#difftree#is_open()
+
+" ── opening files ────────────────────────────────────────────────────────────
+
+Execute (<CR> opens the file under the cursor):
+  call claude#difftree#open()
+  call GotoFile('main.go')
+  execute "normal \<CR>"
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+  Assert !claude#sidebar#is_sidebar(win_getid()),
+        \ 'the file must not open into a sidebar'
+  Assert claude#difftree#is_open(), 'the panel must survive'
+
+Execute (i opens the file in a horizontal split):
+  call claude#difftree#open()
+  call GotoFile('main.go')
+  let before = winnr('$')
+  normal i
+  AssertEqual before + 1, winnr('$')
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+
+Execute (s opens the file in a vertical split):
+  call claude#difftree#open()
+  call GotoFile('main.go')
+  let before = winnr('$')
+  normal s
+  AssertEqual before + 1, winnr('$')
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+
+Execute (t opens the file in a new tab):
+  call claude#difftree#open()
+  call GotoFile('main.go')
+  let tabs = tabpagenr('$')
+  normal t
+  AssertEqual tabs + 1, tabpagenr('$')
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+  tabclose
+
+Execute (the panel window is never replaced by a file):
+  call claude#difftree#open()
+  call GotoFile('main.go')
+  execute "normal \<CR>"
+  Assert claude#difftree#is_open()
+  AssertEqual claude#difftree#bufnr(),
+        \ winbufnr(win_id2win(bufwinid(claude#difftree#bufnr())))
+
+Execute (a file that no longer exists is reported, not opened):
+  call claude#difftree#open()
+  call delete(g:_repo . '/src/main.go')
+  let rec = {'worktree': g:_repo, 'path': 'src/main.go',
+        \ 'committed': 'A', 'dirty': 'D'}
+  let before = bufnr('%')
+  silent! call claude#difftree#open_file(rec, 'here')
+  AssertEqual before, bufnr('%'), 'no buffer should have been created'
+
+" ── folding ──────────────────────────────────────────────────────────────────
+
+Execute (folding a directory hides its contents):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  Assert join(claude#difftree#_lines(), "\n") =~# 'main\.go'
+  " Fold the project node, which is the first tree row.
+  call cursor(3, 1)
+  normal za
+  Assert join(claude#difftree#_lines(), "\n") !~# 'main\.go',
+        \ 'a collapsed node must hide its children'
+
+Execute (fold state survives a rebuild):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  call cursor(3, 1)
+  normal za
+  call claude#difftree#refresh()
+  Assert join(claude#difftree#_lines(), "\n") !~# 'main\.go',
+        \ 'the fold must survive re-running git'
+  normal za
+  Assert join(claude#difftree#_lines(), "\n") =~# 'main\.go'
+
+Execute (keys on a blank line do nothing):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  call cursor(2, 1)
+  execute "normal \<CR>"
+  normal i
+  normal s
+  Assert claude#difftree#is_open(), 'the panel should be unharmed'
+
+" ── stacking with the session panel ──────────────────────────────────────────
+
+Execute (the diff tree sits below the session panel):
+  call claude#panel#open()
+  call claude#difftree#open()
+  call claude#sidebar#stack()
+  let p = win_screenpos(win_id2win(claude#panel#winid()))
+  let d = win_screenpos(win_id2win(claude#difftree#winid()))
+  AssertEqual p[1], d[1], 'both sidebars share one column'
+  Assert p[0] < d[0], 'the session panel is above the diff tree'
+
+" ── mouse ────────────────────────────────────────────────────────────────────
+
+Execute (a double-click activates the row, as it does in NERDTree):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  let m = maparg('<2-LeftMouse>', 'n', 0, 1)
+  Assert !empty(m), 'double-click must be mapped: Vim does not derive it from <CR>'
+  AssertEqual 1, m.buffer, 'the mapping must be local to the panel'
+  Assert m.rhs =~# 'activate', 'expected it to run the same action as <CR>'
+
+Execute (double-click does exactly what <CR> does):
+  " The rhs cannot be executed from a test — it carries <SID> and <CR> as
+  " literal text — so compare the two mappings instead. <CR>'s own behaviour
+  " (opening a file, folding a directory) is covered above.
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  AssertEqual maparg('<CR>', 'n'), maparg('<2-LeftMouse>', 'n')

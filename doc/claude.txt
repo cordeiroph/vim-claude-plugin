@@ -435,6 +435,52 @@ Reopening a closed session~
   the panel entry, its name and its id are kept, and only the (empty) history
   is lost. Sessions that do have a transcript are resumed normally.
 
+Status indicators                                          *claude-diff-icons*
+
+Each file row in the diff tree carries a bracketed field with two slots: the
+first is what the branch did to the file relative to the base, the second what
+the working tree has done since.
+
+  [✚]      added on this branch, clean in the working tree
+  [✹]      modified on this branch, clean in the working tree
+  [ |✹]    untouched by the branch, modified in the working tree
+  [✚|✹]    added on this branch and modified since
+  (blank)  neither
+
+The empty slot is kept when only the working tree changed: a lone [✹] could
+not say which of the two slots it came from.
+
+The glyphs are nerdtree-git-plugin's, so the diff tree and NERDTree label git
+state the same way:
+
+  Staged     ✚  (+)   a file added on the branch, or staged in the index
+  Modified   ✹  (*)   changed
+  Deleted    ✖  (D)   removed
+  Renamed    ➜  (R)   renamed or copied
+  Untracked  ✭  (!)   not known to git
+
+The bracketed characters are used when |g:claude_panel_ascii| is set.
+
+When nerdtree-git-plugin is installed its `gitstatus#getIndicator()` is called
+directly, so `g:NERDTreeGitStatusUseNerdFonts` and any
+`g:NERDTreeGitStatusIndicatorMapCustom` carry over. Without it an embedded copy
+of its defaults is used; there is no hard dependency either way.
+
+Colours prefer that plugin's own NERDTreeGitStatus* groups when they exist and
+otherwise use the groups it links them to, so restyling one restyles the other.
+Override any of these to restyle just the diff tree: >
+    highlight link ClaudeDiffStaged    Function
+    highlight link ClaudeDiffModified  Special
+    highlight link ClaudeDiffDeleted   Operator
+    highlight link ClaudeDiffRenamed   Title
+    highlight link ClaudeDiffUntracked Comment
+    highlight link ClaudeDiffUnmerged  Label
+<
+Note: the tree reads `git diff --name-status`, not `git status --porcelain`,
+so staged work cannot be told apart from unstaged and `═ Unmerged` never
+appears. Ignored and clean files are not listed.
+
+==============================================================================
 Sharing a column with NERDTree                                *claude-nerdtree*
 
 The panel and NERDTree are both anchored to the side of the screen, so on
