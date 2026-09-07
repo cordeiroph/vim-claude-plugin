@@ -171,3 +171,30 @@ Execute (stacking disabled leaves two separate columns):
   call claude#panel#open()
   let g:claude_panel_nerdtree_stack = 1
   Assert !Stacked(), 'with stacking off the two must not share a column'
+
+" ── no visible flash ─────────────────────────────────────────────────────────
+"
+" NERDTreeInit fires at the end of Creator.createTabTree(), once the window is
+" built, so the repair must happen inside the hook rather than on a timer —
+" otherwise Vim redraws the two columns side by side before they snap together.
+
+Execute (the init hook stacks immediately, without waiting for a timer):
+  call claude#panel#open()
+  call FakeTree()
+  Assert !Stacked(), 'precondition: the sidebar opens as its own column'
+  call claude#panel#_nerdtree_init()
+  " Deliberately no sleep: this must be done by the time the hook returns.
+  Assert Stacked(), 'the init hook must stack synchronously'
+
+Execute (stacking leaves the cursor where it was):
+  call claude#panel#open()
+  let treewin = FakeTree()
+  call win_gotoid(treewin)
+  call claude#panel#_nerdtree_init()
+  AssertEqual treewin, win_getid(),
+        \ ':NERDTree must keep focus after the panel is moved'
+
+Execute (opening the panel onto an existing sidebar stacks before rendering):
+  call FakeTree()
+  call claude#panel#open()
+  Assert Stacked(), 'the panel should already be in place when open() returns'

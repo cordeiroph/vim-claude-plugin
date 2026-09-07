@@ -104,8 +104,11 @@ which is structurally what NERDTree creates.
 Two behaviours consequently rest on reading NERDTree's source rather than on
 measurement, and are called out as risks:
 
-1. That `User NERDTreeInit` fires late enough for the repair to run (mitigated
-   by deferring through `timer_start(0, …)`).
+1. That `User NERDTreeInit` fires late enough for the repair to run. Reading
+   `creator.vim:91-96` settles this: `_broadcastInitEvent()` is the last
+   statement of `createTabTree()`, after `_createTreeWin()`, `_createNERDTree()`,
+   `render()` and `putCursorHere()`, so the window is fully built when the hook
+   runs and the move can be made synchronously.
 2. What NERDTree does when reopened while the panel already holds the column.
    `creator.vim:208` runs an unconditional `topleft vertical` split, so it will
    create a **new column** rather than joining the panel's; the repair pass
@@ -166,10 +169,19 @@ is safe to call from a timer.
 
 | Moment | Hook |
 |--------|------|
-| Panel opens while NERDTree is up | End of `claude#panel#open()` |
-| NERDTree opens while the panel is up | `autocmd User NERDTreeInit` → `timer_start(0, …)` so it runs after NERDTree finishes building its window |
+| Panel opens while NERDTree is up | `claude#panel#open()`, **before** the transcript scan and first render — those are slow enough that Vim could otherwise redraw the unstacked layout first |
+| NERDTree opens while the panel is up | `autocmd User NERDTreeInit`, **synchronously**. The hook is the last thing `createTabTree()` does, so the window already exists; deferring to a timer would return control to Vim first and the two columns would be drawn side by side for a frame before snapping together |
 | NERDTree closes | `autocmd WinClosed` → drop `winfixheight` from the panel so it reclaims the column (the layout collapse itself is automatic) |
 | Anything else disturbs the layout | The panel's existing status-poll timer calls `s:stack()`, which is a no-op when the layout is already correct |
+
+Both open paths must therefore complete the move before control returns to
+Vim's main loop. Anything that yields — a timer, or a slow call made before the
+move — shows the user a frame of two side-by-side columns that then jump
+together.
+
+`win_splitmove()` does not change the current window, but the move is wrapped
+in a save/restore of `win_getid()` anyway so `:NERDTree` leaves the cursor in
+NERDTree, where the user expects it.
 
 ### 4.3 Order enforcement
 
@@ -259,7 +271,7 @@ NERDTree cannot be driven headlessly (§3.3), so the suite does not try.
 
 | File | Covers |
 |------|--------|
-| `test/panel_stack.vader` | `s:is_stacked()` against fabricated `winlayout()` shapes; `s:stack()` moving the panel above a **stand-in sidebar** and applying the height; idempotency (a second call changes nothing); order enforcement independent of which opened first; height reclaimed when the sidebar closes; `s:enter_main()` skipping the sidebar window |
+| `test/panel_stack.vader` | `s:is_stacked()` against fabricated `winlayout()` shapes; `s:stack()` moving the panel above a **stand-in sidebar** and applying the height; idempotency (a second call changes nothing); order enforcement independent of which opened first; height reclaimed when the sidebar closes; `s:enter_main()` skipping the sidebar window; that the init hook stacks **synchronously** (asserted with no intervening `sleep`) and leaves the cursor where it was |
 | `test/panel_stack_absent.vader` | With `g:NERDTree` undefined, and again with `g:claude_panel_nerdtree_stack = 0`, the panel opens exactly as it does today — the regression guard for everyone not using NERDTree |
 
 The stand-in is the one from §3.3: `topleft vertical 31split` + scratch buffer

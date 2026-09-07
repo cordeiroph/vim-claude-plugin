@@ -143,11 +143,17 @@ function! claude#panel#stack() abort
   if !s:is_stacked(l:pwin, l:nwin)
     " rightbelow:0 always lands the moved window above the target, so the
     " panel ends up on top no matter which of the two opened first.
+    let l:cur = win_getid()
     try
       call win_splitmove(l:pwin, l:nwin,
             \ {'vertical': v:false, 'rightbelow': v:false})
     catch
       return
+    finally
+      " Moving windows must not steal focus from whoever triggered this.
+      if win_id2win(l:cur) > 0 && win_getid() != l:cur
+        call win_gotoid(l:cur)
+      endif
     endtry
   endif
 
@@ -155,12 +161,13 @@ function! claude#panel#stack() abort
   call s:apply_stacked_height()
 endfunction
 
-" NERDTree is still building its window when NERDTreeInit fires; defer the
-" repair until it has settled.
+" NERDTreeInit fires at the very end of Creator.createTabTree(), after the
+" window has been created, rendered and given the cursor, so the layout can be
+" repaired here and now. Deferring to a timer would hand control back to Vim
+" first, and the two columns would be drawn side by side for a frame before
+" snapping together.
 function! claude#panel#_nerdtree_init() abort
-  if s:stack_enabled()
-    call timer_start(0, {-> claude#panel#stack()})
-  endif
+  call claude#panel#stack()
 endfunction
 
 " WinClosed hook. Only the NERDTree window we stacked with matters: once it is
@@ -220,9 +227,12 @@ function! claude#panel#open() abort
   call s:setup_keys()
   call s:setup_highlight()
 
+  " Settle the geometry before the transcript scan, which is slow enough that
+  " Vim could otherwise redraw the unstacked layout first.
+  call claude#panel#stack()
+
   call claude#session#refresh()
   call s:render()
-  call claude#panel#stack()
   call s:start_timer()
 endfunction
 
