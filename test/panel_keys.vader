@@ -153,3 +153,13 @@ Execute (keys on a blank line do nothing):
   normal i
   normal s
   Assert claude#panel#is_open(), 'the panel should be unharmed'
+
+" ── mouse ────────────────────────────────────────────────────────────────────
+
+Execute (a double-click activates the row, as it does in NERDTree):
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  let m = maparg('<2-LeftMouse>', 'n', 0, 1)
+  Assert !empty(m), 'double-click must be mapped: Vim does not derive it from <CR>'
+  AssertEqual 1, m.buffer, 'the mapping must be local to the panel'
+  Assert m.rhs =~# 'activate', 'expected it to run the same action as <CR>'

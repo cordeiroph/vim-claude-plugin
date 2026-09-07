@@ -420,6 +420,10 @@ endfunction
 " ── keymaps ──────────────────────────────────────────────────────────────────
 
 function! s:setup_keys() abort
+  " Vim does not turn a double-click into <CR> on its own: it only moves
+  " the cursor, so the click has to be mapped explicitly. NERDTree does
+  " the same thing through <LeftRelease>. Needs 'mouse' to include n or a.
+  nnoremap <buffer> <silent> <2-LeftMouse> :call <SID>activate()<CR>
   nnoremap <buffer> <silent> <CR>    :call <SID>activate()<CR>
   nnoremap <buffer> <silent> o       :call <SID>activate()<CR>
   nnoremap <buffer> <silent> i       :call <SID>open('split')<CR>
