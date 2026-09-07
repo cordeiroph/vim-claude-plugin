@@ -148,3 +148,58 @@ Execute (folding a project hides its children and persists across redraws):
   normal za
   Assert join(claude#panel#_lines(), "\n") =~# 'hidden me',
         \ 'unfolding should bring the children back'
+
+" ── colours ──────────────────────────────────────────────────────────────────
+"
+" The panel is coloured with NERDTree's palette so the two halves of the
+" sidebar read as one thing. NERDTree's own highlight groups are preferred
+" when they exist, so restyling NERDTree restyles the panel too.
+
+Execute (without NERDTree the panel falls back to the groups NERDTree uses):
+  Assert !hlexists('NERDTreeDir'), 'precondition: NERDTree syntax not loaded'
+  call claude#panel#open()
+  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Directory'
+  Assert execute('highlight ClaudeSessionName')     =~# 'links to Normal'
+  Assert execute('highlight ClaudeSessionHeader')   =~# 'links to Statement'
+
+Execute (NERDTree's own groups are picked up once they exist):
+  call claude#panel#open()
+  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Directory'
+  " Stand in for NERDTree's syntax file being sourced.
+  highlight default link NERDTreeDir Directory
+  call claude#panel#_relink()
+  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to NERDTreeDir',
+        \ 'the fallback should be upgraded to NERDTree''s group'
+  highlight link NERDTreeDir NONE
+
+Execute (a colour the user chose is never overwritten):
+  call claude#panel#open()
+  highlight! link ClaudeSessionWorktree ErrorMsg
+  highlight default link NERDTreeDir Directory
+  call claude#panel#_relink()
+  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to ErrorMsg',
+        \ 'a user override must survive the NERDTree upgrade'
+  highlight link ClaudeSessionWorktree NONE
+  highlight link NERDTreeDir NONE
+
+Execute (every panel element is highlighted):
+  call claude#session#_inject({'name': 'live', 'status': 'active',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#session#_inject({'name': 'gone', 'status': 'closed',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  let seen = {}
+  for l in range(1, line('$'))
+    for c in range(1, max([1, strlen(getline(l))]))
+      let n = synIDattr(synID(l, c, 1), 'name')
+      if !empty(n) | let seen[n] = 1 | endif
+    endfor
+  endfor
+  for g in ['ClaudeSessionHeader', 'ClaudeSessionProject',
+        \ 'ClaudeSessionWorktree', 'ClaudeSessionBranch',
+        \ 'ClaudeSessionMarker', 'ClaudeSessionActive',
+        \ 'ClaudeSessionName', 'ClaudeSessionClosed',
+        \ 'ClaudeSessionNameClosed', 'ClaudeSessionHelp']
+    Assert has_key(seen, g), g . ' was not applied to any panel text'
+  endfor

@@ -31,7 +31,7 @@ function! claude#panel#icon(status) abort
 endfunction
 
 function! s:marker(key) abort
-  let l:open = !has_key(s:collapsed, a:key)
+  let l:open = empty(a:key) || !has_key(s:collapsed, a:key)
   if s:ascii()
     return l:open ? 'v' : '>'
   endif
@@ -298,26 +298,120 @@ function! s:buf_options() abort
   setlocal filetype=claudesessions
 endfunction
 
-function! s:setup_highlight() abort
-  highlight default link ClaudeSessionActive   String
-  highlight default link ClaudeSessionIdle     Comment
-  highlight default link ClaudeSessionClosed   NonText
-  highlight default link ClaudeSessionProject  Directory
-  highlight default link ClaudeSessionWorktree Identifier
-  highlight default link ClaudeSessionBranch   Type
-  highlight default link ClaudeSessionHeader   Title
+" Colour the panel the way NERDTree colours its tree, so the two halves of the
+" sidebar read as one thing.
+"
+" Each group prefers NERDTree's own highlight group when it is defined — so
+" restyling NERDTree restyles the panel too — and otherwise falls back to the
+" group NERDTree itself links to, which gives the same colours without
+" depending on NERDTree being loaded at all.
+"
+"   header / project   NERDTreeCWD       Statement   (its root line)
+"   worktree / branch  NERDTreeDir       Directory   (its directories)
+"   fold marker        NERDTreeClosable  Directory   (its arrows)
+"   session name       NERDTreeFile      Normal      (its files)
+"   active icon        NERDTreeFlags     Number      (its flags)
+"   help text          NERDTreeHelp      String
+let s:highlights = [
+      \ ['ClaudeSessionHeader',     'NERDTreeCWD',      'Statement'],
+      \ ['ClaudeSessionProject',    'NERDTreeCWD',      'Statement'],
+      \ ['ClaudeSessionWorktree',   'NERDTreeDir',      'Directory'],
+      \ ['ClaudeSessionBranch',     'NERDTreeDir',      'Directory'],
+      \ ['ClaudeSessionMarker',     'NERDTreeClosable', 'Directory'],
+      \ ['ClaudeSessionName',       'NERDTreeFile',     'Normal'],
+      \ ['ClaudeSessionActive',     'NERDTreeFlags',    'Number'],
+      \ ['ClaudeSessionIdle',       '',                 'Comment'],
+      \ ['ClaudeSessionClosed',     '',                 'Comment'],
+      \ ['ClaudeSessionNameClosed', '',                 'NonText'],
+      \ ['ClaudeSessionHelp',       'NERDTreeHelp',     'String'],
+      \ ]
+
+" The group {name} is linked to, or '' when it is not a link.
+function! s:link_target(name) abort
+  try
+    let l:out = execute('highlight ' . a:name)
+  catch
+    return ''
+  endtry
+  let l:m = matchlist(l:out, 'links to \(\S\+\)')
+  return empty(l:m) ? '' : l:m[1]
+endfunction
+
+" Global highlight links. Safe to call from any buffer, unlike :syntax.
+"
+" NERDTree's groups do not exist until its syntax file has been sourced, so
+" the first link is usually to the fallback and has to be upgraded later.
+" `highlight default link` cannot do that — "default" means it will not
+" overwrite an existing link, including one we set ourselves — so an upgrade
+" is applied with `highlight! link`, and only when the current link is still
+" the fallback we chose. Anything the user set is left alone.
+function! s:link_highlights() abort
+  for [l:group, l:nerd, l:fallback] in s:highlights
+    let l:want = (!empty(l:nerd) && hlexists(l:nerd)) ? l:nerd : l:fallback
+    let l:cur  = s:link_target(l:group)
+    if empty(l:cur)
+      execute 'highlight default link ' . l:group . ' ' . l:want
+    elseif l:cur ==# l:fallback && l:want !=# l:fallback
+      execute 'highlight! link ' . l:group . ' ' . l:want
+    endif
+  endfor
+endfunction
+
+" Re-link once NERDTree's syntax file has been sourced, since its groups do
+" not exist until the first NERDTree buffer is created.
+function! claude#panel#_relink() abort
+  call s:link_highlights()
+endfunction
+
+" A character class matching either fold marker, whichever set is in use.
+function! s:marker_class() abort
+  return '[' . escape(s:marker('') . s:marker_alt(), ']^\-') . ']'
+endfunction
+
+function! s:marker_alt() abort
+  return s:ascii() ? '>' : '▸'
+endfunction
+
+" Buffer-local syntax. Must only ever run in the panel buffer.
+function! s:setup_syntax() abort
   silent! syntax clear
-  for [l:status, l:group] in [
-        \ ['active', 'ClaudeSessionActive'],
-        \ ['idle',   'ClaudeSessionIdle'],
-        \ ['closed', 'ClaudeSessionClosed'],
+  let l:m = s:marker_class()
+
+  " Tree nodes, identified by their indent.
+  execute 'syntax match ClaudeSessionProject  /^' . l:m
+        \ . ' .*$/ contains=ClaudeSessionMarker'
+  execute 'syntax match ClaudeSessionWorktree /^  ' . l:m
+        \ . ' .*$/ contains=ClaudeSessionMarker'
+  execute 'syntax match ClaudeSessionBranch   /^    ' . l:m
+        \ . ' .*$/ contains=ClaudeSessionMarker'
+  execute 'syntax match ClaudeSessionMarker   /' . l:m . '/ contained'
+
+  " Session rows: the glyph carries the status, the name is coloured like a
+  " NERDTree file — except for a closed session, which is dimmed whole.
+  for [l:status, l:group, l:name] in [
+        \ ['active', 'ClaudeSessionActive', 'ClaudeSessionName'],
+        \ ['idle',   'ClaudeSessionIdle',   'ClaudeSessionName'],
+        \ ['closed', 'ClaudeSessionClosed', 'ClaudeSessionNameClosed'],
         \ ]
     " The glyph is user-configurable and may contain regex metacharacters
     " (the ASCII set is literally "[A]"), so escape it into a plain match.
     execute 'syntax match ' . l:group . ' /'
-          \ . escape(claude#panel#icon(l:status), '/\.*$^~[]') . '.*$/'
+          \ . escape(claude#panel#icon(l:status), '/\.*$^~[]')
+          \ . '/ nextgroup=' . l:name . ' skipwhite'
   endfor
+  syntax match ClaudeSessionName       /.*$/ contained
+  syntax match ClaudeSessionNameClosed /.*$/ contained
+
   syntax match ClaudeSessionHeader /\%1lClaude Sessions.*/
+  " The footer, and the inline help block, whose lines are the only ones
+  " indented by a single space.
+  syntax match ClaudeSessionHelp /^? help$/
+  syntax match ClaudeSessionHelp /^ \S.*$/
+endfunction
+
+function! s:setup_highlight() abort
+  call s:link_highlights()
+  call s:setup_syntax()
 endfunction
 
 " ── rendering ────────────────────────────────────────────────────────────────

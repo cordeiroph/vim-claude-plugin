@@ -384,6 +384,29 @@ The glyph before each name is the session's status:
 Status is polled only while the panel is visible; hiding it stops the poller
 completely.
 
+Colours~
+  The panel borrows NERDTree's palette so the two halves of the sidebar look
+  like one thing: group nodes are coloured like directories, session names
+  like files, and the header like NERDTree's root line. Where NERDTree's own
+  highlight groups exist they are used directly, so restyling NERDTree
+  restyles the panel; otherwise the same underlying groups are used, and the
+  colours are identical without NERDTree installed.
+
+  Override any of these to restyle just the panel: >
+    highlight link ClaudeSessionHeader     Title
+    highlight link ClaudeSessionProject    Statement
+    highlight link ClaudeSessionWorktree   Directory
+    highlight link ClaudeSessionBranch     Directory
+    highlight link ClaudeSessionMarker     Directory
+    highlight link ClaudeSessionName       Normal
+    highlight link ClaudeSessionNameClosed NonText
+    highlight link ClaudeSessionActive     Number
+    highlight link ClaudeSessionIdle       Comment
+    highlight link ClaudeSessionClosed     Comment
+    highlight link ClaudeSessionHelp       String
+<
+  A link you set yourself is never overwritten.
+
 Keys inside the panel~
   <CR>, o      Open the session, or fold a group node
   i            Open the session in a horizontal split

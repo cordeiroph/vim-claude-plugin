@@ -118,6 +118,8 @@ Claude Sessions               (3)
 
 `●` active, `○` idle (no output for 30s), `✗` closed but resumable.
 
+The panel uses NERDTree's palette — group nodes coloured like directories, session names like files — so the sidebar reads as one thing. Where NERDTree's highlight groups exist they are used directly, so restyling NERDTree restyles the panel. Override `ClaudeSessionProject`, `ClaudeSessionWorktree`, `ClaudeSessionBranch`, `ClaudeSessionName`, `ClaudeSessionActive` and friends to restyle just the panel; a link you set is never overwritten.
+
 | Key | Action |
 |-----|--------|
 | `<CR>` / `o` | Open the session, or fold a group |

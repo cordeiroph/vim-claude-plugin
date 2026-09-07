@@ -167,6 +167,9 @@ augroup claude_plugin
   " NERDTreeInit, so the repair lands before the two columns are painted.
   " NERDTreeInit is kept as a second chance for trees that skip that path.
   autocmd FileType nerdtree call claude#panel#_nerdtree_init()
+  " NERDTree's highlight groups only exist once its syntax file has been
+  " sourced, so pick them up the first time a tree appears.
+  autocmd FileType nerdtree call claude#panel#_relink()
   autocmd User NERDTreeInit call claude#panel#_nerdtree_init()
   if exists('##WinClosed')
     autocmd WinClosed * call claude#panel#_win_closed(expand('<amatch>'))
