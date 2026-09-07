@@ -13,6 +13,7 @@ let s:prev_winid = -1
 let s:show_help  = 0
 let s:collapsed  = {}     " group key -> 1 while that node is folded shut
 let s:rendered   = []     " session ids in the order last drawn
+let s:nerd_winid = -1     " NERDTree window we are currently stacked with
 
 " ── glyphs ───────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,137 @@ function! s:panel_split_cmd() abort
   let l:anchor = get(g:, 'claude_panel_anchor', 'left')
   let l:pos    = l:anchor ==# 'right' ? 'botright' : 'topleft'
   return l:pos . ' vertical ' . s:width() . 'split'
+endfunction
+
+" ── NERDTree stacking ───────────────────────────────────────────────────────
+"
+" The panel and NERDTree are both left-anchored vertical splits with no
+" knowledge of each other, so whichever opens second claims the screen edge
+" and the two end up as separate columns. NERDTree's split is unconditional
+" (lib/nerdtree/creator.vim), so the layout cannot be got right up front — it
+" is repaired afterwards by moving the panel into NERDTree's column.
+"
+" claude#panel#stack() is idempotent and cheap when the layout is already
+" correct, which is what makes it safe to call from a timer.
+
+function! s:stack_enabled() abort
+  return get(g:, 'claude_panel_nerdtree_stack', 1) && exists('*win_splitmove')
+endfunction
+
+" Window id of NERDTree in the current tab, or -1. IsOpen() consults
+" t:NERDTreeBufName, so this is tab-local by construction.
+function! s:nerdtree_winid() abort
+  if !exists('g:NERDTree')
+    return -1
+  endif
+  try
+    if !g:NERDTree.IsOpen()
+      return -1
+    endif
+    let l:nr = g:NERDTree.GetWinNum()
+  catch
+    return -1
+  endtry
+  return l:nr > 0 ? win_getid(l:nr) : -1
+endfunction
+
+" Buffer number of NERDTree in this tab, or -1. Used by claude#_quit_pre() so
+" a sidebar is not counted as an ordinary window.
+function! claude#panel#nerdtree_bufnr() abort
+  if !exists('t:NERDTreeBufName')
+    return -1
+  endif
+  return bufnr(t:NERDTreeBufName)
+endfunction
+
+" True when {pwin} sits directly above {nwin} in one column.
+function! s:is_stacked(pwin, nwin) abort
+  return s:find_stacked(winlayout(), a:pwin, a:nwin)
+endfunction
+
+function! s:find_stacked(node, pwin, nwin) abort
+  if a:node[0] ==# 'leaf'
+    return v:false
+  endif
+  if a:node[0] ==# 'col'
+    let l:kids = a:node[1]
+    for l:i in range(len(l:kids) - 1)
+      if l:kids[l:i][0] ==# 'leaf' && l:kids[l:i + 1][0] ==# 'leaf'
+            \ && l:kids[l:i][1] == a:pwin && l:kids[l:i + 1][1] == a:nwin
+        return v:true
+      endif
+    endfor
+  endif
+  for l:kid in a:node[1]
+    if s:find_stacked(l:kid, a:pwin, a:nwin)
+      return v:true
+    endif
+  endfor
+  return v:false
+endfunction
+
+" Give the panel its fixed height and let NERDTree absorb every resize.
+function! s:apply_stacked_height() abort
+  let l:pwin = bufwinid(s:bufnr)
+  if l:pwin == -1
+    return
+  endif
+  call win_execute(l:pwin,
+        \ 'resize ' . get(g:, 'claude_panel_height', 15)
+        \ . ' | setlocal winfixheight')
+endfunction
+
+" Put the panel above NERDTree in a single column. No-op unless both are open
+" in this tab and stacking is available.
+function! claude#panel#stack() abort
+  if !s:stack_enabled() || !claude#panel#is_open()
+    return
+  endif
+  let l:nwin = s:nerdtree_winid()
+  let l:pwin = bufwinid(s:bufnr)
+  if l:nwin == -1 || l:pwin == -1 || l:pwin == l:nwin
+    return
+  endif
+
+  if !s:is_stacked(l:pwin, l:nwin)
+    " rightbelow:0 always lands the moved window above the target, so the
+    " panel ends up on top no matter which of the two opened first.
+    try
+      call win_splitmove(l:pwin, l:nwin,
+            \ {'vertical': v:false, 'rightbelow': v:false})
+    catch
+      return
+    endtry
+  endif
+
+  let s:nerd_winid = l:nwin
+  call s:apply_stacked_height()
+endfunction
+
+" NERDTree is still building its window when NERDTreeInit fires; defer the
+" repair until it has settled.
+function! claude#panel#_nerdtree_init() abort
+  if s:stack_enabled()
+    call timer_start(0, {-> claude#panel#stack()})
+  endif
+endfunction
+
+" WinClosed hook. Only the NERDTree window we stacked with matters: once it is
+" gone the column collapses on its own, so the panel merely has to stop being
+" height-fixed in order to reclaim the space.
+function! claude#panel#_win_closed(winid) abort
+  if s:nerd_winid == -1 || str2nr(a:winid) != s:nerd_winid
+    return
+  endif
+  let s:nerd_winid = -1
+  call timer_start(0, {-> s:unfix_height()})
+endfunction
+
+function! s:unfix_height() abort
+  if !claude#panel#is_open()
+    return
+  endif
+  call win_execute(bufwinid(s:bufnr), 'setlocal nowinfixheight')
 endfunction
 
 function! claude#panel#is_open() abort
@@ -90,6 +222,7 @@ function! claude#panel#open() abort
 
   call claude#session#refresh()
   call s:render()
+  call claude#panel#stack()
   call s:start_timer()
 endfunction
 
@@ -121,6 +254,7 @@ function! s:buf_options() abort
   setlocal foldcolumn=0
   setlocal cursorline
   setlocal winfixwidth
+  setlocal nowinfixheight
   setlocal nomodifiable
   setlocal filetype=claudesessions
 endfunction
@@ -334,6 +468,9 @@ function! s:tick(timer) abort
   if claude#session#poll()
     call s:repaint()
   endif
+  " Backstop: re-stack if something disturbed the layout. Cheap, and a no-op
+  " when the panel and NERDTree already share a column.
+  call claude#panel#stack()
 endfunction
 
 " Repaint the status column in place. Falls back to a full rebuild when the
@@ -488,16 +625,34 @@ endfunction
 
 " Leave the panel for the main area. Returns 2 when a fresh window had to be
 " created (the panel was alone), 1 when an existing window was entered.
+" True when {winid} is a sidebar — the panel or NERDTree — rather than
+" somewhere a session may be opened.
+function! s:is_sidebar(winid) abort
+  if a:winid <= 0 || win_id2win(a:winid) <= 0
+    return v:true
+  endif
+  if s:bufnr != -1 && a:winid == bufwinid(s:bufnr)
+    return v:true
+  endif
+  return a:winid == s:nerdtree_winid()
+endfunction
+
 function! s:enter_main() abort
-  let l:panel_win = s:bufnr == -1 ? -1 : bufwinid(s:bufnr)
-  if win_getid() != l:panel_win
+  if !s:is_sidebar(win_getid())
     return 1
   endif
-  if s:prev_winid > 0 && win_id2win(s:prev_winid) > 0
-        \ && s:prev_winid != l:panel_win
+  if !s:is_sidebar(s:prev_winid)
     call win_gotoid(s:prev_winid)
     return 1
   endif
+  " The remembered window is gone or is itself a sidebar: take any ordinary
+  " window in this tab before falling back to creating one.
+  for l:nr in range(1, winnr('$'))
+    if !s:is_sidebar(win_getid(l:nr))
+      call win_gotoid(win_getid(l:nr))
+      return 1
+    endif
+  endfor
   execute claude#split_cmd()
   enew
   setlocal noswapfile
@@ -581,4 +736,5 @@ function! claude#panel#_reset() abort
   let s:show_help  = 0
   let s:collapsed  = {}
   let s:rendered   = []
+  let s:nerd_winid = -1
 endfunction

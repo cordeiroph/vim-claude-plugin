@@ -128,6 +128,24 @@ g:claude_panel_closed_limit~
   Default: 10
 
 ------------------------------------------------------------------------------
+                                                         *g:claude_panel_height*
+g:claude_panel_height~
+  Panel height in lines while it shares a column with NERDTree. The panel is
+  pinned to this height and NERDTree takes the remaining lines.
+
+  Default: 15
+  See also: |claude-nerdtree|
+
+------------------------------------------------------------------------------
+                                                 *g:claude_panel_nerdtree_stack*
+g:claude_panel_nerdtree_stack~
+  When 1 (default), the panel and NERDTree share a single column with the
+  panel on top. Set to 0 to leave them as separate side-by-side columns.
+
+  Default: 1
+  See also: |claude-nerdtree|
+
+------------------------------------------------------------------------------
                                                       *g:claude_panel_auto_open*
 g:claude_panel_auto_open~
   Set to 1 to open the session panel automatically on |VimEnter|.
@@ -390,6 +408,33 @@ Reopening a closed session~
   such a session claims its id for a fresh conversation instead of failing —
   the panel entry, its name and its id are kept, and only the (empty) history
   is lost. Sessions that do have a transcript are resumed normally.
+
+Sharing a column with NERDTree                                *claude-nerdtree*
+
+The panel and NERDTree are both anchored to the side of the screen, so on
+their own they would form two columns and eat most of the window. When both
+are open they instead share one column, with the panel on top: >
+
+    +----------------+-------------------------------+
+    | Claude Sessions|                               |
+    | (panel)        |   your code                   |
+    +----------------+                               |
+    | NERDTree       |                               |
+    |                |                               |
+    +----------------+-------------------------------+
+<
+This happens whichever of the two is opened first, and either can be closed
+without disturbing the other — closing NERDTree gives the whole column back to
+the panel, and hiding the panel leaves NERDTree with it.
+
+The panel takes |g:claude_panel_height| lines and NERDTree takes the rest, so
+resizing the column changes NERDTree's share. While stacked the column is
+NERDTree's width (`g:NERDTreeWinSize`), not |g:claude_panel_width|: NERDTree
+resets its own width whenever it redraws, so the panel does not fight it.
+
+Set |g:claude_panel_nerdtree_stack| to 0 to keep the two as separate columns.
+Stacking also switches itself off on Vim builds without |win_splitmove()|
+(before 8.1.1140), and does nothing at all when NERDTree is not installed.
 
 Choosing a session                                       *claude-session-target*
 

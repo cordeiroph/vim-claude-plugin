@@ -82,6 +82,18 @@ if !exists('g:claude_panel_auto_open')
   let g:claude_panel_auto_open = 0
 endif
 
+" g:claude_panel_height — panel height in lines while it shares a column with
+" NERDTree. The panel is height-fixed at this size and NERDTree takes the rest.
+if !exists('g:claude_panel_height')
+  let g:claude_panel_height = 15
+endif
+
+" g:claude_panel_nerdtree_stack — 1 (default) stacks the panel above NERDTree
+" in one column when both are open. 0 leaves them as separate columns.
+if !exists('g:claude_panel_nerdtree_stack')
+  let g:claude_panel_nerdtree_stack = 1
+endif
+
 " g:claude_session_store — where session names are persisted. Defaults to
 " data/sessions.json inside the plugin directory, which keeps the plugin
 " self-contained but is wiped by a plugin reinstall; point this somewhere
@@ -149,6 +161,12 @@ augroup claude_plugin
   " Track the most recently focused session, so the picker offers it first.
   autocmd WinEnter * call claude#_win_enter()
   autocmd VimEnter * if g:claude_panel_auto_open | call claude#panel#open() | endif
+  " Share one column with NERDTree: re-stack when it opens, and let the panel
+  " reclaim the column when it closes. Both hooks no-op without NERDTree.
+  autocmd User NERDTreeInit call claude#panel#_nerdtree_init()
+  if exists('##WinClosed')
+    autocmd WinClosed * call claude#panel#_win_closed(expand('<amatch>'))
+  endif
 augroup END
 
 " ── keymaps ──────────────────────────────────────────────────────────────────

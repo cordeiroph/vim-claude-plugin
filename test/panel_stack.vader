@@ -1,0 +1,173 @@
+" Tests for sharing one sidebar column with NERDTree.
+"
+" NERDTree cannot be driven from a scripted Vim — `silent NERDTree` deadlocks
+" and even a bare invocation often fails to return — so these tests stub its
+" API (g:NERDTree.IsOpen / GetWinNum / t:NERDTreeBufName) and stand in for its
+" window with a structurally identical one: a left-anchored, width-fixed
+" scratch split. What is exercised is the plugin's own logic, not NERDTree.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:_saved_cmd   = get(g:, 'claude_cmd', 'claude')
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:claude_cmd = 'sleep 30'
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  let g:claude_panel_closed_limit = 0
+  let g:claude_panel_nerdtree_stack = 1
+  let g:claude_panel_height = 15
+  call claude#store#_reset()
+
+  " A stand-in for NERDTree's window.
+  function! FakeTree() abort
+    topleft vertical 31split
+    enew
+    setlocal buftype=nofile bufhidden=wipe noswapfile winfixwidth
+    silent! file fake-nerdtree
+    let t:NERDTreeBufName = 'fake-nerdtree'
+    let g:_fake_win = win_getid()
+    return g:_fake_win
+  endfunction
+
+  function! CloseFakeTree() abort
+    if exists('g:_fake_win') && win_id2win(g:_fake_win) > 0
+      let l:id = g:_fake_win
+      unlet g:_fake_win
+      call win_execute(l:id, 'close')
+      call claude#panel#_win_closed(l:id)
+    endif
+    unlet! g:_fake_win
+    unlet! t:NERDTreeBufName
+  endfunction
+
+  " Stub NERDTree's public API against that window.
+  let g:NERDTree = {}
+  function! g:NERDTree.IsOpen() abort
+    return exists('g:_fake_win') && win_id2win(g:_fake_win) > 0
+  endfunction
+  function! g:NERDTree.GetWinNum() abort
+    return exists('g:_fake_win') ? win_id2win(g:_fake_win) : -1
+  endfunction
+
+  " Panel window above the sidebar window, in one column?
+  function! Stacked() abort
+    let l:p = bufwinid(claude#panel#bufnr())
+    let l:n = get(g:, '_fake_win', -1)
+    if l:p <= 0 || l:n <= 0 | return 0 | endif
+    let l:pp = win_screenpos(win_id2win(l:p))
+    let l:np = win_screenpos(win_id2win(l:n))
+    return l:pp[1] == l:np[1] && l:pp[0] < l:np[0]
+  endfunction
+
+After:
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  unlet! g:NERDTree
+  unlet! g:_fake_win
+  unlet! t:NERDTreeBufName
+  let g:claude_cmd           = g:_saved_cmd
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+  silent! only
+
+" ── stacking ─────────────────────────────────────────────────────────────────
+
+Execute (sidebar first, then the panel: they share one column):
+  call FakeTree()
+  call claude#panel#open()
+  Assert Stacked(), 'the panel should sit above the sidebar in one column'
+
+Execute (panel first, then the sidebar: stack() repairs the layout):
+  call claude#panel#open()
+  call FakeTree()
+  " NERDTree would fire NERDTreeInit here; call the repair pass directly.
+  call claude#panel#stack()
+  Assert Stacked(), 'the panel should be moved above the sidebar'
+
+Execute (the panel is on top regardless of which opened first):
+  call claude#panel#open()
+  call FakeTree()
+  call claude#panel#stack()
+  let ppos = win_screenpos(win_id2win(bufwinid(claude#panel#bufnr())))
+  let npos = win_screenpos(win_id2win(g:_fake_win))
+  Assert ppos[0] < npos[0], 'panel row must be above the sidebar row'
+
+Execute (stacking is idempotent):
+  call FakeTree()
+  call claude#panel#open()
+  let before = winlayout()
+  call claude#panel#stack()
+  call claude#panel#stack()
+  AssertEqual before, winlayout(), 'repeated stacking must not churn windows'
+
+" ── sizing ───────────────────────────────────────────────────────────────────
+
+Execute (the panel takes the configured height and the sidebar the rest):
+  let g:claude_panel_height = 12
+  call FakeTree()
+  call claude#panel#open()
+  AssertEqual 12, winheight(win_id2win(bufwinid(claude#panel#bufnr())))
+  Assert winheight(win_id2win(g:_fake_win)) > 0,
+        \ 'the sidebar keeps the remaining lines'
+  let g:claude_panel_height = 15
+
+Execute (the panel is height-fixed while stacked):
+  call FakeTree()
+  call claude#panel#open()
+  AssertEqual 1, getwinvar(win_id2win(bufwinid(claude#panel#bufnr())),
+        \ '&winfixheight')
+
+Execute (a standalone panel is not height-fixed):
+  call claude#panel#open()
+  AssertEqual 0, getwinvar(win_id2win(bufwinid(claude#panel#bufnr())),
+        \ '&winfixheight'),
+        \ 'without a sidebar the panel must not be pinned to a height'
+
+Execute (closing the sidebar releases the panel height):
+  call FakeTree()
+  call claude#panel#open()
+  AssertEqual 1, getwinvar(win_id2win(bufwinid(claude#panel#bufnr())),
+        \ '&winfixheight')
+  call CloseFakeTree()
+  " The WinClosed hook defers its work to a timer.
+  sleep 100m
+  AssertEqual 0, getwinvar(win_id2win(bufwinid(claude#panel#bufnr())),
+        \ '&winfixheight'),
+        \ 'the panel should reclaim the column when the sidebar goes'
+
+" ── sessions never open into a sidebar ───────────────────────────────────────
+
+Execute (a session opens beside the sidebars, not inside them):
+  call FakeTree()
+  call claude#panel#open()
+  let id = claude#session#new('somewhere else')
+  call win_execute(bufwinid(claude#session#get(id).bufnr), 'hide')
+  call claude#panel#open_session(id, 'split')
+  let twin = bufwinid(claude#session#get(id).bufnr)
+  Assert twin != -1, 'the session should be visible'
+  Assert win_screenpos(win_id2win(twin))[1]
+        \ > win_screenpos(win_id2win(g:_fake_win))[1],
+        \ 'the session must open to the right of the sidebar column'
+  Assert win_id2win(g:_fake_win) > 0, 'the sidebar must survive'
+
+Execute (the sidebar is not counted as an ordinary window on quit):
+  call FakeTree()
+  call claude#panel#open()
+  AssertEqual bufnr('fake-nerdtree'), claude#panel#nerdtree_bufnr()
+  Assert index(claude#session#bufnrs(), claude#panel#nerdtree_bufnr()) == -1
+
+" ── opting out ───────────────────────────────────────────────────────────────
+
+Execute (stacking disabled leaves two separate columns):
+  let g:claude_panel_nerdtree_stack = 0
+  call FakeTree()
+  call claude#panel#open()
+  let g:claude_panel_nerdtree_stack = 1
+  Assert !Stacked(), 'with stacking off the two must not share a column'

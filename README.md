@@ -67,6 +67,10 @@ let g:claude_split_size = 80
 " Shell command used to launch Claude
 let g:claude_cmd = 'claude'
 
+" Share one column with NERDTree (panel on top); 0 keeps separate columns
+let g:claude_panel_nerdtree_stack = 1
+let g:claude_panel_height = 15
+
 " Session panel: width, edge, and how often status is polled while it is open
 let g:claude_panel_width = 35
 let g:claude_panel_anchor = 'left'
@@ -132,6 +136,20 @@ Claude Sessions               (3)
 Hiding the panel never stops a session. Status is polled only while the panel is visible.
 
 Claude only writes a conversation to disk once it has content, so a session you started but never messaged has nothing to resume. Opening one of those claims its id for a fresh conversation rather than failing — the name and id are kept.
+
+### Sharing a column with NERDTree
+
+The panel and NERDTree would otherwise form two columns and swallow most of the screen. When both are open they share one column, panel on top:
+
+```
++----------------+---------------------------+
+| Claude Sessions|                           |
++----------------+   your code               |
+| NERDTree       |                           |
++----------------+---------------------------+
+```
+
+It works whichever opens first, and closing either one hands the column to the other. The panel takes `g:claude_panel_height` lines; NERDTree takes the rest. While stacked the column is NERDTree's width, since NERDTree resets its own width on every redraw. Set `g:claude_panel_nerdtree_stack = 0` to opt out.
 
 ### Session names
 

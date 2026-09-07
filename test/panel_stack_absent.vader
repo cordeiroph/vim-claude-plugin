@@ -1,0 +1,92 @@
+" The panel must behave exactly as it always has for anyone who does not use
+" NERDTree. Every stacking hook is guarded, so with g:NERDTree undefined the
+" plugin must neither error nor change the layout it produces.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  " Make absolutely sure no stub from another suite is still defined.
+  unlet! g:NERDTree
+  unlet! t:NERDTreeBufName
+  unlet! g:_fake_win
+  let g:_saved_cmd   = get(g:, 'claude_cmd', 'claude')
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:claude_cmd = 'sleep 30'
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  let g:claude_panel_closed_limit = 0
+  call claude#store#_reset()
+
+After:
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  let g:claude_cmd           = g:_saved_cmd
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+  silent! only
+
+" ── NERDTree absent ──────────────────────────────────────────────────────────
+
+Execute (the panel opens normally with no NERDTree present):
+  Assert !exists('g:NERDTree'), 'precondition: NERDTree is not loaded'
+  call claude#panel#open()
+  Assert claude#panel#is_open()
+  AssertEqual g:claude_panel_width,
+        \ winwidth(win_id2win(bufwinid(claude#panel#bufnr()))),
+        \ 'a standalone panel keeps g:claude_panel_width'
+
+Execute (the panel is the leftmost window, as before):
+  call claude#panel#open()
+  AssertEqual 1, win_screenpos(win_id2win(bufwinid(claude#panel#bufnr())))[1]
+
+Execute (stack() is a harmless no-op):
+  call claude#panel#open()
+  let before = winlayout()
+  call claude#panel#stack()
+  AssertEqual before, winlayout()
+
+Execute (the panel is never height-fixed without a sidebar):
+  call claude#panel#open()
+  AssertEqual 0, getwinvar(win_id2win(bufwinid(claude#panel#bufnr())),
+        \ '&winfixheight')
+
+Execute (nerdtree_bufnr reports nothing to exclude):
+  AssertEqual -1, claude#panel#nerdtree_bufnr()
+
+Execute (the NERDTree hooks tolerate being called with nothing loaded):
+  call claude#panel#open()
+  call claude#panel#_nerdtree_init()
+  call claude#panel#_win_closed('12345')
+  sleep 50m
+  Assert claude#panel#is_open(), 'the panel should be unaffected'
+
+Execute (the panel toggles cleanly, as before):
+  call claude#panel#toggle()
+  Assert claude#panel#is_open()
+  call claude#panel#toggle()
+  Assert !claude#panel#is_open()
+
+Execute (a session still opens into the main area):
+  call claude#panel#open()
+  let id = claude#session#new('plain')
+  call win_execute(bufwinid(claude#session#get(id).bufnr), 'hide')
+  call claude#panel#open_session(id, 'split')
+  let twin = bufwinid(claude#session#get(id).bufnr)
+  Assert twin != -1, 'the session should be visible'
+  Assert win_screenpos(win_id2win(twin))[1]
+        \ > win_screenpos(win_id2win(bufwinid(claude#panel#bufnr())))[1],
+        \ 'the session must open to the right of the panel'
+  Assert claude#panel#is_open(), 'the panel must survive'
+
+Execute (hiding the panel still leaves the session running):
+  let id = claude#session#new('untouched')
+  let bufnr = claude#session#get(id).bufnr
+  call claude#panel#open()
+  call claude#panel#close()
+  AssertEqual 'run', job_status(term_getjob(bufnr))
