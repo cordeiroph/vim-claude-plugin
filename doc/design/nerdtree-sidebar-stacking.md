@@ -170,7 +170,7 @@ is safe to call from a timer.
 | Moment | Hook |
 |--------|------|
 | Panel opens while NERDTree is up | `claude#panel#open()`, **before** the transcript scan and first render — those are slow enough that Vim could otherwise redraw the unstacked layout first |
-| NERDTree opens while the panel is up | `autocmd User NERDTreeInit`, **synchronously**. The hook is the last thing `createTabTree()` does, so the window already exists; deferring to a timer would return control to Vim first and the two columns would be drawn side by side for a frame before snapping together |
+| NERDTree opens while the panel is up | `autocmd FileType nerdtree`, **synchronously** — see §4.4. `autocmd User NERDTreeInit` stays wired as a second chance |
 | NERDTree closes | `autocmd WinClosed` → drop `winfixheight` from the panel so it reclaims the column (the layout collapse itself is automatic) |
 | Anything else disturbs the layout | The panel's existing status-poll timer calls `s:stack()`, which is a no-op when the layout is already correct |
 
@@ -182,6 +182,47 @@ together.
 `win_splitmove()` does not change the current window, but the move is wrapped
 in a save/restore of `win_getid()` anyway so `:NERDTree` leaves the cursor in
 NERDTree, where the user expects it.
+
+### 4.4 Hook timing, and why it is `FileType`
+
+Measured, with the panel already open and `:NERDTree` invoked:
+
+```
+WinNew        14.0 ms   layout = row[1002, 1001, 1000]   three columns already
+BufWinEnter   18.5 ms   layout = row[1002, 1001, 1000]
+BufWinEnter NERD_tree_tab_1   23.6 ms
+NERDTreeInit  — did not fire within 12 s
+```
+
+NERDTree's window exists as its own column from the moment
+`Creator._createTreeWin()` splits. `User NERDTreeInit` is the **last** statement
+of `createTabTree()`, after `_createNERDTree()` and `render()` — and with
+`nerdtree-git-plugin` installed, `render()` runs git status calls. Repairing
+there is far too late: Vim has painted two columns and the user sees them jump
+together.
+
+`setlocal filetype=nerdtree` is the last line of `_setCommonBufOptions()`,
+which is the last call in `_createTreeWin()`. So `FileType nerdtree` fires
+**after NERDTree has created and sized its window, but before it builds or
+renders the tree** — the earliest moment the window can be identified, and
+before the slow part that gives Vim a chance to redraw.
+
+This forces two things:
+
+- The window lookup cannot use `g:NERDTree.ExistsForTab()`, which tests
+  `b:NERDTree` — that is not set until `_createNERDTree()` runs, after our
+  hook. `s:nerdtree_winid()` therefore resolves `t:NERDTreeBufName` through
+  `bufwinnr()` directly, which is set before the split and is also what
+  `IsOpen()`/`GetWinNum()` use.
+- The cursor must be restored after the move, because NERDTree is mid-way
+  through building itself and everything after `_setCommonBufOptions()` runs
+  against the current window.
+
+**Residual limitation.** The repair still cannot run *before* NERDTree's window
+exists, so this narrows the window for a visible flash rather than closing it
+by construction. Only driving the whole sequence ourselves — opening NERDTree
+first and splitting the panel into its column — removes the intermediate state
+entirely (§9).
 
 ### 4.3 Order enforcement
 
@@ -257,6 +298,12 @@ All in `autoload/claude/panel.vim` unless noted.
 
 ## 9. Future work
 
+- **A combined open/close command** driving both windows as a unit: open
+  NERDTree first, then split the panel into its column. Measured to produce
+  `row[col[PANEL(31x15) TREE(31x27)] main]` in one step with no intermediate
+  layout, so it is flash-free by construction rather than by narrowing a race.
+  It would also let the poll-timer backstop be dropped. It cannot help when
+  NERDTree is opened by its own command, which is what §4.4 covers.
 - Generalise to any sidebar via a configurable buffer/filetype list — tagbar
   and coc-explorer are both installed here and have the same collision.
 - Let the panel size itself to its content up to a cap, instead of a fixed

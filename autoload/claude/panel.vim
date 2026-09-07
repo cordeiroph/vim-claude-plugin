@@ -65,17 +65,25 @@ function! s:stack_enabled() abort
   return get(g:, 'claude_panel_nerdtree_stack', 1) && exists('*win_splitmove')
 endfunction
 
-" Window id of NERDTree in the current tab, or -1. IsOpen() consults
-" t:NERDTreeBufName, so this is tab-local by construction.
+" Window id of NERDTree in the current tab, or -1.
+"
+" t:NERDTreeBufName is set before the window is even split, so looking the
+" window up by name works while NERDTree is still building itself — which is
+" when the repair has to run to be invisible. g:NERDTree.GetWinNum() is the
+" same lookup, but going direct means this also works for a window tree, where
+" that variable is not set.
 function! s:nerdtree_winid() abort
+  if exists('t:NERDTreeBufName')
+    let l:nr = bufwinnr(t:NERDTreeBufName)
+    if l:nr > 0
+      return win_getid(l:nr)
+    endif
+  endif
   if !exists('g:NERDTree')
     return -1
   endif
   try
-    if !g:NERDTree.IsOpen()
-      return -1
-    endif
-    let l:nr = g:NERDTree.GetWinNum()
+    let l:nr = g:NERDTree.IsOpen() ? g:NERDTree.GetWinNum() : -1
   catch
     return -1
   endtry
@@ -161,11 +169,22 @@ function! claude#panel#stack() abort
   call s:apply_stacked_height()
 endfunction
 
-" NERDTreeInit fires at the very end of Creator.createTabTree(), after the
-" window has been created, rendered and given the cursor, so the layout can be
-" repaired here and now. Deferring to a timer would hand control back to Vim
-" first, and the two columns would be drawn side by side for a frame before
-" snapping together.
+" Repair hook for a NERDTree opened on its own (:NERDTree, <C-n>, a session
+" file, anything the plugin does not drive itself).
+"
+" Timing is everything here. NERDTree's window exists as its own column from
+" the moment Creator._createTreeWin() splits — measured at 14ms — and
+" User NERDTreeInit only fires at the very end of createTabTree(), after
+" _createNERDTree() and render(), which with nerdtree-git-plugin runs git
+" status calls. Repairing that late means Vim has already painted two columns
+" side by side.
+"
+" FileType nerdtree fires from the last line of _setCommonBufOptions(), the
+" last call in _createTreeWin() — after NERDTree has sized its window but
+" before it builds or renders the tree. That is the earliest point at which
+" the window can be identified, so it is the hook that keeps the repair
+" invisible. NERDTreeInit stays wired up as a second chance, and the panel's
+" poll timer remains the final backstop.
 function! claude#panel#_nerdtree_init() abort
   call claude#panel#stack()
 endfunction

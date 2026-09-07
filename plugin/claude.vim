@@ -163,6 +163,10 @@ augroup claude_plugin
   autocmd VimEnter * if g:claude_panel_auto_open | call claude#panel#open() | endif
   " Share one column with NERDTree: re-stack when it opens, and let the panel
   " reclaim the column when it closes. Both hooks no-op without NERDTree.
+  " FileType fires while NERDTree is still building itself, long before
+  " NERDTreeInit, so the repair lands before the two columns are painted.
+  " NERDTreeInit is kept as a second chance for trees that skip that path.
+  autocmd FileType nerdtree call claude#panel#_nerdtree_init()
   autocmd User NERDTreeInit call claude#panel#_nerdtree_init()
   if exists('##WinClosed')
     autocmd WinClosed * call claude#panel#_win_closed(expand('<amatch>'))

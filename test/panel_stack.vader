@@ -198,3 +198,44 @@ Execute (opening the panel onto an existing sidebar stacks before rendering):
   call FakeTree()
   call claude#panel#open()
   Assert Stacked(), 'the panel should already be in place when open() returns'
+
+" ── repairing an independently-opened NERDTree ───────────────────────────────
+"
+" When NERDTree is opened by its own command the plugin does not drive the
+" sequence, so the repair has to run as early as NERDTree can be identified.
+" FileType fires from the last line of Creator._setCommonBufOptions() — after
+" the window is sized, before the tree is built or rendered.
+
+Execute (the window is found while NERDTree is still being built):
+  " Mid-creation b:NERDTree does not exist yet, so ExistsForTab() would be
+  " false; the lookup must go through t:NERDTreeBufName instead.
+  call claude#panel#open()
+  call FakeTree()
+  unlet! g:NERDTree
+  call claude#panel#_nerdtree_init()
+  Assert Stacked(), 'the sidebar must be found without g:NERDTree being usable'
+
+Execute (a FileType nerdtree event repairs the layout):
+  call claude#panel#open()
+  call FakeTree()
+  Assert !Stacked(), 'precondition: the sidebar opened as its own column'
+  " Stand in for the event NERDTree fires from _setCommonBufOptions().
+  doautocmd FileType nerdtree
+  Assert Stacked(), 'FileType nerdtree should trigger the repair'
+
+Execute (the repair keeps the cursor in the tree window mid-creation):
+  call claude#panel#open()
+  let treewin = FakeTree()
+  call win_gotoid(treewin)
+  doautocmd FileType nerdtree
+  AssertEqual treewin, win_getid(),
+        \ 'NERDTree must keep focus so it can finish building itself'
+
+Execute (repeated events do not churn the layout):
+  call claude#panel#open()
+  call FakeTree()
+  doautocmd FileType nerdtree
+  let settled = winlayout()
+  doautocmd FileType nerdtree
+  call claude#panel#_nerdtree_init()
+  AssertEqual settled, winlayout()
