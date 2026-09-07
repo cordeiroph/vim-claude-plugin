@@ -144,16 +144,15 @@ function! claude#_quit_pre() abort
   if tabpagenr('$') > 1
     return
   endif
-  let l:claude_bufs = claude#session#bufnrs()
-  let l:panel_buf   = claude#panel#bufnr()
-  let l:nerd_buf    = claude#panel#nerdtree_bufnr()
+  let l:claude_bufs  = claude#session#bufnrs()
+  let l:sidebar_bufs = claude#sidebar#bufnrs()
   let l:others = 0
   for l:winnr in range(1, winnr('$'))
     let l:bufnr = winbufnr(l:winnr)
-    " Sidebars are not ordinary windows: a visible NERDTree must not stop a
-    " real :q from being recognised as the last one.
-    if index(l:claude_bufs, l:bufnr) == -1 && l:bufnr != l:panel_buf
-          \ && l:bufnr != l:nerd_buf
+    " Sidebars are not ordinary windows: a visible NERDTree or panel must not
+    " stop a real :q from being recognised as the last one.
+    if index(l:claude_bufs, l:bufnr) == -1
+          \ && index(l:sidebar_bufs, l:bufnr) == -1
       let l:others += 1
     endif
   endfor

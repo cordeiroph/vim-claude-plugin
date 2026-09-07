@@ -1,0 +1,262 @@
+" Tests for the shared sidebar column: every open sidebar ends up in one
+" column, ordered by priority — sessions on top, diff tree in the middle,
+" NERDTree at the bottom — whichever order they were opened in.
+"
+" NERDTree cannot be driven from a scripted Vim, so it is stubbed and stood in
+" for by a structurally identical window: a left-anchored, width-fixed scratch
+" split. The diff tree is stood in for the same way, registered at its real
+" priority of 20.
+
+Before:
+  call claude#panel#_reset()
+  call claude#sidebar#_reset()
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  let g:claude_panel_closed_limit = 0
+  let g:claude_panel_nerdtree_stack = 1
+  let g:claude_panel_height = 15
+  call claude#store#_reset()
+
+  function! Bar(name, var) abort
+    topleft vertical 31split
+    enew
+    setlocal buftype=nofile bufhidden=wipe noswapfile winfixwidth
+    execute 'silent! file ' . a:name
+    execute 'let g:' . a:var . ' = win_getid()'
+    return win_getid()
+  endfunction
+
+  " Stand-in for the diff tree, registered at its real priority.
+  function! OpenDiff() abort
+    return Bar('fake-difftree', '_diff_win')
+  endfunction
+  call claude#sidebar#register({
+        \ 'name':     'difftree-test',
+        \ 'priority': 20,
+        \ 'Winid':    {-> exists('g:_diff_win') && win_id2win(g:_diff_win) > 0
+        \                 ? g:_diff_win : -1},
+        \ 'Height':   {-> 12},
+        \ })
+
+  " Stand-in for NERDTree, found the way the real one is.
+  function! OpenNerd() abort
+    let l:id = Bar('fake-nerdtree', '_nerd_win')
+    let t:NERDTreeBufName = 'fake-nerdtree'
+    return l:id
+  endfunction
+
+  function! OpenSess() abort
+    call claude#panel#open()
+    return claude#panel#winid()
+  endfunction
+
+  function! Open(name) abort
+    if a:name ==# 'SESS' | return OpenSess() | endif
+    if a:name ==# 'DIFF' | return OpenDiff() | endif
+    return OpenNerd()
+  endfunction
+
+  function! Winid(name) abort
+    if a:name ==# 'SESS' | return claude#panel#winid() | endif
+    if a:name ==# 'DIFF' | return get(g:, '_diff_win', -1) | endif
+    return claude#sidebar#nerdtree_winid()
+  endfunction
+
+  " Live sidebars, top to bottom by screen row.
+  function! Order() abort
+    let l:rows = []
+    for l:name in ['SESS', 'DIFF', 'NERD']
+      let l:id = Winid(l:name)
+      if l:id > 0 && win_id2win(l:id) > 0
+        call add(l:rows, [win_screenpos(win_id2win(l:id))[0], l:name])
+      endif
+    endfor
+    call sort(l:rows, {a, b -> a[0] - b[0]})
+    return map(l:rows, {_, r -> r[1]})
+  endfunction
+
+  " True when every live sidebar starts at the same screen column.
+  function! OneColumn() abort
+    let l:cols = []
+    for l:name in ['SESS', 'DIFF', 'NERD']
+      let l:id = Winid(l:name)
+      if l:id > 0 && win_id2win(l:id) > 0
+        call add(l:cols, win_screenpos(win_id2win(l:id))[1])
+      endif
+    endfor
+    return len(uniq(sort(l:cols))) <= 1
+  endfunction
+
+After:
+  call claude#sidebar#_unregister('difftree-test')
+  call claude#panel#_reset()
+  call claude#sidebar#_reset()
+  unlet! g:_diff_win
+  unlet! g:_nerd_win
+  unlet! t:NERDTreeBufName
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+  silent! only
+
+" ── every opening order converges ────────────────────────────────────────────
+
+Execute (opened sessions, diff, nerdtree):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn(), 'all three must share one column'
+
+Execute (opened sessions, nerdtree, diff):
+  for n in ['SESS', 'NERD', 'DIFF'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn()
+
+Execute (opened diff, sessions, nerdtree):
+  for n in ['DIFF', 'SESS', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn()
+
+Execute (opened diff, nerdtree, sessions):
+  for n in ['DIFF', 'NERD', 'SESS'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn()
+
+Execute (opened nerdtree, sessions, diff):
+  for n in ['NERD', 'SESS', 'DIFF'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn()
+
+Execute (opened nerdtree, diff, sessions):
+  for n in ['NERD', 'DIFF', 'SESS'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn()
+
+" ── subsets keep the relative order ──────────────────────────────────────────
+
+Execute (sessions and nerdtree only):
+  for n in ['NERD', 'SESS'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'NERD'], Order()
+
+Execute (diff and nerdtree only):
+  for n in ['NERD', 'DIFF'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['DIFF', 'NERD'], Order()
+
+Execute (sessions and diff only):
+  for n in ['DIFF', 'SESS'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF'], Order()
+
+Execute (a lone sidebar is left as its own column):
+  call Open('SESS')
+  call claude#sidebar#stack()
+  AssertEqual ['SESS'], Order()
+  AssertEqual 0, getwinvar(win_id2win(claude#panel#winid()), '&winfixheight'),
+        \ 'a sidebar with no neighbours must not be height-fixed'
+
+" ── idempotency ──────────────────────────────────────────────────────────────
+
+Execute (a second sweep changes nothing):
+  for n in ['NERD', 'DIFF', 'SESS'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  let settled = winlayout()
+  call claude#sidebar#stack()
+  call claude#sidebar#stack()
+  AssertEqual settled, winlayout(), 'stacking must be idempotent'
+
+" ── heights ──────────────────────────────────────────────────────────────────
+
+Execute (each sidebar but the bottom one is fixed at its own height):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  AssertEqual 15, winheight(win_id2win(claude#panel#winid()))
+  AssertEqual 12, winheight(win_id2win(g:_diff_win))
+  AssertEqual 1, getwinvar(win_id2win(claude#panel#winid()), '&winfixheight')
+  AssertEqual 1, getwinvar(win_id2win(g:_diff_win), '&winfixheight')
+  Assert winheight(win_id2win(g:_nerd_win)) > 0,
+        \ 'the bottom sidebar absorbs the remaining lines'
+  AssertEqual 0, getwinvar(win_id2win(g:_nerd_win), '&winfixheight'),
+        \ 'the bottom sidebar is never height-fixed'
+
+Execute (a hand-resized sidebar is not corrected by a later sweep):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  call win_execute(claude#panel#winid(), 'resize 20')
+  call claude#sidebar#stack()
+  AssertEqual 20, winheight(win_id2win(claude#panel#winid()))
+
+" ── closing and reopening ────────────────────────────────────────────────────
+
+Execute (closing the middle sidebar leaves the other two ordered):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  call win_execute(g:_diff_win, 'close')
+  unlet g:_diff_win
+  AssertEqual ['SESS', 'NERD'], Order()
+  Assert OneColumn()
+
+Execute (closing the bottom sidebar leaves the other two ordered):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  let nerd = g:_nerd_win
+  unlet! t:NERDTreeBufName
+  call win_execute(nerd, 'close')
+  unlet g:_nerd_win
+  AssertEqual ['SESS', 'DIFF'], Order()
+
+Execute (closing the top sidebar leaves the other two ordered):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  call claude#panel#close()
+  AssertEqual ['DIFF', 'NERD'], Order()
+
+Execute (a reopened sidebar is put back in place):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  call win_execute(g:_diff_win, 'close')
+  unlet g:_diff_win
+  call OpenDiff()
+  " A raw reopen splits a fresh column at the screen edge, so the sidebars are
+  " no longer aligned. (Order() alone cannot show this: it sorts by row, and
+  " two windows in different columns can share one.)
+  Assert !OneColumn(), 'precondition: a raw reopen lands outside the column'
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert OneColumn()
+
+" ── ordinary windows are never absorbed ──────────────────────────────────────
+
+Execute (an unrelated split is left alone):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  call claude#sidebar#enter_main(-1)
+  vsplit
+  let extra = win_getid()
+  call claude#sidebar#stack()
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  Assert win_id2win(extra) > 0, 'the unrelated split must survive'
+  Assert !claude#sidebar#is_sidebar(extra),
+        \ 'an ordinary window is not a sidebar'
+
+Execute (every registered sidebar is recognised as one):
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  Assert claude#sidebar#is_sidebar(claude#panel#winid())
+  Assert claude#sidebar#is_sidebar(g:_diff_win)
+  Assert claude#sidebar#is_sidebar(g:_nerd_win)
+  AssertEqual 3, len(claude#sidebar#winids())
+
+Execute (stacking disabled leaves the sidebars in separate columns):
+  let g:claude_panel_nerdtree_stack = 0
+  for n in ['SESS', 'DIFF', 'NERD'] | call Open(n) | endfor
+  call claude#sidebar#stack()
+  let g:claude_panel_nerdtree_stack = 1
+  Assert !OneColumn(), 'with stacking off they must stay separate columns'
