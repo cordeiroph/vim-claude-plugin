@@ -1,0 +1,81 @@
+" Tests for claude#session#group_of() — the Project > Worktree > Branch
+" derivation. Uses a real fixture repository; no terminal, no Claude process.
+
+Before:
+  call claude#session#_reset()
+  let g:_repo = tempname()
+  call mkdir(g:_repo, 'p')
+  " -q keeps git quiet; the default branch name is pinned so the assertions
+  " don't depend on the user's init.defaultBranch.
+  call system('git -C ' . shellescape(g:_repo) . ' init -q -b main')
+  call system('git -C ' . shellescape(g:_repo) . ' config user.email t@t')
+  call system('git -C ' . shellescape(g:_repo) . ' config user.name test')
+  call writefile(['hello'], g:_repo . '/file.txt')
+  call system('git -C ' . shellescape(g:_repo) . ' add -A')
+  call system('git -C ' . shellescape(g:_repo) . ' commit -qm first')
+
+After:
+  call claude#session#_reset()
+  call delete(g:_repo, 'rf')
+
+" ── plain repository ─────────────────────────────────────────────────────────
+
+Execute (a repo root groups by its own path and branch):
+  let g = claude#session#group_of(resolve(g:_repo))
+  AssertEqual resolve(g:_repo), g.project
+  AssertEqual resolve(g:_repo), g.worktree
+  AssertEqual 'main',           g.branch
+
+Execute (a subdirectory resolves to the repository root, not itself):
+  call mkdir(g:_repo . '/sub/deep', 'p')
+  let g = claude#session#group_of(resolve(g:_repo) . '/sub/deep')
+  AssertEqual resolve(g:_repo), g.project
+  AssertEqual resolve(g:_repo), g.worktree
+
+" ── linked worktrees ─────────────────────────────────────────────────────────
+
+Execute (a linked worktree keeps the main repo as its project):
+  let wt = g:_repo . '-wt'
+  call system('git -C ' . shellescape(g:_repo)
+        \ . ' worktree add -q -b feature ' . shellescape(wt))
+  let g = claude#session#group_of(resolve(wt))
+  AssertEqual resolve(g:_repo), g.project,
+        \ 'a worktree must group under the main repository'
+  AssertEqual resolve(wt),      g.worktree,
+        \ 'the worktree is its own second-level group'
+  AssertEqual 'feature',        g.branch
+  call delete(wt, 'rf')
+
+" ── detached HEAD ────────────────────────────────────────────────────────────
+
+Execute (detached HEAD is labelled with the short sha):
+  call system('git -C ' . shellescape(g:_repo) . ' checkout -q --detach HEAD')
+  let g = claude#session#group_of(resolve(g:_repo))
+  Assert g.branch =~# '^(detached: \x\{7})$',
+        \ 'expected a detached label, got ' . g.branch
+
+" ── non-git directories ──────────────────────────────────────────────────────
+
+Execute (a directory outside any repo has no project or branch):
+  let plain = tempname()
+  call mkdir(plain, 'p')
+  let g = claude#session#group_of(plain)
+  AssertEqual '(no project)', g.project
+  AssertEqual plain,          g.worktree
+  AssertEqual '(no branch)',  g.branch
+  call delete(plain, 'rf')
+
+Execute (a path that does not exist falls back instead of erroring):
+  let g = claude#session#group_of('/no/such/directory/anywhere')
+  AssertEqual '(no project)', g.project
+  AssertEqual '(no branch)',  g.branch
+
+" ── memoisation ──────────────────────────────────────────────────────────────
+
+Execute (repeated lookups return equal results and are cached):
+  let first  = claude#session#group_of(resolve(g:_repo))
+  " Moving the repo away would break a fresh lookup; the cached answer stands.
+  call rename(g:_repo, g:_repo . '-moved')
+  let second = claude#session#group_of(resolve(g:_repo))
+  AssertEqual first, second, 'group_of must be memoised per directory'
+  call rename(g:_repo . '-moved', g:_repo)

@@ -1,0 +1,253 @@
+" Tests for the global session registry: creation, status transitions,
+" renaming, deletion and purging. A stand-in command is used so the tests
+" never launch the real Claude CLI.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:_saved_cmd   = get(g:, 'claude_cmd', 'claude')
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:claude_cmd = 'sleep 30'
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  call claude#store#_reset()
+
+After:
+  " Stop and wipe whatever terminals the test left behind.
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:claude_cmd           = g:_saved_cmd
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+  only
+
+" ── identifiers ──────────────────────────────────────────────────────────────
+
+Execute (uuid has the RFC-4122 v4 shape):
+  let id = claude#session#uuid()
+  Assert id =~# '^\x\{8}-\x\{4}-4\x\{3}-[89ab]\x\{3}-\x\{12}$',
+        \ 'not a v4 uuid: ' . id
+
+Execute (successive uuids differ):
+  Assert claude#session#uuid() !=# claude#session#uuid()
+
+" ── creation ─────────────────────────────────────────────────────────────────
+
+Execute (new() registers a live record with the given name):
+  let id = claude#session#new('panel design')
+  Assert !empty(id), 'new() should return a session id'
+  Assert claude#session#exists(id)
+  let rec = claude#session#get(id)
+  AssertEqual 'panel design', rec.name
+  AssertEqual 'live',         rec.origin
+  Assert rec.bufnr != -1,      'a live session must have a terminal buffer'
+  AssertEqual 'active', claude#session#status(id)
+
+Execute (the terminal buffer is tagged with its session id):
+  let id = claude#session#new('tagged')
+  let rec = claude#session#get(id)
+  AssertEqual id, getbufvar(rec.bufnr, 'claude_session_id', '')
+
+Execute (the name is persisted to the store immediately):
+  let id = claude#session#new('remembered')
+  let data = claude#store#load()
+  AssertEqual 'remembered', data.sessions[id].name
+
+Execute (two sessions run side by side in one tab):
+  " Vader runs each suite in its own tab, so count the delta rather than
+  " assuming a single tab page.
+  let tabs = tabpagenr('$')
+  let a = claude#session#new('one')
+  let b = claude#session#new('two')
+  Assert a !=# b, 'each session gets its own id'
+  AssertEqual 2, len(claude#session#live())
+  AssertEqual tabs, tabpagenr('$'), 'a second session must not open a new tab'
+  AssertEqual 'run', job_status(term_getjob(claude#session#get(a).bufnr))
+  AssertEqual 'run', job_status(term_getjob(claude#session#get(b).bufnr))
+
+" ── status ───────────────────────────────────────────────────────────────────
+
+Execute (a running session with recent output is active):
+  let id = claude#session#new('busy')
+  AssertEqual 'active', claude#session#status(id)
+
+Execute (a running session with no recent output is idle):
+  let id = claude#session#new('quiet')
+  " Backdate the last observed output past the idle threshold.
+  let g:claude_panel_idle_secs = 30
+  let rec = claude#session#get(id)
+  let rec.last_active = localtime() - 60
+  AssertEqual 'idle', claude#session#status(id)
+
+Execute (a dead job flips the record to closed but keeps it listed):
+  let id = claude#session#new('dying')
+  let bufnr = claude#session#get(id).bufnr
+  call job_stop(term_getjob(bufnr), 'kill')
+  sleep 300m
+  call claude#session#poll()
+  AssertEqual 'closed', claude#session#status(id)
+  Assert claude#session#exists(id), 'the record must outlive its job'
+  AssertEqual -1, claude#session#get(id).bufnr
+  Assert !bufexists(bufnr), 'the dead terminal buffer should be reaped'
+
+Execute (an unknown id is closed, never an error):
+  AssertEqual 'closed', claude#session#status('no-such-session')
+
+" ── rename ───────────────────────────────────────────────────────────────────
+
+Execute (rename updates the registry and the store):
+  let id = claude#session#new('before')
+  call claude#session#rename(id, 'after')
+  AssertEqual 'after', claude#session#get(id).name
+  AssertEqual 'after', claude#store#load().sessions[id].name
+
+Execute (renaming to an empty string is ignored):
+  let id = claude#session#new('keep me')
+  call claude#session#rename(id, '')
+  AssertEqual 'keep me', claude#session#get(id).name
+
+" ── delete and purge ─────────────────────────────────────────────────────────
+
+Execute (delete stops the job, wipes the buffer and keeps the record):
+  let id = claude#session#new('ending')
+  let bufnr = claude#session#get(id).bufnr
+  call claude#session#delete(id)
+  Assert !bufexists(bufnr), 'the terminal buffer should be wiped'
+  Assert claude#session#exists(id), 'the record stays so it can be resumed'
+  AssertEqual 'closed', claude#session#get(id).status
+  AssertEqual -1,       claude#session#get(id).bufnr
+
+Execute (purge removes the record and its stored name):
+  let id = claude#session#new('doomed')
+  call claude#session#purge(id)
+  Assert !claude#session#exists(id), 'purge must drop the record'
+  Assert !has_key(claude#store#load().sessions, id),
+        \ 'purge must drop the stored name'
+
+" ── listing ──────────────────────────────────────────────────────────────────
+
+Execute (list puts live sessions before closed ones):
+  let dead = claude#session#_inject(
+        \ {'name': 'old', 'status': 'closed', 'worktree': '/tmp/x'})
+  let live = claude#session#new('current')
+  let names = map(claude#session#list(), {_, r -> r.name})
+  Assert index(names, 'current') < index(names, 'old'),
+        \ 'live sessions sort first, got ' . string(names)
+
+Execute (show_closed=0 hides closed sessions):
+  call claude#session#_inject(
+        \ {'name': 'gone', 'status': 'closed', 'worktree': '/tmp/x'})
+  let g:claude_panel_show_closed = 0
+  let names = map(claude#session#list(), {_, r -> r.name})
+  let g:claude_panel_show_closed = 1
+  AssertEqual -1, index(names, 'gone')
+
+" ── reopening a session the CLI never persisted ──────────────────────────────
+"
+" Claude writes a transcript lazily, only once a conversation has content. A
+" session started but never messaged leaves nothing on disk, and
+" `claude --resume <id>` rejects such an id with "No session found with ID".
+
+Execute (a session with no transcript is not treated as resumable):
+  let id = claude#session#new('never messaged')
+  Assert !claude#session#has_transcript(id),
+        \ 'the stand-in CLI writes no transcript'
+
+Execute (reopening a transcript-less session starts it fresh, keeping id/name):
+  let id = claude#session#new('never messaged')
+  call claude#session#delete(id)
+  AssertEqual 'closed', claude#session#status(id)
+  " Must not fail the way `--resume` on an unknown id does.
+  AssertEqual id, claude#session#resume(id)
+  AssertEqual 'active',         claude#session#status(id)
+  AssertEqual 'never messaged', claude#session#get(id).name
+  Assert claude#session#get(id).bufnr != -1
+
+Execute (transcript_path is empty when the cwd is unknown):
+  let id = claude#session#_inject({'name': 'orphan', 'cwd': ''})
+  AssertEqual '', claude#session#transcript_path(id)
+  AssertEqual 0,  claude#session#has_transcript(id)
+
+Execute (a stored session with no transcript is restored by refresh):
+  let id = claude#session#uuid()
+  call claude#store#put(id, {'name': 'from the store',
+        \ 'cwd': getcwd(), 'project': getcwd(), 'worktree': getcwd(),
+        \ 'branch': 'main', 'created': localtime()})
+  call claude#session#refresh()
+  Assert claude#session#exists(id),
+        \ 'a named session with no transcript must survive a restart'
+  AssertEqual 'from the store', claude#session#get(id).name
+  AssertEqual 'closed',         claude#session#status(id)
+
+Execute (stored sessions from another directory are not restored here):
+  let id = claude#session#uuid()
+  call claude#store#put(id, {'name': 'elsewhere', 'cwd': '/somewhere/else',
+        \ 'project': '/somewhere/else', 'worktree': '/somewhere/else',
+        \ 'branch': 'main', 'created': localtime()})
+  call claude#session#refresh()
+  Assert !claude#session#exists(id),
+        \ 'only the current directory is in scope'
+
+" ── the CLI argument vector ──────────────────────────────────────────────────
+"
+" Regression: the command used to be built as a string with shellescape()d
+" arguments. :terminal runs no shell — it splits a string command on
+" whitespace and keeps quote characters literally — so Claude received
+" "'<uuid>'" and rejected it as an invalid session id, and a name with a space
+" was torn into several arguments.
+
+Execute (argv is a list of unquoted arguments):
+  let g:claude_session_flags = 1
+  let argv = claude#session#_argv('44d05db9-62e9-439e-916b-982d1caefb18',
+        \ 'panel design', 0)
+  unlet g:claude_session_flags
+  AssertEqual v:t_list, type(argv)
+  AssertEqual ['sleep', '30',
+        \ '--session-id', '44d05db9-62e9-439e-916b-982d1caefb18',
+        \ '--name', 'panel design'], argv
+  for a in argv
+    Assert a !~# "'", 'no argument may carry shell quotes: ' . a
+  endfor
+
+Execute (a resumed session passes --resume, never --session-id):
+  let g:claude_session_flags = 1
+  let argv = claude#session#_argv('abc-123', 'a name', 1)
+  unlet g:claude_session_flags
+  AssertEqual -1, index(argv, '--session-id')
+  AssertEqual 'abc-123', argv[index(argv, '--resume') + 1]
+
+Execute (no flags are added when the CLI does not support them):
+  let g:claude_session_flags = 0
+  let argv = claude#session#_argv('abc-123', 'a name', 0)
+  unlet g:claude_session_flags
+  AssertEqual ['sleep', '30'], argv
+
+Execute (the spawned process really receives the arguments intact):
+  " Record argv from a stand-in CLI, then read back what actually arrived.
+  let script = g:_store_dir . '/fake-claude'
+  let record = g:_store_dir . '/argv.txt'
+  call writefile([
+        \ '#!/bin/sh',
+        \ 'printf "%s\n" "$@" > ' . shellescape(record),
+        \ 'sleep 30',
+        \ ], script)
+  call system('chmod +x ' . shellescape(script))
+  let g:claude_cmd = script
+  let g:claude_session_flags = 1
+  let id = claude#session#new('panel design')
+  " Give the shell a moment to write the file.
+  for _ in range(40)
+    if filereadable(record) | break | endif
+    sleep 50m
+  endfor
+  unlet g:claude_session_flags
+  Assert filereadable(record), 'the stand-in CLI should have run'
+  AssertEqual ['--session-id', id, '--name', 'panel design'],
+        \ readfile(record),
+        \ 'arguments must arrive unquoted and unsplit'

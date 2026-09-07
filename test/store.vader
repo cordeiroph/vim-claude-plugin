@@ -1,0 +1,98 @@
+" Tests for the session name store — pure file I/O, no terminal, no jobs.
+
+Before:
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  call claude#store#_reset()
+
+After:
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+
+" ── path resolution ──────────────────────────────────────────────────────────
+
+Execute (path honours g:claude_session_store):
+  AssertEqual g:_store_dir . '/sessions.json', claude#store#path()
+
+Execute (path falls back to data/sessions.json inside the plugin):
+  let g:claude_session_store = ''
+  let path = claude#store#path()
+  Assert path =~# 'data/sessions\.json$',
+        \ 'default store should live in the plugin data dir, got ' . path
+  Assert filereadable(path) || isdirectory(fnamemodify(path, ':h:h')),
+        \ 'default store path should resolve inside the plugin root'
+
+" ── round trip ───────────────────────────────────────────────────────────────
+
+Execute (missing file loads as an empty store):
+  let data = claude#store#load()
+  AssertEqual 1, data.version
+  AssertEqual {}, data.sessions
+
+Execute (save then load round-trips the sessions dict):
+  AssertEqual 1, claude#store#save({'version': 1, 'sessions':
+        \ {'abc': {'name': 'panel design', 'branch': 'main'}}})
+  let data = claude#store#load()
+  AssertEqual 'panel design', data.sessions.abc.name
+  AssertEqual 'main',         data.sessions.abc.branch
+
+Execute (put merges one entry without dropping the others):
+  call claude#store#save({'version': 1, 'sessions': {'a': {'name': 'one'}}})
+  call claude#store#put('b', {'name': 'two'})
+  let data = claude#store#load()
+  AssertEqual 'one', data.sessions.a.name
+  AssertEqual 'two', data.sessions.b.name
+
+Execute (remove drops one entry and keeps the rest):
+  call claude#store#save({'version': 1,
+        \ 'sessions': {'a': {'name': 'one'}, 'b': {'name': 'two'}}})
+  call claude#store#remove('a')
+  let data = claude#store#load()
+  Assert !has_key(data.sessions, 'a'), 'a should be gone'
+  AssertEqual 'two', data.sessions.b.name
+
+Execute (save leaves no temp file behind):
+  call claude#store#save({'version': 1, 'sessions': {}})
+  Assert !filereadable(claude#store#path() . '.tmp'),
+        \ 'the atomic-write temp file must be renamed away'
+
+" ── corruption ───────────────────────────────────────────────────────────────
+
+Execute (corrupt JSON is backed up and replaced by an empty store):
+  call writefile(['{not json at all'], claude#store#path())
+  silent let data = claude#store#load()
+  AssertEqual {}, data.sessions
+  Assert filereadable(claude#store#path() . '.bak'),
+        \ 'the corrupt file should be preserved as .bak'
+
+Execute (a JSON value that is not an object is treated as corrupt):
+  call writefile(['[1,2,3]'], claude#store#path())
+  silent let data = claude#store#load()
+  AssertEqual {}, data.sessions
+  Assert filereadable(claude#store#path() . '.bak')
+
+" ── schema versioning ────────────────────────────────────────────────────────
+
+Execute (a newer schema version is read but never written back):
+  call writefile([json_encode({'version': 99,
+        \ 'sessions': {'z': {'name': 'from the future'}}})],
+        \ claude#store#path())
+  silent let data = claude#store#load()
+  AssertEqual 'from the future', data.sessions.z.name
+  Assert claude#store#is_read_only(), 'a future store must be read-only'
+  AssertEqual 0, claude#store#save({'version': 1, 'sessions': {}}),
+        \ 'save must refuse to downgrade the store'
+  let again = claude#store#load()
+  AssertEqual 'from the future', again.sessions.z.name
+
+" ── unwritable location ──────────────────────────────────────────────────────
+
+Execute (an unwritable path degrades gracefully instead of erroring):
+  let g:claude_session_store = '/proc/definitely/not/writable/sessions.json'
+  call claude#store#_reset()
+  silent let rc = claude#store#save({'version': 1, 'sessions': {}})
+  AssertEqual 0, rc, 'save should report failure, not throw'
+  AssertEqual {}, claude#store#load().sessions

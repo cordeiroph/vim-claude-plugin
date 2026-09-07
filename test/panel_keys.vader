@@ -1,0 +1,155 @@
+" Tests for the panel window itself: its buffer options, the open verbs and
+" the guarantee that hiding the panel never touches a running session.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:_saved_cmd   = get(g:, 'claude_cmd', 'claude')
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:claude_cmd = 'sleep 30'
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  call claude#store#_reset()
+
+After:
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  let g:claude_cmd           = g:_saved_cmd
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+  only
+
+" ── window and buffer options ────────────────────────────────────────────────
+
+Execute (the panel is a fixed-width scratch buffer):
+  call claude#panel#open()
+  Assert claude#panel#is_open(), 'the panel should be open'
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  AssertEqual 'nofile', &buftype
+  AssertEqual 'hide',   &bufhidden
+  AssertEqual 0, &modifiable, 'the panel must not be editable'
+  AssertEqual 0, &buflisted,  'the panel must not appear in the buffer list'
+  AssertEqual 1, &winfixwidth
+  AssertEqual 0, &swapfile
+
+Execute (the panel opens at the configured width on the left):
+  let g:claude_panel_width = 30
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  AssertEqual 30, winwidth(0)
+  AssertEqual 1,  winnr(), 'a left-anchored panel is the first window'
+  let g:claude_panel_width = 35
+
+Execute (toggle opens then hides the panel):
+  call claude#panel#toggle()
+  Assert claude#panel#is_open()
+  call claude#panel#toggle()
+  Assert !claude#panel#is_open()
+
+Execute (opening an already-open panel focuses it instead of duplicating it):
+  call claude#panel#open()
+  let before = winnr('$')
+  call claude#panel#open()
+  AssertEqual before, winnr('$'), 'the panel must not be opened twice'
+  AssertEqual bufwinid(claude#panel#bufnr()), win_getid()
+
+" ── hiding never ends a session ──────────────────────────────────────────────
+
+Execute (closing the panel leaves every job running):
+  let id = claude#session#new('survivor')
+  let bufnr = claude#session#get(id).bufnr
+  call claude#panel#open()
+  call claude#panel#close()
+  Assert !claude#panel#is_open(), 'the panel should be hidden'
+  AssertEqual 'run', job_status(term_getjob(bufnr)),
+        \ 'hiding the panel must not stop the session'
+  Assert bufexists(bufnr), 'the terminal buffer should survive'
+  AssertEqual 'active', claude#session#status(id)
+
+Execute (q in the panel hides it without touching the session):
+  let id = claude#session#new('survivor')
+  let bufnr = claude#session#get(id).bufnr
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  normal q
+  Assert !claude#panel#is_open()
+  AssertEqual 'run', job_status(term_getjob(bufnr))
+
+" ── open verbs ───────────────────────────────────────────────────────────────
+
+Execute (opening a hidden session brings it back into a window):
+  let id = claude#session#new('hidden')
+  let bufnr = claude#session#get(id).bufnr
+  call win_execute(bufwinid(bufnr), 'hide')
+  AssertEqual -1, bufwinid(bufnr), 'precondition: the session is hidden'
+  call claude#panel#open()
+  call claude#panel#open_session(id, 'here')
+  Assert bufwinid(bufnr) != -1, 'the session should be visible again'
+
+Execute (a visible session is jumped to, not opened a second time):
+  let id = claude#session#new('reused')
+  let bufnr = claude#session#get(id).bufnr
+  call claude#panel#open()
+  let before = winnr('$')
+  call claude#panel#open_session(id, 'here')
+  AssertEqual before, winnr('$'), 'no duplicate window should be created'
+  AssertEqual bufwinid(bufnr), win_getid(), 'the cursor should be in it'
+
+Execute (split and vsplit each add one window):
+  let id = claude#session#new('splitter')
+  let bufnr = claude#session#get(id).bufnr
+  call win_execute(bufwinid(bufnr), 'hide')
+  call claude#panel#open()
+  let before = winnr('$')
+  call claude#panel#open_session(id, 'split')
+  AssertEqual before + 1, winnr('$')
+  AssertEqual bufnr, bufnr('%')
+
+Execute (t opens the session in a new tab):
+  let id = claude#session#new('tabbed')
+  let bufnr = claude#session#get(id).bufnr
+  call claude#panel#open()
+  let tabs = tabpagenr('$')
+  call claude#panel#open_session(id, 'tab')
+  AssertEqual tabs + 1, tabpagenr('$')
+  AssertEqual bufnr, bufnr('%')
+  tabclose
+
+Execute (the panel window is never replaced by a session):
+  let id = claude#session#new('elsewhere')
+  let bufnr = claude#session#get(id).bufnr
+  call win_execute(bufwinid(bufnr), 'hide')
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call claude#panel#open_session(id, 'here')
+  Assert claude#panel#is_open(), 'the panel must still be open'
+  AssertEqual claude#panel#bufnr(),
+        \ winbufnr(win_id2win(bufwinid(claude#panel#bufnr()))),
+        \ 'the panel window must still show the panel'
+
+" ── cursor mapping ───────────────────────────────────────────────────────────
+
+Execute (<CR> on a group node folds it rather than opening anything):
+  call claude#session#_inject({'name': 'child', 'status': 'active',
+        \ 'project': '/w/beta', 'worktree': '/w/beta', 'branch': 'main'})
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(3, 1)
+  execute "normal \<CR>"
+  Assert join(claude#panel#_lines(), "\n") !~# 'child',
+        \ '<CR> on a project node should collapse it'
+
+Execute (keys on a blank line do nothing):
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(2, 1)
+  execute "normal \<CR>"
+  normal i
+  normal s
+  Assert claude#panel#is_open(), 'the panel should be unharmed'

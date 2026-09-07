@@ -23,12 +23,6 @@ if !exists('g:claude_cmd')
   let g:claude_cmd = 'claude'
 endif
 
-" g:claude_tab_sessions — 1 (default): each tab gets its own Claude session.
-"                         0: a single session is shared across all tabs.
-if !exists('g:claude_tab_sessions')
-  let g:claude_tab_sessions = 1
-endif
-
 " g:claude_models — ordered list of model names shown by ClaudeModel picker.
 if !exists('g:claude_models')
   let g:claude_models = [
@@ -36,6 +30,78 @@ if !exists('g:claude_models')
         \ 'claude-sonnet-4-6',
         \ 'claude-haiku-4-5-20251001',
         \ ]
+endif
+
+" ── session panel configuration ──────────────────────────────────────────────
+
+" g:claude_panel_width — panel width in columns.
+if !exists('g:claude_panel_width')
+  let g:claude_panel_width = 35
+endif
+
+" g:claude_panel_anchor — which edge the panel is pinned to: 'left' or 'right'.
+if !exists('g:claude_panel_anchor')
+  let g:claude_panel_anchor = 'left'
+endif
+
+" g:claude_panel_icons — status glyphs, keyed 'active', 'idle', 'closed'.
+" Partial dicts are merged over the defaults.
+if !exists('g:claude_panel_icons')
+  let g:claude_panel_icons = {}
+endif
+
+" g:claude_panel_ascii — 1 forces the [A]/[I]/[C] glyph set.
+if !exists('g:claude_panel_ascii')
+  let g:claude_panel_ascii = 0
+endif
+
+" g:claude_panel_refresh_ms — status poll interval while the panel is visible.
+" The poller is stopped entirely when the panel is hidden.
+if !exists('g:claude_panel_refresh_ms')
+  let g:claude_panel_refresh_ms = 2000
+endif
+
+" g:claude_panel_idle_secs — seconds without terminal output before a running
+" session is shown as idle rather than active.
+if !exists('g:claude_panel_idle_secs')
+  let g:claude_panel_idle_secs = 30
+endif
+
+" g:claude_panel_show_closed — 0 lists only live sessions.
+if !exists('g:claude_panel_show_closed')
+  let g:claude_panel_show_closed = 1
+endif
+
+" g:claude_panel_closed_limit — max closed sessions listed per project.
+if !exists('g:claude_panel_closed_limit')
+  let g:claude_panel_closed_limit = 10
+endif
+
+" g:claude_panel_auto_open — 1 opens the panel on VimEnter.
+if !exists('g:claude_panel_auto_open')
+  let g:claude_panel_auto_open = 0
+endif
+
+" g:claude_session_store — where session names are persisted. Defaults to
+" data/sessions.json inside the plugin directory, which keeps the plugin
+" self-contained but is wiped by a plugin reinstall; point this somewhere
+" durable (e.g. '~/.claude/vim-sessions.json') to keep names across updates.
+if !exists('g:claude_session_store')
+  let g:claude_session_store = ''
+endif
+
+" g:claude_session_prompt_name — 0 skips the name prompt for new sessions and
+" names them after the current time instead.
+if !exists('g:claude_session_prompt_name')
+  let g:claude_session_prompt_name = 1
+endif
+
+" g:claude_session_flags — whether the CLI understands --session-id/--name.
+" -1 (default) probes `claude --help` once; 1 forces them on, 0 off. Only
+" needed when the probe cannot run, e.g. g:claude_cmd launches Claude through
+" a wrapper with another name.
+if !exists('g:claude_session_flags')
+  let g:claude_session_flags = -1
 endif
 
 " ── commands ─────────────────────────────────────────────────────────────────
@@ -47,6 +113,13 @@ command! ClaudeExplain call claude#explain('n')
 command! ClaudeModel   call claude#select_model()
 command! ClaudeResume  call claude#resume()
 command! ClaudeInput   call claude#input#open()
+
+" Session panel.
+command!          ClaudeSessions      call claude#panel#toggle()
+command!          ClaudeSessionsOpen  call claude#panel#open()
+command!          ClaudeSessionsClose call claude#panel#close()
+command! -nargs=? ClaudeNew           call claude#new(<q-args>)
+command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
 
 " Window navigation commands (wrappers around wincmd h/l/k/j).
 command! ClaudeFocus      call claude#focus()
@@ -73,6 +146,9 @@ augroup claude_plugin
   endif
   " VimLeavePre fires after Vim commits to exiting; wipe the buffers then.
   autocmd VimLeavePre * call claude#close_all()
+  " Track the most recently focused session, so the picker offers it first.
+  autocmd WinEnter * call claude#_win_enter()
+  autocmd VimEnter * if g:claude_panel_auto_open | call claude#panel#open() | endif
 augroup END
 
 " ── keymaps ──────────────────────────────────────────────────────────────────
@@ -84,6 +160,9 @@ if !exists('g:claude_no_default_mappings')
   nnoremap <silent> <leader>ct :ClaudeToggle<CR>
   nnoremap <silent> <leader>cx :ClaudeClose<CR>
   nnoremap <silent> <leader>cf :ClaudeFocus<CR>
+
+  " Toggle the session panel.
+  nnoremap <silent> <leader>cs :ClaudeSessions<CR>
 
   " Explain: normal mode sends the whole file; visual mode sends the selection.
   nnoremap <silent> <leader>ce :call claude#explain('n')<CR>

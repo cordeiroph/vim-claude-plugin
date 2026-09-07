@@ -1,110 +1,155 @@
-" ── session storage ──────────────────────────────────────────────────────────
-" Per-tab mode (default): each tab stores its session in the t: namespace.
-" t: variables are automatically scoped to the current tab, so no manual
-" tab-tracking is needed for reads/writes. When the tab is closed, Vim
-" garbage-collects its t: variables automatically.
+" ── claude.vim core ──────────────────────────────────────────────────────────
 "
-" Global mode (g:claude_tab_sessions=0): a single session is kept in s: vars.
-let s:g_bufnr = -1  " buffer nr for the global-mode terminal
-
-" Returns 1 when per-tab sessions are enabled (the default).
-function! s:tab_mode() abort
-  return get(g:, 'claude_tab_sessions', 1)
-endfunction
-
-" Returns the buffer number of the active Claude terminal for the current tab
-" (or the global buffer in global mode). -1 when no session exists.
-function! s:get_bufnr() abort
-  return s:tab_mode() ? get(t:, 'claude_bufnr', -1) : s:g_bufnr
-endfunction
-
-" Stores the buffer number for the current session.
-" In tab mode writes to t: (tab-local); in global mode writes to s:.
-function! s:set_session(bufnr) abort
-  if s:tab_mode()
-    let t:claude_bufnr = a:bufnr
-  else
-    let s:g_bufnr = a:bufnr
-  endif
-endfunction
-
+" Sessions live in a single global registry (autoload/claude/session.vim), not
+" one per tab: several Claude terminals can run side by side. This file is the
+" command surface — opening, focusing, closing and sending text — and resolves
+" which session a command acts on via claude#session#target().
+"
+" Target resolution is asynchronous because popup_menu() is: the commands hand
+" a callback to claude#session#target() rather than returning a session.
 
 " ── public API ───────────────────────────────────────────────────────────────
 
-" Open a new Claude terminal in a split window. If a session is already open
-" for this tab, focus it instead of opening a second one.
+" Open Claude: focus the current session, ask which one when several are
+" running, or start a new one when there are none.
 function! claude#open() abort
-  if s:is_open()
-    call claude#focus()
+  call claude#session#target('Open Claude session', function('s:focus_id'))
+endfunction
+
+" Start a new session regardless of what is already running.
+function! claude#new(...) abort
+  call claude#session#new(a:0 > 0 ? a:1 : '')
+endfunction
+
+" Toggle the Claude window: hide it if visible, show it if hidden, open a new
+" session if none exists.
+function! claude#toggle() abort
+  call claude#session#target('Toggle Claude session', function('s:toggle_id'))
+endfunction
+
+" Move the cursor to a Claude window, revealing or resuming it as needed.
+function! claude#focus() abort
+  call claude#session#target('Focus Claude session', function('s:focus_id'))
+endfunction
+
+" End a session: stop the job and wipe its buffer. The conversation stays on
+" disk and can be resumed from the panel or :ClaudeResume.
+function! claude#close() abort
+  if empty(claude#session#live())
+    return
+  endif
+  call claude#session#target('Close Claude session', function('s:close_id'))
+endfunction
+
+" Rename a session. With no argument the new name is prompted for.
+function! claude#rename(...) abort
+  if empty(claude#session#live())
+    return
+  endif
+  let l:name = a:0 > 0 ? a:1 : ''
+  call claude#session#target('Rename which session',
+        \ {id -> s:rename_id(id, l:name)})
+endfunction
+
+function! s:focus_id(id) abort
+  if empty(a:id)
+    return
+  endif
+  let l:rec = claude#session#get(a:id)
+  if empty(l:rec)
     return
   endif
 
-  " Create the split window at the configured anchor position.
-  execute s:split_cmd()
-
-  if has('terminal')
-    " ++curwin reuses the current window instead of opening a new one.
-    execute 'terminal ++curwin ' . g:claude_cmd
-    call s:set_session(bufnr('%'))
-    call claude#input#collect_data()
+  if claude#session#status(a:id) ==# 'closed'
+    if empty(claude#session#resume(a:id))
+      return
+    endif
+    let l:rec = claude#session#get(a:id)
   else
-    echoerr 'claude.vim: terminal support required (Vim 8+)'
-    close
-    return
-  endif
-
-  call s:set_buf_options()
-endfunction
-
-" Stop the terminal job in {bufnr} and block until it exits (up to 500 ms).
-" Callers must do this before bwipeout! to avoid E947.
-function! s:job_stop_wait(bufnr) abort
-  let l:job = term_getjob(a:bufnr)
-  if l:job is v:null || job_status(l:job) !=# 'run'
-    return
-  endif
-  call job_stop(l:job)
-  for l:_ in range(25)
-    if job_status(l:job) !=# 'run'
-      break
+    let l:win = bufwinid(l:rec.bufnr)
+    if l:win != -1
+      call win_gotoid(l:win)
+    else
+      " Session alive but not displayed — bring its buffer back into a split.
+      execute claude#split_cmd()
+      execute 'buffer ' . l:rec.bufnr
+      call claude#apply_buf_options(a:id)
     endif
-    sleep 20m
-  endfor
+  endif
+
+  call claude#session#touch_focus(a:id)
+  call claude#enter_insert(l:rec.bufnr)
 endfunction
 
-" Stop all running Claude jobs without wiping their buffers. Called from
-" ExitPre — before Vim's E947 check — so :q / :qall can proceed cleanly.
-" VimLeavePre then calls close_all() to do the final buffer wipeout.
+function! s:toggle_id(id) abort
+  if empty(a:id)
+    return
+  endif
+  let l:rec = claude#session#get(a:id)
+  if empty(l:rec)
+    return
+  endif
+  if l:rec.bufnr != -1 && bufwinid(l:rec.bufnr) != -1
+    " Visible — hide it. The buffer stays alive, so the session continues.
+    call win_execute(bufwinid(l:rec.bufnr), 'hide')
+  else
+    call s:focus_id(a:id)
+  endif
+endfunction
+
+function! s:close_id(id) abort
+  if !empty(a:id)
+    call claude#session#delete(a:id)
+  endif
+endfunction
+
+function! s:rename_id(id, name) abort
+  if empty(a:id)
+    return
+  endif
+  let l:name = a:name
+  if empty(l:name)
+    let l:name = input('Rename to: ', claude#session#get(a:id).name)
+    redraw
+  endif
+  if !empty(l:name)
+    call claude#session#rename(a:id, l:name)
+  endif
+endfunction
+
+" ── exit handling ────────────────────────────────────────────────────────────
+
+" Stop every running Claude job without wiping buffers. Called from ExitPre —
+" before Vim's E947 check — so :q / :qall can proceed cleanly. VimLeavePre
+" then calls close_all() to do the final buffer wipeout.
+"
+" With many sessions the per-job waits would add up, so the total is capped:
+" whatever is still running is left to VimLeavePre.
 function! claude#_stop_jobs() abort
-  if !s:tab_mode()
-    if s:g_bufnr != -1 && bufexists(s:g_bufnr)
-      call s:job_stop_wait(s:g_bufnr)
-    endif
-    return
-  endif
-  for l:tabnr in range(1, tabpagenr('$'))
-    let l:bufnr = gettabvar(l:tabnr, 'claude_bufnr', -1)
-    if l:bufnr != -1 && bufexists(l:bufnr)
-      call s:job_stop_wait(l:bufnr)
+  let l:start = reltime()
+  for l:bufnr in claude#session#bufnrs()
+    call claude#session#stop_job(l:bufnr)
+    if str2float(reltimestr(reltime(l:start))) > 2.0
+      break
     endif
   endfor
 endfunction
 
 " QuitPre fallback for Vim builds without ExitPre (before patch 8.1.0446).
-" QuitPre also fires when closing an ordinary split, which must leave the
+" QuitPre also fires when closing an ordinary split, which must leave every
 " session alone, so approximate ExitPre: stop the jobs only when the window
-" being quit is the last one that isn't a Claude terminal, since after that
-" nothing but Claude windows would remain and Vim is on its way out. This is
-" best-effort — with several tabs open QuitPre can't tell :q from :qall, so
-" it defers to VimLeavePre and E947 may still surface on those old builds.
+" being quit is the last one that is neither a Claude terminal nor the panel.
+" Best-effort — with several tabs open QuitPre can't tell :q from :qall.
 function! claude#_quit_pre() abort
   if tabpagenr('$') > 1
     return
   endif
-  let l:claude_bufnr = s:get_bufnr()
+  let l:claude_bufs = claude#session#bufnrs()
+  let l:panel_buf   = claude#panel#bufnr()
   let l:others = 0
   for l:winnr in range(1, winnr('$'))
-    if winbufnr(l:winnr) != l:claude_bufnr
+    let l:bufnr = winbufnr(l:winnr)
+    if index(l:claude_bufs, l:bufnr) == -1 && l:bufnr != l:panel_buf
       let l:others += 1
     endif
   endfor
@@ -113,81 +158,16 @@ function! claude#_quit_pre() abort
   endif
 endfunction
 
-" Close the Claude terminal for the current tab and wipe its buffer.
-function! claude#close() abort
-  if !s:is_open()
-    return
-  endif
-  call s:job_stop_wait(s:get_bufnr())
-  call s:cleanup_current()
-endfunction
-
-" Wipe all Claude terminal buffers across every tab. Called from VimLeavePre
-" after jobs have already been stopped by claude#_stop_jobs() in ExitPre.
+" Wipe every Claude terminal buffer. Called from VimLeavePre after the jobs
+" have already been stopped by claude#_stop_jobs() in ExitPre.
 function! claude#close_all() abort
-  if !s:tab_mode()
-    call claude#close()
-    return
-  endif
-  for l:tabnr in range(1, tabpagenr('$'))
-    let l:bufnr = gettabvar(l:tabnr, 'claude_bufnr', -1)
-    if l:bufnr == -1 || !bufexists(l:bufnr)
-      continue
-    endif
-    call s:job_stop_wait(l:bufnr)
-    execute 'bwipeout! ' . l:bufnr
-    call settabvar(l:tabnr, 'claude_bufnr', -1)
+  for l:bufnr in claude#session#bufnrs()
+    call claude#session#stop_job(l:bufnr)
+    silent! execute 'bwipeout! ' . l:bufnr
   endfor
 endfunction
 
-" Toggle the Claude window: hide it if visible, show it if hidden, open a new
-" session if none exists.
-function! claude#toggle() abort
-  if !s:is_open()
-    call claude#open()
-    return
-  endif
-
-  let l:win = bufwinid(s:get_bufnr())
-
-  if l:win != -1
-    " Window is visible — hide it (buffer stays alive, session continues).
-    call win_execute(l:win, 'hide')
-  else
-    " Session exists but window is not visible — reopen the split and show it.
-    execute s:split_cmd()
-    execute 'buffer ' . s:get_bufnr()
-    call s:set_buf_options()
-    call s:terminal_enter_insert()
-  endif
-endfunction
-
-" Move the cursor to the Claude window. Opens a new session if none exists,
-" or reveals a hidden window if the session is alive but not displayed.
-function! claude#focus() abort
-  if !s:is_open()
-    call claude#open()
-    return
-  endif
-
-  let l:win = bufwinid(s:get_bufnr())
-  if l:win != -1
-    call win_gotoid(l:win)
-    call s:terminal_enter_insert()
-  else
-    " Session alive but no visible window — toggle will reopen the split.
-    call claude#toggle()
-  endif
-endfunction
-
-" Enter terminal-insert mode, using feedkeys so the mode switch happens after
-" the current command sequence finishes. Guards against feeding 'i' to a
-" terminal that is already live (insert mode), which would type into Claude.
-function! s:terminal_enter_insert() abort
-  if term_getstatus(s:get_bufnr()) =~# 'normal'
-    call feedkeys('i', 'n')
-  endif
-endfunction
+" ── window helpers ───────────────────────────────────────────────────────────
 
 " Move the cursor to an adjacent window using standard Vim wincmd directions
 " (h=left, l=right, k=up, j=down).
@@ -195,43 +175,10 @@ function! claude#win_move(dir) abort
   execute 'wincmd ' . a:dir
 endfunction
 
-" ── private helpers ──────────────────────────────────────────────────────────
-
-" Returns true when a live Claude session exists for the current tab.
-" Also cleans up stale state if the buffer no longer exists or the job is dead.
-function! s:is_open() abort
-  let l:bufnr = s:get_bufnr()
-  if l:bufnr == -1 || !bufexists(l:bufnr)
-    call s:set_session(-1)
-    return v:false
-  endif
-  " Vim has no on_exit hook for ++curwin terminals, so detect a dead job
-  " by polling job_status on every is_open() call.
-  if has('terminal')
-    let l:job = term_getjob(l:bufnr)
-    if l:job is v:null || job_status(l:job) ==# 'dead'
-      call s:cleanup_current()
-      return v:false
-    endif
-  endif
-  return v:true
-endfunction
-
-" Wipe the terminal buffer for the current tab's session (or global session).
-" bwipeout! closes any window displaying the buffer automatically.
-function! s:cleanup_current() abort
-  let l:bufnr = s:get_bufnr()
-  " Clear session state before wiping so re-entrant calls see no session.
-  call s:set_session(-1)
-  if l:bufnr != -1 && bufexists(l:bufnr)
-    execute 'bwipeout! ' . l:bufnr
-  endif
-endfunction
-
-" Returns the Ex command that creates the split at the configured anchor.
-" botright/topleft pin the new window to the very edge of the screen so it
-" doesn't push other splits around.
-function! s:split_cmd() abort
+" Returns the Ex command that creates the Claude split at the configured
+" anchor. botright/topleft pin the new window to the very edge of the screen
+" so it doesn't push other splits around.
+function! claude#split_cmd() abort
   let l:size   = g:claude_split_size
   let l:anchor = get(g:, 'claude_split_anchor', 'right')
   if l:anchor ==# 'left'
@@ -245,8 +192,10 @@ function! s:split_cmd() abort
   endif
 endfunction
 
-" Apply buffer-local options to the Claude terminal window.
-function! s:set_buf_options() abort
+" Apply buffer-local options to the current Claude terminal window and tag the
+" buffer with its session id, so any window can be mapped back to a record.
+function! claude#apply_buf_options(id) abort
+  let b:claude_session_id = a:id
   setlocal bufhidden=hide   " hide instead of unload on :q, avoiding E947
   setlocal nobuflisted      " hide from buffer list
   setlocal nonumber         " no line numbers
@@ -266,10 +215,31 @@ function! s:set_buf_options() abort
   tnoremap <buffer> <Esc><Esc> <C-\><C-n>
 endfunction
 
+" Enter terminal-insert mode, using feedkeys so the mode switch happens after
+" the current command sequence finishes. Guards against feeding 'i' to a
+" terminal that is already live (insert mode), which would type into Claude.
+function! claude#enter_insert(bufnr) abort
+  if a:bufnr == -1 || !bufexists(a:bufnr) || !has('terminal')
+    return
+  endif
+  if term_getstatus(a:bufnr) =~# 'normal'
+    call feedkeys('i', 'n')
+  endif
+endfunction
+
+" WinEnter hook: remember which session was most recently focused, so the
+" picker can offer the likeliest target first.
+function! claude#_win_enter() abort
+  let l:id = get(b:, 'claude_session_id', '')
+  if !empty(l:id)
+    call claude#session#touch_focus(l:id)
+  endif
+endfunction
+
 " ── explain ──────────────────────────────────────────────────────────────────
 
-" Send an explain prompt to Claude for the current file (mode='n') or the
-" current visual selection (mode='v'). Opens Claude if not already running.
+" Send an explain prompt for the current file (mode='n') or the current visual
+" selection (mode='v'), to whichever session the user is working in.
 function! claude#explain(mode) abort
   let l:ft = &filetype
 
@@ -287,20 +257,8 @@ function! claude#explain(mode) abort
   let l:prompt = 'Explain ' . l:desc . ":\n\n" . l:fence . "\n"
         \ . join(l:lines, "\n") . "\n```"
 
-  let l:already_open = s:is_open()
-  if !l:already_open
-    call claude#open()
-  else
-    call claude#focus()
-  endif
-
-  if l:already_open
-    call s:send(l:prompt)
-  else
-    " Claude needs a moment to initialise before it can accept input.
-    " Poll until output appears (max 15 × 300 ms = 4.5 s) then send.
-    call s:send_when_ready(l:prompt, 15)
-  endif
+  call claude#session#target('Explain in which session',
+        \ {id -> s:deliver(id, l:prompt)})
 endfunction
 
 " Return the lines covered by the most recent visual selection, trimmed to the
@@ -318,51 +276,68 @@ function! s:get_visual_selection() abort
   return l:lines
 endfunction
 
+" ── sending ──────────────────────────────────────────────────────────────────
+
+" Send {text} to {id}, resuming it and waiting for startup when necessary.
+function! s:deliver(id, text) abort
+  if empty(a:id)
+    return
+  endif
+  if claude#session#status(a:id) ==# 'closed'
+    if empty(claude#session#resume(a:id))
+      return
+    endif
+  endif
+  " send_when_ready() returns immediately once the terminal has drawn
+  " anything, so an established session is not delayed by the poll.
+  call s:send_when_ready(a:id, a:text, 15)
+endfunction
+
 " Poll the terminal every 300 ms until output appears (Claude's startup UI is
 " visible), then send {text}. Gives up and sends anyway after {retries} tries
 " so the caller is never silently dropped.
-function! s:send_when_ready(text, retries) abort
-  if !s:is_open()
+function! s:send_when_ready(id, text, retries) abort
+  if claude#session#status(a:id) ==# 'closed'
     return
   endif
-  if s:terminal_scan('\S') || a:retries <= 0
-    call s:send(a:text)
+  let l:bufnr = claude#session#get(a:id).bufnr
+  if s:terminal_scan(l:bufnr, '\S') || a:retries <= 0
+    call s:send(a:id, a:text)
   else
-    call timer_start(300, {-> s:send_when_ready(a:text, a:retries - 1)})
+    call timer_start(300, {-> s:send_when_ready(a:id, a:text, a:retries - 1)})
   endif
 endfunction
 
-
-" Scan up to 50 lines of the Claude terminal buffer for lines matching
+" Scan up to 50 lines of a Claude terminal buffer for lines matching
 " {pattern}. Returns true on the first match, false if none found.
-function! s:terminal_scan(pattern) abort
-  let l:bufnr = s:get_bufnr()
-  if l:bufnr == -1
+function! s:terminal_scan(bufnr, pattern) abort
+  if a:bufnr == -1 || !bufexists(a:bufnr)
     return v:false
   endif
   for l:i in range(1, 50)
-    if term_getline(l:bufnr, l:i) =~# a:pattern
+    if term_getline(a:bufnr, l:i) =~# a:pattern
       return v:true
     endif
   endfor
   return v:false
 endfunction
 
-" Send {text} to the Claude terminal using bracketed-paste escape sequences.
-" Bracketed paste tells Claude's input handler to treat the entire block as
-" pasted text, so embedded newlines don't trigger premature submission.
-function! s:send(text) abort
-  let l:bufnr = s:get_bufnr()
-  if l:bufnr != -1 && bufexists(l:bufnr)
-    call term_sendkeys(l:bufnr, "\e[200~" . a:text . "\e[201~\r")
+" Send {text} to a session using bracketed-paste escape sequences. Bracketed
+" paste tells Claude's input handler to treat the block as pasted text, so
+" embedded newlines don't trigger premature submission.
+function! s:send(id, text) abort
+  let l:rec = claude#session#get(a:id)
+  if empty(l:rec) || l:rec.bufnr == -1 || !bufexists(l:rec.bufnr)
+    return
   endif
-  call claude#focus()
+  call term_sendkeys(l:rec.bufnr, "\e[200~" . a:text . "\e[201~\r")
+  call s:focus_id(a:id)
 endfunction
 
 " ── model selection ──────────────────────────────────────────────────────────
 
-" Present a numbered list of models from g:claude_models and send /model
-" for the chosen one. Opens Claude first if no session is running.
+" Present a numbered list of models from g:claude_models and send /model for
+" the chosen one to the resolved session.
 function! claude#select_model() abort
   let l:models = get(g:, 'claude_models', [
         \ 'claude-opus-4-7',
@@ -379,100 +354,52 @@ function! claude#select_model() abort
   endfor
 
   let l:choice = inputlist(l:menu)
+  redraw
   if l:choice < 1 || l:choice > len(l:models)
     return
   endif
-
   let l:model = l:models[l:choice - 1]
 
-  if !s:is_open()
-    call claude#open()
-    " Session just started; wait for Claude to initialise before sending.
-    call s:send_when_ready('/model ' . l:model, 15)
-  else
-    call claude#focus()
-    call s:send('/model ' . l:model)
-  endif
+  call claude#session#target('Switch model in which session',
+        \ {id -> s:deliver(id, '/model ' . l:model)})
 endfunction
 
 " ── session resume ───────────────────────────────────────────────────────────
 
-" Present the 10 most recent Claude sessions for the current working directory
-" and reopen the chosen one with `claude --resume <id>`. If a session is
-" already running in this tab, the resumed session opens in a new tab.
+" List the closed sessions known for this directory and reopen the chosen one.
+" Names come from the store; sessions never named in Vim fall back to their
+" timestamp and first message.
 function! claude#resume() abort
-  let l:slug = substitute(getcwd(), '/', '-', 'g')
-  let l:dir  = expand('~/.claude/projects/') . l:slug
+  call claude#session#refresh()
+  let l:closed = filter(claude#session#list(),
+        \ {_, r -> r.status ==# 'closed'})
 
-  let l:raw   = system('ls -t ' . shellescape(l:dir) . '/*.jsonl 2>/dev/null | head -10')
-  let l:paths = filter(split(l:raw, "\n"), 'v:val !=# ""')
-
-  if empty(l:paths)
+  if empty(l:closed)
     echom 'No previous sessions found for this directory.'
     return
   endif
 
   let l:menu = ['Resume Claude session:']
   let l:i = 1
-  for l:path in l:paths
-    let l:ts = strftime('%Y-%m-%d %H:%M', getftime(l:path))
-    let l:snippet = system(
-          \ 'python3 -c "import json,sys;'
-          \ . '[print(next((e[\"message\"][\"content\"][:60]'
-          \ . ' if isinstance(e[\"message\"][\"content\"],str)'
-          \ . ' else next((b[\"text\"][:60] for b in e[\"message\"][\"content\"]'
-          \ . ' if b.get(\"type\")==\"text\"),\"...\"),'
-          \ . ' for e in (json.loads(l) for l in open(sys.argv[1]) if l.strip())'
-          \ . ' if e.get(\"type\")==\"user\"),\"(no message)\")),'
-          \ . 'None]" ' . shellescape(l:path) . ' 2>/dev/null')
-    let l:snippet = substitute(l:snippet, '\n', '', 'g')
-    if empty(l:snippet)
-      let l:snippet = '(no message)'
-    endif
-    call add(l:menu, printf('%d. %s — %s', l:i, l:ts, l:snippet))
+  for l:rec in l:closed
+    call add(l:menu, printf('%d. %s', l:i, l:rec.name))
     let l:i += 1
   endfor
 
   let l:choice = inputlist(l:menu)
-  if l:choice < 1 || l:choice > len(l:paths)
+  redraw
+  if l:choice < 1 || l:choice > len(l:closed)
     return
   endif
 
-  let l:session_id = fnamemodify(l:paths[l:choice - 1], ':t:r')
-
-  if s:is_open()
-    tabnew
-  endif
-
-  execute s:split_cmd()
-
-  if has('terminal')
-    execute 'terminal ++curwin ' . g:claude_cmd . ' --resume ' . l:session_id
-    call s:set_session(bufnr('%'))
-    call claude#input#collect_data()
-  else
-    echoerr 'claude.vim: terminal support required (Vim 8+)'
-    close
-    return
-  endif
-
-  call s:set_buf_options()
-endfunction
-
-" Expose s:split_cmd() publicly so it can be used in tests.
-function! claude#split_cmd() abort
-  return s:split_cmd()
+  " focus_id() resumes a closed session in the configured split.
+  call s:focus_id(l:closed[l:choice - 1].id)
 endfunction
 
 " ── common ────────────────────────────────────────────────────────────────────
 
-" Open or focus Claude then send {text}, waiting for startup if needed.
+" Send {text} to the resolved session, opening or resuming one as needed.
 function! claude#_send_input(text) abort
-  if !s:is_open()
-    call claude#open()
-    call s:send_when_ready(a:text, 15)
-  else
-    call claude#focus()
-    call s:send(a:text)
-  endif
+  call claude#session#target('Send to which session',
+        \ {id -> s:deliver(id, a:text)})
 endfunction

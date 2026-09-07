@@ -1,6 +1,10 @@
 set nocompatible
 filetype plugin on
 
+" Scratch buffers created by the tests must not litter swap files into the
+" working directory.
+set noswapfile
+
 " Load vader and the plugin under test.
 set rtp+=~/.vim/plugged/vader.vim
 execute 'set rtp+=' . fnamemodify(expand('<sfile>'), ':p:h:h')

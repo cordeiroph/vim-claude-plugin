@@ -1,0 +1,150 @@
+" Tests for the panel's rendering: the Project > Worktree > Branch tree, the
+" status glyphs, duplicate-name disambiguation and folding. Records are
+" fabricated, so no Claude process is ever started.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  call claude#store#_reset()
+  " Work from an empty directory so the on-disk transcripts of the real
+  " project never leak into the assertions.
+  let g:_orig_cwd = getcwd()
+  let g:_empty = tempname()
+  call mkdir(g:_empty, 'p')
+  execute 'cd ' . fnameescape(g:_empty)
+  let g:_saved_ascii = get(g:, 'claude_panel_ascii', 0)
+
+After:
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  execute 'cd ' . fnameescape(g:_orig_cwd)
+  let g:claude_panel_ascii   = g:_saved_ascii
+  let g:claude_session_store = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_empty, 'rf')
+  call delete(g:_store_dir, 'rf')
+  only
+
+" ── empty state ──────────────────────────────────────────────────────────────
+
+Execute (an empty registry renders the placeholder, not an empty buffer):
+  call claude#panel#open()
+  let lines = claude#panel#_lines()
+  Assert lines[0] =~# '^Claude Sessions',   'expected a header'
+  Assert lines[0] =~# '(0)$',               'expected a live count of 0'
+  Assert index(lines, '  (no sessions)') >= 0,
+        \ 'expected the empty placeholder, got ' . string(lines)
+
+" ── grouping ─────────────────────────────────────────────────────────────────
+
+Execute (sessions nest Project > Worktree > Branch):
+  call claude#session#_inject({'name': 'panel design', 'status': 'active',
+        \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
+  call claude#session#_inject({'name': 'registry spike', 'status': 'idle',
+        \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'feature'})
+  call claude#session#_inject({'name': 'E947 repro', 'status': 'closed',
+        \ 'project': '/w/alpha', 'worktree': '/w/alpha-wt', 'branch': 'hotfix'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▾ alpha',        'project node missing: ' . text
+  Assert text =~# '  ▾ /w/alpha\n', 'worktree node missing: ' . text
+  Assert text =~# '  ▾ /w/alpha-wt', 'second worktree missing: ' . text
+  Assert text =~# '    ▾ main',     'branch node missing: ' . text
+  Assert text =~# '    ▾ feature',  'second branch missing: ' . text
+  Assert text =~# '      ● panel design',   'active session missing'
+  Assert text =~# '      ○ registry spike', 'idle session missing'
+  Assert text =~# '      ✗ E947 repro',     'closed session missing'
+
+Execute (two worktrees of one repo share a single project node):
+  call claude#session#_inject({'name': 'a', 'status': 'active',
+        \ 'project': '/w/repo', 'worktree': '/w/repo',    'branch': 'main'})
+  call claude#session#_inject({'name': 'b', 'status': 'active',
+        \ 'project': '/w/repo', 'worktree': '/w/repo-wt', 'branch': 'topic'})
+  call claude#panel#open()
+  let lines = claude#panel#_lines()
+  let projects = filter(copy(lines), {_, l -> l =~# '^[▾▸] '})
+  AssertEqual 1, len(projects),
+        \ 'worktrees of one repo must share a project node: ' . string(projects)
+
+Execute (the header counts live sessions only):
+  call claude#session#_inject({'name': 'a', 'status': 'active',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#session#_inject({'name': 'b', 'status': 'idle',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#session#_inject({'name': 'c', 'status': 'closed',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#panel#open()
+  Assert claude#panel#_lines()[0] =~# '(2)$',
+        \ 'closed sessions must not be counted as live'
+
+" ── glyphs ───────────────────────────────────────────────────────────────────
+
+Execute (ascii mode swaps the glyph set):
+  let g:claude_panel_ascii = 1
+  AssertEqual '[A]', claude#panel#icon('active')
+  AssertEqual '[I]', claude#panel#icon('idle')
+  AssertEqual '[C]', claude#panel#icon('closed')
+  call claude#session#_inject({'name': 'ascii one', 'status': 'active',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#panel#open()
+  Assert join(claude#panel#_lines(), "\n") =~# '\[A\] ascii one'
+
+Execute (g:claude_panel_icons overrides individual glyphs):
+  let g:claude_panel_icons = {'active': '>>'}
+  AssertEqual '>>', claude#panel#icon('active')
+  AssertEqual '○',  claude#panel#icon('idle')
+  unlet g:claude_panel_icons
+  let g:claude_panel_icons = {}
+
+" ── duplicate names ──────────────────────────────────────────────────────────
+
+Execute (same-named sessions in one group get a display-only suffix):
+  call claude#session#_inject({'name': 'work', 'status': 'active',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#session#_inject({'name': 'work', 'status': 'active',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'work\n',      'the first duplicate keeps its bare name'
+  Assert text =~# 'work (2)',    'the second should be suffixed: ' . text
+  " The stored names are untouched.
+  let names = map(claude#session#list(), {_, r -> r.name})
+  AssertEqual ['work', 'work'], names
+
+" ── closed sessions ──────────────────────────────────────────────────────────
+
+Execute (show_closed=0 removes closed rows from the tree):
+  call claude#session#_inject({'name': 'live one', 'status': 'active',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  call claude#session#_inject({'name': 'dead one', 'status': 'closed',
+        \ 'worktree': '/w/x', 'branch': 'main'})
+  let g:claude_panel_show_closed = 0
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  let g:claude_panel_show_closed = 1
+  Assert text =~# 'live one',  'live sessions must still render'
+  Assert text !~# 'dead one',  'closed sessions should be hidden'
+
+" ── folding ──────────────────────────────────────────────────────────────────
+
+Execute (folding a project hides its children and persists across redraws):
+  call claude#session#_inject({'name': 'hidden me', 'status': 'active',
+        \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
+  call claude#panel#open()
+  Assert join(claude#panel#_lines(), "\n") =~# 'hidden me'
+  " Put the cursor on the project node and fold it.
+  call cursor(3, 1)
+  normal za
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▸ alpha',   'the project should be marked collapsed'
+  Assert text !~# 'hidden me', 'collapsed children must not render'
+  " A rebuild keeps the fold shut.
+  call claude#panel#refresh()
+  Assert join(claude#panel#_lines(), "\n") !~# 'hidden me'
+  normal za
+  Assert join(claude#panel#_lines(), "\n") =~# 'hidden me',
+        \ 'unfolding should bring the children back'

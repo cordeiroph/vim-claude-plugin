@@ -1,0 +1,107 @@
+" Tests for §3.4 target resolution — which session a command acts on when
+" several (or none) are running. The picker itself is never triggered here:
+" every case is arranged so resolution is unambiguous.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:_saved_cmd    = get(g:, 'claude_cmd', 'claude')
+  let g:_saved_store  = get(g:, 'claude_session_store', '')
+  let g:_saved_prompt = get(g:, 'claude_session_prompt_name', 1)
+  let g:claude_cmd = 'sleep 30'
+  let g:claude_session_prompt_name = 0
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  call claude#store#_reset()
+
+After:
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  let g:claude_cmd                 = g:_saved_cmd
+  let g:claude_session_store       = g:_saved_store
+  let g:claude_session_prompt_name = g:_saved_prompt
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
+  only
+
+" ── rule 4: nothing running ──────────────────────────────────────────────────
+
+Execute (with no sessions there is no current session):
+  AssertEqual '', claude#session#current()
+
+Execute (target creates a session when none is running):
+  let g:_got = 'unset'
+  call claude#session#target('t', {id -> execute('let g:_got = ' . string(id))})
+  Assert g:_got !=# 'unset', 'the callback must be invoked'
+  Assert !empty(g:_got),     'a session should have been created'
+  Assert claude#session#exists(g:_got)
+
+" ── rule 2: exactly one session ──────────────────────────────────────────────
+
+Execute (a single live session is the current one without prompting):
+  let id = claude#session#new('only')
+  " Move the cursor away from the terminal so rule 1 cannot apply.
+  wincmd p
+  AssertEqual id, claude#session#current()
+
+Execute (target passes the single session straight to the callback):
+  let id = claude#session#new('only')
+  wincmd p
+  let g:_got = ''
+  call claude#session#target('t', {i -> execute('let g:_got = ' . string(i))})
+  AssertEqual id, g:_got
+
+" ── rule 1: the cursor wins ──────────────────────────────────────────────────
+
+Execute (the session under the cursor beats every other live session):
+  let a = claude#session#new('first')
+  let b = claude#session#new('second')
+  " Two live sessions: ambiguous unless the cursor decides it.
+  call win_gotoid(bufwinid(claude#session#get(a).bufnr))
+  AssertEqual a, claude#session#current()
+  call win_gotoid(bufwinid(claude#session#get(b).bufnr))
+  AssertEqual b, claude#session#current()
+
+Execute (several live sessions with the cursor elsewhere are ambiguous):
+  call claude#session#new('first')
+  call claude#session#new('second')
+  wincmd t
+  AssertEqual '', claude#session#current(),
+        \ 'ambiguity must be resolved by the picker, not silently'
+
+" ── ordering ─────────────────────────────────────────────────────────────────
+
+Execute (live sessions are offered most-recently-focused first):
+  let a = claude#session#new('older')
+  let b = claude#session#new('newer')
+  " Backdate both, then re-focus a: it should overtake b.
+  let rec_a = claude#session#get(a)
+  let rec_b = claude#session#get(b)
+  let rec_a.last_focus = localtime() - 100
+  let rec_b.last_focus = localtime() - 50
+  AssertEqual b, claude#session#live()[0].id
+  let rec_a.last_focus = localtime()
+  AssertEqual a, claude#session#live()[0].id
+
+Execute (entering a terminal window records the focus):
+  let a = claude#session#new('one')
+  let b = claude#session#new('two')
+  let rec_a = claude#session#get(a)
+  let rec_a.last_focus = 0
+  call win_gotoid(bufwinid(rec_a.bufnr))
+  doautocmd WinEnter
+  Assert claude#session#get(a).last_focus > 0,
+        \ 'WinEnter should mark the session as focused'
+
+" ── closed sessions are not targets ──────────────────────────────────────────
+
+Execute (a closed session is never resolved as current):
+  call claude#session#_inject(
+        \ {'name': 'gone', 'status': 'closed', 'worktree': '/tmp/x'})
+  AssertEqual '', claude#session#current()
+  AssertEqual 0,  len(claude#session#live())

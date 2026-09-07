@@ -33,38 +33,35 @@ let s:agents_base = [
       \ {'word': '@statusline-setup','abbr': 'statusline-setup','menu': '[Built-in Agent]'},
       \ ]
 
-" Script-level storage for global mode (g:claude_tab_sessions=0).
-let s:g_commands = []
-let s:g_agents   = []
-
-function! s:tab_mode() abort
-  return get(g:, 'claude_tab_sessions', 1)
-endfunction
+" Completion data belongs to a session: each Claude process sees its own
+" project commands and agents. s:last_* holds the most recently collected set
+" and is used when no single session can be resolved — before the first
+" session exists, or while several are running.
+let s:last_commands = []
+let s:last_agents   = []
 
 function! s:get_session_commands() abort
-  return s:tab_mode() ? get(t:, 'claude_commands', []) : s:g_commands
-endfunction
-function! s:set_session_commands(list) abort
-  if s:tab_mode() | let t:claude_commands = a:list | else | let s:g_commands = a:list | endif
+  let l:rec = claude#session#get(claude#session#current())
+  return !empty(l:rec) && !empty(l:rec.commands)
+        \ ? l:rec.commands : s:last_commands
 endfunction
 
 function! s:get_session_agents() abort
-  return s:tab_mode() ? get(t:, 'claude_agents', []) : s:g_agents
-endfunction
-function! s:set_session_agents(list) abort
-  if s:tab_mode() | let t:claude_agents = a:list | else | let s:g_agents = a:list | endif
+  let l:rec = claude#session#get(claude#session#current())
+  return !empty(l:rec) && !empty(l:rec.agents)
+        \ ? l:rec.agents : s:last_agents
 endfunction
 
-" Collect slash commands and agents when a Claude instance starts.
-" Only called from claude#open() — never from the input panel.
-function! claude#input#collect_data() abort
+" Collect slash commands and agents when a Claude instance starts. Called
+" from claude#session#new()/resume() with the session id — never from the
+" input panel. Without an id the data is only cached as the fallback set.
+function! claude#input#collect_data(...) abort
   " Slash commands: built-ins + project-level + user-level custom commands.
   let l:cmds = copy(s:slash_commands_base)
   for l:f in glob(getcwd() . '/.claude/commands/*.md', 0, 1)
         \ + glob(expand('~') . '/.claude/commands/*.md', 0, 1)
     call add(l:cmds, {'word': '/' . fnamemodify(l:f, ':t:r'), 'menu': 'Custom command'})
   endfor
-  call s:set_session_commands(l:cmds)
 
   " Agents: built-ins + project-level + user-level.
   let l:agents = copy(s:agents_base)
@@ -76,7 +73,16 @@ function! claude#input#collect_data() abort
           \ 'menu': '[Agent]',
           \ })
   endfor
-  call s:set_session_agents(l:agents)
+
+  let s:last_commands = l:cmds
+  let s:last_agents   = l:agents
+
+  let l:id = a:0 > 0 ? a:1 : ''
+  if !empty(l:id) && claude#session#exists(l:id)
+    let l:rec = claude#session#get(l:id)
+    let l:rec.commands = l:cmds
+    let l:rec.agents   = l:agents
+  endif
 endfunction
 
 " Complete slash commands (/) and file references (@) in the input buffer.

@@ -8,7 +8,7 @@ CONTENTS                                                        *claude-contents
   3. Configuration ............. |claude-configuration|
   4. Commands .................. |claude-commands|
   5. Mappings .................. |claude-mappings|
-  6. Tab sessions .............. |claude-tab-sessions|
+  6. Session panel ............. |claude-session-panel|
   7. Model selection ........... |claude-models|
   8. Input window .............. |claude-input|
   9. License ................... |claude-license|
@@ -16,11 +16,12 @@ CONTENTS                                                        *claude-contents
 ==============================================================================
 1. INTRODUCTION                                             *claude-introduction*
 
-claude.vim opens the Claude CLI in a terminal split inside Vim. Each
-editor tab gets its own independent Claude session by default. You can send the
-current file or a visual selection to Claude for explanation, switch models
-on the fly, and navigate between your code and the Claude window using a small
-set of commands and key mappings.
+claude.vim opens the Claude CLI in a terminal split inside Vim. Any number of
+sessions can run at once, each with a name you choose; the session panel
+(|claude-session-panel|) lists them all, grouped by project, worktree and
+branch. You can send the current file or a visual selection to Claude for
+explanation, switch models on the fly, and navigate between your code and the
+Claude windows using a small set of commands and key mappings.
 
 ==============================================================================
 2. REQUIREMENTS                                             *claude-requirements*
@@ -65,16 +66,109 @@ g:claude_cmd~
     let g:claude_cmd = '/usr/local/bin/claude'
 <
 ------------------------------------------------------------------------------
-                                                        *g:claude_tab_sessions*
-g:claude_tab_sessions~
-  When set to 1 (default), each tab page maintains its own Claude session.
-  Set to 0 to share a single session across all tabs.
+                                                          *g:claude_panel_width*
+g:claude_panel_width~
+  Width of the session panel, in columns.
+
+  Default: 35
+
+------------------------------------------------------------------------------
+                                                         *g:claude_panel_anchor*
+g:claude_panel_anchor~
+  Which edge the session panel is pinned to.
+
+  Values:  'left' (default), 'right'
+
+------------------------------------------------------------------------------
+                                                          *g:claude_panel_icons*
+g:claude_panel_icons~
+  Status glyphs, keyed 'active', 'idle' and 'closed'. A partial dictionary is
+  merged over the defaults.
+
+  Example: >
+    let g:claude_panel_icons = {'active': '>>'}
+<
+------------------------------------------------------------------------------
+                                                          *g:claude_panel_ascii*
+g:claude_panel_ascii~
+  Set to 1 to force the plain [A] / [I] / [C] glyphs. Done automatically when
+  'encoding' is not a Unicode encoding.
+
+  Default: 0
+
+------------------------------------------------------------------------------
+                                                     *g:claude_panel_refresh_ms*
+g:claude_panel_refresh_ms~
+  How often, in milliseconds, session status is polled while the panel is
+  visible. The poller is stopped entirely when the panel is hidden, so this
+  costs nothing when the panel is closed.
+
+  Default: 2000
+
+------------------------------------------------------------------------------
+                                                      *g:claude_panel_idle_secs*
+g:claude_panel_idle_secs~
+  Seconds without terminal output before a running session is shown as idle
+  rather than active.
+
+  Default: 30
+
+------------------------------------------------------------------------------
+                                                    *g:claude_panel_show_closed*
+g:claude_panel_show_closed~
+  Set to 0 to list only live sessions, hiding resumable ones.
 
   Default: 1
-  Example: >
-    let g:claude_tab_sessions = 0
+
+------------------------------------------------------------------------------
+                                                   *g:claude_panel_closed_limit*
+g:claude_panel_closed_limit~
+  Maximum number of closed (resumable) sessions listed per project.
+
+  Default: 10
+
+------------------------------------------------------------------------------
+                                                      *g:claude_panel_auto_open*
+g:claude_panel_auto_open~
+  Set to 1 to open the session panel automatically on |VimEnter|.
+
+  Default: 0
+
+------------------------------------------------------------------------------
+                                                        *g:claude_session_store*
+g:claude_session_store~
+  Path of the JSON file that remembers session names.
+
+  When empty (the default) the file lives at `data/sessions.json` inside the
+  plugin directory, which keeps the plugin self-contained.
+
+  WARNING: a plugin update or reinstall — `:PlugUpdate`, `:PlugClean`, or
+  deleting the bundle directory — removes that file and every session name
+  with it. Point this at a durable location to keep names across updates: >
+    let g:claude_session_store = expand('~/.claude/vim-sessions.json')
 <
-  See also: |claude-tab-sessions|
+  If the file cannot be written the plugin warns once and keeps names in
+  memory for the rest of the Vim session.
+
+------------------------------------------------------------------------------
+                                                  *g:claude_session_prompt_name*
+g:claude_session_prompt_name~
+  When 1 (default), starting a session prompts for a name. Set to 0 to name
+  new sessions after the current time instead.
+
+  Default: 1
+
+------------------------------------------------------------------------------
+                                                        *g:claude_session_flags*
+g:claude_session_flags~
+  Whether the CLI supports `--session-id` and `--name`, which the plugin uses
+  to mint a session id up front and share the session's name with Claude.
+
+  -1 (default) probes `claude --help` once. Set to 1 to force the flags on or
+  0 to force them off — needed only when |g:claude_cmd| launches Claude
+  through a wrapper with a different name, so the probe cannot run safely.
+
+  Default: -1
 
 ------------------------------------------------------------------------------
                                                               *g:claude_models*
@@ -103,21 +197,48 @@ g:claude_no_default_mappings~
 ------------------------------------------------------------------------------
                                                                   *:ClaudeOpen*
 :ClaudeOpen
-  Open a new Claude terminal in a split window. If a session already exists
-  for the current tab, focus it instead.
+  Focus a Claude session, starting one if none is running. When several are
+  running the session under the cursor wins; otherwise a picker appears
+  (see |claude-session-target|).
+
+------------------------------------------------------------------------------
+                                                                   *:ClaudeNew*
+:ClaudeNew [name]
+  Start a new session even when others are already running. Without an
+  argument the name is prompted for.
+
+------------------------------------------------------------------------------
+                                                                *:ClaudeRename*
+:ClaudeRename [name]
+  Rename a session. Without an argument the new name is prompted for. The name
+  is remembered across Vim restarts (see |g:claude_session_store|).
+
+------------------------------------------------------------------------------
+                                                              *:ClaudeSessions*
+:ClaudeSessions
+  Toggle the session panel. See |claude-session-panel|.
+
+------------------------------------------------------------------------------
+                                                          *:ClaudeSessionsOpen*
+                                                         *:ClaudeSessionsClose*
+:ClaudeSessionsOpen
+:ClaudeSessionsClose
+  Open or hide the session panel explicitly. Hiding the panel never stops a
+  session.
 
 ------------------------------------------------------------------------------
                                                                 *:ClaudeToggle*
 :ClaudeToggle
-  Toggle the Claude window. Hides it if currently visible; shows it if hidden;
+  Toggle a Claude window. Hides it if currently visible; shows it if hidden;
   opens a new session if none exists. The Claude process keeps running while
   the window is hidden.
 
 ------------------------------------------------------------------------------
                                                                  *:ClaudeClose*
 :ClaudeClose
-  Close the Claude terminal and wipe its buffer. The Claude process is
-  terminated.
+  End a session: stop its process and wipe its terminal buffer. The
+  conversation stays on disk and can be reopened with |:ClaudeResume| or from
+  the session panel.
 
 ------------------------------------------------------------------------------
                                                                *:ClaudeExplain*
@@ -152,9 +273,9 @@ g:claude_no_default_mappings~
 ------------------------------------------------------------------------------
                                                                  *:ClaudeFocus*
 :ClaudeFocus
-  Move the cursor to the Claude window and enter insert mode. Opens a new
-  session if none exists, or reveals a hidden window if the session is alive
-  but not displayed.
+  Move the cursor to a Claude window and enter insert mode. Opens a new
+  session if none exists, reveals a hidden window if the session is alive but
+  not displayed, and resumes the session if it has ended.
 
 ------------------------------------------------------------------------------
                                                                *:ClaudeWinLeft*
@@ -185,6 +306,7 @@ Default mappings (disabled when |g:claude_no_default_mappings| is set):
   <leader>ct    Toggle Claude window (|:ClaudeToggle|)
   <leader>cx    Close Claude (|:ClaudeClose|)
   <leader>cf    Focus Claude window (|:ClaudeFocus|)
+  <leader>cs    Toggle the session panel (|:ClaudeSessions|)
   <leader>ce    Explain current file (normal mode) or selection (visual mode)
   <leader>ci    Toggle input window (|:ClaudeInput|)
   <leader>cm    Switch model (|:ClaudeModel|)
@@ -206,20 +328,91 @@ To define your own mappings after disabling defaults: >
 <
 
 ==============================================================================
-6. TAB SESSIONS                                             *claude-tab-sessions*
+6. SESSION PANEL                                          *claude-session-panel*
 
-By default (|g:claude_tab_sessions| = 1) each Vim tab page owns a separate
-Claude session. Opening a new tab and running |:ClaudeOpen| starts a fresh
-Claude process; closing the tab automatically terminates that process and
-reclaims its buffer.
+|:ClaudeSessions| (or |<leader>cs|) toggles a panel on the left of the screen
+listing every Claude session: the ones running in this Vim instance and the
+ones that have ended but can still be resumed from their transcript.
 
-Set |g:claude_tab_sessions| = 0 to use a single shared session for all tabs.
-This is useful when you want Claude context to persist as you switch tabs.
+Sessions are grouped by project, then worktree, then the branch that was
+checked out when the session started. Worktrees of one repository share a
+single project node. >
 
-A session ends only when you run |:ClaudeClose|, close its tab, or quit Vim.
-Closing an ordinary split window leaves it running, and so does hiding the
-Claude window with `:q` or |:ClaudeToggle| — the process keeps working and the
-window can be brought back with |:ClaudeToggle| or |:ClaudeFocus|.
+    Claude Sessions               (3)
+
+    v claude-pluing
+      v ~/Workspace/vim/claude-pluing
+        v main
+          * panel design
+          o doc rewrite
+        v feature/session-registry
+          o registry spike
+      v ~/Workspace/vim/wt-hotfix
+        v hotfix/e947
+          x E947 repro
+
+    ? help
+<
+The glyph before each name is the session's status:
+
+  active   the process is running and has produced output recently
+  idle     the process is running but has been quiet for
+           |g:claude_panel_idle_secs|
+  closed   the process is not running here; the conversation can be resumed
+
+Status is polled only while the panel is visible; hiding it stops the poller
+completely.
+
+Keys inside the panel~
+  <CR>, o      Open the session, or fold a group node
+  i            Open the session in a horizontal split
+  s            Open the session in a vertical split
+  t            Open the session in a new tab
+  n            Start a new session
+  r            Rename the session under the cursor
+  d            End the session (its transcript is kept, so it can be resumed)
+  D            Purge: delete the session's transcript and stored name
+  R            Rescan transcripts and rebuild the tree
+  <Space>, za  Fold or unfold the node under the cursor
+  q            Hide the panel
+  ?            Toggle the inline key reference
+
+A session that is already visible is jumped to rather than opened twice,
+except with `t`, which always makes a new tab. Sessions open beside the panel;
+the panel window itself is never replaced.
+
+Hiding the panel does not stop anything. A session ends only when you run
+|:ClaudeClose|, press `d` in the panel, or quit Vim.
+
+Reopening a closed session~
+  Claude writes a conversation to disk only once it has content, so a session
+  you started but never sent a message to leaves nothing to resume. Opening
+  such a session claims its id for a fresh conversation instead of failing —
+  the panel entry, its name and its id are kept, and only the (empty) history
+  is lost. Sessions that do have a transcript are resumed normally.
+
+Choosing a session                                       *claude-session-target*
+
+Commands that act on one session — |:ClaudeToggle|, |:ClaudeFocus|,
+|:ClaudeClose|, |:ClaudeModel|, |:ClaudeExplain|, |:ClaudeInput| — pick their
+target like this:
+
+  1. the session whose terminal holds the cursor, if any;
+  2. otherwise the only live session, with no prompt;
+  3. otherwise a picker listing the live sessions, most recently used first,
+     with a "New session" entry at the end;
+  4. otherwise, with nothing running, a new session is started.
+
+The picker uses a popup where available and a numbered |inputlist()| prompt
+otherwise.
+
+Names                                                     *claude-session-names*
+
+Starting a session prompts for a name (see |g:claude_session_prompt_name|),
+which is passed to the Claude CLI as well, so it also appears in Claude's own
+prompt box and /resume picker. Names are stored in |g:claude_session_store| and
+survive a Vim restart. Sessions that were never named in Vim fall back to their
+timestamp and first message.
 
 ==============================================================================
 7. MODEL SELECTION                                              *claude-models*

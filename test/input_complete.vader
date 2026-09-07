@@ -8,9 +8,9 @@
 " Session data is seeded via claude#input#collect_data() in the Before block.
 
 Before:
-  " Global session mode so data goes to s: vars, no tab-local state needed.
-  let g:_test_saved_tab_mode = get(g:, 'claude_tab_sessions', 1)
-  let g:claude_tab_sessions = 0
+  " No session is running, so collect_data() seeds the fallback set that
+  " completion falls back to.
+  call claude#session#_reset()
 
   " Temp project dir with one custom command and one custom agent.
   let g:_test_dir = tempname()
@@ -25,7 +25,7 @@ Before:
   execute 'cd ' . fnameescape(g:_test_orig_cwd)
 
 After:
-  let g:claude_tab_sessions = g:_test_saved_tab_mode
+  call claude#session#_reset()
   call delete(g:_test_dir, 'rf')
 
 " ── findstart: no trigger character ──────────────────────────────────────────
