@@ -125,7 +125,10 @@ function! s:find_stacked(node, pwin, nwin) abort
   return v:false
 endfunction
 
-" Give the panel its fixed height and let NERDTree absorb every resize.
+" Give the panel its starting height and let NERDTree absorb the resizes Vim
+" makes on its own ('equalalways', windows opening and closing). Called once,
+" when the two windows first come together — a manual resize afterwards is the
+" user overriding the default, and is left alone.
 function! s:apply_stacked_height() abort
   let l:pwin = bufwinid(s:bufnr)
   if l:pwin == -1
@@ -148,24 +151,31 @@ function! claude#panel#stack() abort
     return
   endif
 
-  if !s:is_stacked(l:pwin, l:nwin)
-    " rightbelow:0 always lands the moved window above the target, so the
-    " panel ends up on top no matter which of the two opened first.
-    let l:cur = win_getid()
-    try
-      call win_splitmove(l:pwin, l:nwin,
-            \ {'vertical': v:false, 'rightbelow': v:false})
-    catch
-      return
-    finally
-      " Moving windows must not steal focus from whoever triggered this.
-      if win_id2win(l:cur) > 0 && win_getid() != l:cur
-        call win_gotoid(l:cur)
-      endif
-    endtry
+  " Already in one column: leave it alone. The height is deliberately not
+  " re-applied here — this runs from the poll timer, and re-imposing it every
+  " tick would undo any resize the user made by hand.
+  if s:is_stacked(l:pwin, l:nwin)
+    let s:nerd_winid = l:nwin
+    return
   endif
 
+  " rightbelow:0 always lands the moved window above the target, so the panel
+  " ends up on top no matter which of the two opened first.
+  let l:cur = win_getid()
+  try
+    call win_splitmove(l:pwin, l:nwin,
+          \ {'vertical': v:false, 'rightbelow': v:false})
+  catch
+    return
+  finally
+    " Moving windows must not steal focus from whoever triggered this.
+    if win_id2win(l:cur) > 0 && win_getid() != l:cur
+      call win_gotoid(l:cur)
+    endif
+  endtry
+
   let s:nerd_winid = l:nwin
+  " Only on the transition into the stacked state, never afterwards.
   call s:apply_stacked_height()
 endfunction
 

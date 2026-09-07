@@ -130,8 +130,11 @@ g:claude_panel_closed_limit~
 ------------------------------------------------------------------------------
                                                          *g:claude_panel_height*
 g:claude_panel_height~
-  Panel height in lines while it shares a column with NERDTree. The panel is
-  pinned to this height and NERDTree takes the remaining lines.
+  Height in lines the panel is given when it first comes to share a column
+  with NERDTree, which takes the remaining lines.
+
+  This is a starting size, not an enforced one: resize the window by hand and
+  it stays where you put it.
 
   Default: 15
   See also: |claude-nerdtree|
@@ -427,8 +430,10 @@ This happens whichever of the two is opened first, and either can be closed
 without disturbing the other — closing NERDTree gives the whole column back to
 the panel, and hiding the panel leaves NERDTree with it.
 
-The panel takes |g:claude_panel_height| lines and NERDTree takes the rest, so
-resizing the column changes NERDTree's share. While stacked the column is
+The panel starts at |g:claude_panel_height| lines and NERDTree takes the rest.
+Resize either window by hand and it stays as you left it — the size is applied
+only when the two first come together. NERDTree may still reset the column's
+*width* on its own, which it does independently of this plugin. While stacked the column is
 NERDTree's width (`g:NERDTreeWinSize`), not |g:claude_panel_width|: NERDTree
 resets its own width whenever it redraws, so the panel does not fight it.
 

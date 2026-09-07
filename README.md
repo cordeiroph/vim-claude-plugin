@@ -149,7 +149,7 @@ The panel and NERDTree would otherwise form two columns and swallow most of the 
 +----------------+---------------------------+
 ```
 
-It works whichever opens first, and closing either one hands the column to the other. The panel takes `g:claude_panel_height` lines; NERDTree takes the rest. While stacked the column is NERDTree's width, since NERDTree resets its own width on every redraw. Set `g:claude_panel_nerdtree_stack = 0` to opt out.
+It works whichever opens first, and closing either one hands the column to the other. The panel starts at `g:claude_panel_height` lines and NERDTree takes the rest; resize either by hand and it stays put, since the size is applied only when the two first come together. While stacked the column is NERDTree's width, since NERDTree resets its own width on every redraw. Set `g:claude_panel_nerdtree_stack = 0` to opt out.
 
 ### Session names
 

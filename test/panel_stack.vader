@@ -239,3 +239,50 @@ Execute (repeated events do not churn the layout):
   doautocmd FileType nerdtree
   call claude#panel#_nerdtree_init()
   AssertEqual settled, winlayout()
+
+" ── manual resizing is not undone ────────────────────────────────────────────
+"
+" g:claude_panel_height is a starting size, not a size that gets re-imposed:
+" claude#panel#stack() runs from the poll timer, so re-applying the height on
+" every call would fight the user every couple of seconds.
+
+Execute (a hand-resized panel keeps its height across a stack() call):
+  call FakeTree()
+  call claude#panel#open()
+  AssertEqual 15, winheight(win_id2win(bufwinid(claude#panel#bufnr())))
+  " The user drags the divider.
+  call win_execute(bufwinid(claude#panel#bufnr()), 'resize 25')
+  AssertEqual 25, winheight(win_id2win(bufwinid(claude#panel#bufnr())))
+  " Two poll ticks later it must still be 25.
+  call claude#panel#stack()
+  call claude#panel#stack()
+  AssertEqual 25, winheight(win_id2win(bufwinid(claude#panel#bufnr()))),
+        \ 'the poll timer must not re-impose g:claude_panel_height'
+
+Execute (a hand-resized panel survives a change to the config default):
+  call FakeTree()
+  call claude#panel#open()
+  call win_execute(bufwinid(claude#panel#bufnr()), 'resize 22')
+  let g:claude_panel_height = 8
+  call claude#panel#stack()
+  AssertEqual 22, winheight(win_id2win(bufwinid(claude#panel#bufnr())))
+  let g:claude_panel_height = 15
+
+Execute (the height is still applied when the two first come together):
+  call claude#panel#open()
+  call FakeTree()
+  call claude#panel#_nerdtree_init()
+  AssertEqual 15, winheight(win_id2win(bufwinid(claude#panel#bufnr()))),
+        \ 'the starting height applies on the transition into stacking'
+
+Execute (re-stacking after a manual unstack applies the height again):
+  call FakeTree()
+  call claude#panel#open()
+  call win_execute(bufwinid(claude#panel#bufnr()), 'resize 25')
+  " Pull the panel back out into its own column, as a manual rearrangement would.
+  call win_splitmove(bufwinid(claude#panel#bufnr()), g:_fake_win,
+        \ {'vertical': v:true, 'rightbelow': v:false})
+  Assert !Stacked(), 'precondition: the panel is out of the column'
+  call claude#panel#stack()
+  Assert Stacked(), 'the backstop should put it back'
+  AssertEqual 15, winheight(win_id2win(bufwinid(claude#panel#bufnr())))

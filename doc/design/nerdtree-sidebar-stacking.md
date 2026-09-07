@@ -224,6 +224,21 @@ by construction. Only driving the whole sequence ourselves — opening NERDTree
 first and splitting the panel into its column — removes the intermediate state
 entirely (§9).
 
+### 4.5 The height is applied once, not maintained
+
+`s:stack()` runs from the poll timer, so anything it does unconditionally, it
+does every couple of seconds. Applying the height on every call made the panel
+snap back moments after any manual resize.
+
+The height and `winfixheight` are therefore applied only on the **transition**
+into the stacked state — when a move actually happened. When the two windows
+are already in one column `s:stack()` returns immediately. `winfixheight` keeps
+Vim's own equalisation off the panel; it does not stop an explicit `:resize`,
+so a hand-set height survives.
+
+Re-stacking after a manual *unstack* counts as a fresh transition and does
+apply the height again.
+
 ### 4.3 Order enforcement
 
 `win_splitmove()` with `'rightbelow': v:false` always places the moved window
@@ -236,7 +251,7 @@ of the move, applied identically no matter which window opened first.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `g:claude_panel_height` | `15` | Panel height in lines while stacked with NERDTree |
+| `g:claude_panel_height` | `15` | Height the panel is given when it first comes to share a column with NERDTree. A starting size, not an enforced one (§4.5) |
 | `g:claude_panel_nerdtree_stack` | `1` | `0` disables stacking; the panel and NERDTree keep their own columns |
 
 `g:claude_panel_width` keeps its meaning for a standalone panel and is ignored
