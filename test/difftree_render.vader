@@ -64,19 +64,30 @@ Execute (the header carries the base branch):
   Assert claude#difftree#_lines()[0] =~# '^Git Diff',  'expected a header'
   Assert claude#difftree#_lines()[0] =~# 'main$',      'expected the base branch'
 
-Execute (files nest under project, branch and directory nodes):
+Execute (files nest under project, worktree, branch and directory nodes):
+  " The tree mirrors the session panel: project 0, worktree 2, branch 4,
+  " directories 6 and deeper.
   call claude#difftree#open()
   let t = Text()
-  Assert t =~# '▾ ' . fnamemodify(g:_repo, ':t'), 'project node missing: ' . t
-  Assert t =~# '  ▾ feature',                     'branch node missing: '  . t
-  Assert t =~# '    ▾ src',                       'directory node missing: ' . t
-  Assert t =~# 'handler\.go',                     'nested file missing'
-  Assert t =~# 'untracked\.txt',                  'root-level file missing'
+  Assert t =~# '\n▾ ' . fnamemodify(g:_repo, ':t'), 'project node missing: ' . t
+  Assert t =~# '\n  ▾ ',                           'worktree node missing: ' . t
+  Assert t =~# '\n    ▾ feature',                  'branch node missing: '  . t
+  Assert t =~# '\n      ▾ src',                    'directory node missing: ' . t
+  Assert t =~# 'handler\.go',                      'nested file missing'
+  Assert t =~# 'untracked\.txt',                   'root-level file missing'
+
+Execute (the worktree node sits between project and branch):
+  call claude#difftree#open()
+  let nodes = filter(copy(claude#difftree#_nodes()),
+        \ {_, n -> n.kind ==# 'worktree'})
+  Assert !empty(nodes), 'expected a worktree node'
+  AssertEqual '  ', nodes[0].indent
 
 Execute (a directory is indented under its parent):
   call claude#difftree#open()
   let t = Text()
-  Assert t =~# '    ▾ src\n      ▾ api\n', 'expected api nested under src: ' . t
+  Assert t =~# '      ▾ src\n        ▾ api\n',
+        \ 'expected api nested under src: ' . t
 
 " ── directory collapsing ─────────────────────────────────────────────────────
 
@@ -201,6 +212,11 @@ Execute (colours fall back to the groups NERDTree uses):
   Assert execute('highlight ClaudeDiffDir')       =~# 'links to Directory'
   Assert execute('highlight ClaudeDiffCommitted') =~# 'links to Normal'
   Assert execute('highlight ClaudeDiffHeader')    =~# 'links to Statement'
+
+Execute (the no-worktree node is dimmed so the reason is obvious):
+  call claude#difftree#open()
+  Assert execute('highlight ClaudeDiffNoWorktree') =~# 'links to Comment'
+  Assert execute('highlight ClaudeDiffWorktree')   =~# 'links to Directory'
 
 Execute (status colours fall back to nerdtree-git-plugin's own sources):
   call claude#difftree#open()

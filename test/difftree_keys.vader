@@ -135,7 +135,7 @@ Execute (a file that no longer exists is reported, not opened):
 
 " ── folding ──────────────────────────────────────────────────────────────────
 
-Execute (folding a directory hides its contents):
+Execute (folding the project node hides everything below it):
   call claude#difftree#open()
   call win_gotoid(bufwinid(claude#difftree#bufnr()))
   Assert join(claude#difftree#_lines(), "\n") =~# 'main\.go'
@@ -193,3 +193,93 @@ Execute (double-click does exactly what <CR> does):
   call claude#difftree#open()
   call win_gotoid(bufwinid(claude#difftree#bufnr()))
   AssertEqual maparg('<CR>', 'n'), maparg('<2-LeftMouse>', 'n')
+
+" ── the worktree level ───────────────────────────────────────────────────────
+"
+" The tree gained a Worktree node between Project and Branch, so fold targets
+" moved: line 3 is the project, 4 the worktree, 5 the branch.
+
+Execute (the rows are project, worktree, branch, in that order):
+  call claude#difftree#open()
+  let kinds = map(copy(claude#difftree#_nodes()), {_, n -> n.kind})
+  let tree  = filter(copy(kinds),
+        \ {_, k -> index(['project', 'worktree', 'branch'], k) >= 0})
+  AssertEqual ['project', 'worktree', 'branch'], tree[0:2]
+
+Execute (a worktree folds independently of the branches under it):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  let nodes = claude#difftree#_nodes()
+  let wline = -1
+  for i in range(len(nodes))
+    if nodes[i].kind ==# 'worktree' | let wline = i + 1 | break | endif
+  endfor
+  Assert wline > 0, 'expected a worktree row'
+  call cursor(wline, 1)
+  normal za
+  let t = join(claude#difftree#_lines(), "\n")
+  Assert t !~# 'main\.go',  'folding a worktree hides its branches'
+  Assert t !~# '▾ feature', 'the branch row goes with it'
+  Assert t =~# fnamemodify(g:_repo, ':t'), 'the project row stays'
+  normal za
+  Assert join(claude#difftree#_lines(), "\n") =~# 'main\.go'
+
+Execute (a branch folds without hiding its worktree):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  let nodes = claude#difftree#_nodes()
+  let bline = -1
+  for i in range(len(nodes))
+    if nodes[i].kind ==# 'branch' | let bline = i + 1 | break | endif
+  endfor
+  Assert bline > 0, 'expected a branch row'
+  call cursor(bline, 1)
+  normal za
+  let t = join(claude#difftree#_lines(), "\n")
+  Assert t !~# 'main\.go',   'folding a branch hides its files'
+  Assert t =~# '▸ feature',  'the branch row itself stays, marked collapsed'
+
+" ── the shared column keeps its width ────────────────────────────────────────
+"
+" Regression: a sidebar used to open as its own vertical column and then be
+" folded into the shared one by win_splitmove(). Merging two sidebar columns
+" leaves the survivor too wide — a 35-column session panel became 62 when the
+" diff tree opened beside it — because Vim gives the freed width to the
+" remaining column rather than back to the main area, and it stayed wrong even
+" after the second sidebar closed. Sidebars now split inside the existing
+" column, so there is never a second one to merge.
+
+Execute (opening the diff tree does not widen the session panel):
+  call claude#panel#open()
+  let width = winwidth(win_id2win(claude#panel#winid()))
+  AssertEqual g:claude_panel_width, width
+  call claude#difftree#open()
+  AssertEqual width, winwidth(win_id2win(claude#panel#winid())),
+        \ 'the session panel must keep its width'
+  AssertEqual width, winwidth(win_id2win(claude#difftree#winid())),
+        \ 'both sidebars share the one column width'
+
+Execute (it does not widen it in the other order either):
+  call claude#difftree#open()
+  let width = winwidth(win_id2win(claude#difftree#winid()))
+  call claude#panel#open()
+  AssertEqual width, winwidth(win_id2win(claude#difftree#winid()))
+  AssertEqual width, winwidth(win_id2win(claude#panel#winid()))
+
+Execute (closing one gives the width back rather than to the survivor):
+  call claude#panel#open()
+  let width = winwidth(win_id2win(claude#panel#winid()))
+  call claude#difftree#open()
+  call claude#difftree#close()
+  AssertEqual width, winwidth(win_id2win(claude#panel#winid())),
+        \ 'the survivor must not absorb the closed sidebar''s width'
+
+Execute (the editor keeps its width throughout):
+  call claude#panel#open()
+  call claude#sidebar#enter_main(-1)
+  let main = winwidth(0)
+  Assert main > 0, 'expected a main window'
+  call claude#difftree#open()
+  call claude#sidebar#enter_main(-1)
+  AssertEqual main, winwidth(0),
+        \ 'opening a sidebar must not steal width from the editor'

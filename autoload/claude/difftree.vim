@@ -16,7 +16,9 @@ let s:bufnr      = -1
 let s:prev_winid = -1
 let s:collapsed  = {}    " fold key -> 1 while that node is shut
 let s:nodes      = []    " parallel to the rendered lines
-let s:cache      = {}    " '<worktree>|<base>' -> list of records
+let s:cache      = {}    " '<worktree>|<branch>|<base>' -> list of records
+let s:sources    = []    " branches to list, see s:sources()
+let s:sources_ok = 0
 let s:base_over  = ''    " set by :ClaudeDiffBase
 let s:base_cache = ''
 let s:filter     = ''
@@ -133,53 +135,139 @@ function! s:parse_status(line) abort
   return [l:parts[0][0], l:parts[-1]]
 endfunction
 
-function! s:blank(path, wt) abort
+function! s:blank(path, src) abort
   return {'path': a:path, 'committed': '', 'dirty': '',
-        \ 'worktree': a:wt.path, 'branch': a:wt.branch}
+        \ 'worktree': a:src.worktree, 'branch': a:src.branch}
+endfunction
+
+" ── what to list ─────────────────────────────────────────────────────────────
+"
+" The panel answers "what has Claude changed?", so the branch list is the union
+" of three things:
+"
+"   1. every worktree, as before — nothing that used to appear disappears;
+"   2. every branch a Claude session ran on, live or closed, taken from the
+"      session registry. A session records its branch at spawn time, so this
+"      surfaces work on branches that are no longer checked out anywhere;
+"   3. the branch currently checked out, if neither of those covered it.
+"
+" This costs one `git rev-parse` per session branch, so it is computed during a
+" refresh and cached until s:invalidate() — never on a redraw.
+function! s:sources() abort
+  if !s:sources_ok
+    let s:sources = s:build_sources()
+    let s:sources_ok = 1
+  endif
+  return s:sources
+endfunction
+
+function! s:branch_listed(list, branch) abort
+  for l:src in a:list
+    if l:src.branch ==# a:branch
+      return v:true
+    endif
+  endfor
+  return v:false
+endfunction
+
+function! s:build_sources() abort
+  let l:root = s:repo_root()
+  if empty(l:root)
+    return []
+  endif
+  let l:out = []
+
+  for l:wt in s:worktrees()
+    if !s:branch_listed(l:out, l:wt.branch)
+      call add(l:out, {'project': l:root, 'worktree': l:wt.path,
+            \ 'branch': l:wt.branch, 'has_worktree': 1})
+    endif
+  endfor
+
+  " Sessions are only on the registry once refresh() has scanned the
+  " transcripts, and the diff tree must not depend on the session panel having
+  " been opened first.
+  call claude#session#refresh()
+  for l:rec in claude#session#list()
+    let l:branch = get(l:rec, 'branch', '')
+    " Placeholders like (detached) or (no branch) are not diffable.
+    if empty(l:branch) || l:branch[0] ==# '('
+      continue
+    endif
+    if s:branch_listed(l:out, l:branch)
+      continue
+    endif
+    " A branch deleted since the session ran cannot be diffed at all.
+    if empty(s:git(l:root, 'rev-parse --verify --quiet '
+          \ . shellescape(l:branch)))
+      continue
+    endif
+    call add(l:out, {'project': l:root, 'worktree': '',
+          \ 'branch': l:branch, 'has_worktree': 0})
+  endfor
+
+  let l:cur = s:git(getcwd(), 'rev-parse --abbrev-ref HEAD')
+  if !empty(l:cur) && l:cur[0] !=# 'HEAD'
+        \ && !s:branch_listed(l:out, l:cur[0])
+    call add(l:out, {'project': l:root, 'worktree': getcwd(),
+          \ 'branch': l:cur[0], 'has_worktree': 1})
+  endif
+
+  return l:out
 endfunction
 
 " Every changed file in {wt}, cached per (worktree, base).
-function! s:files_for(wt) abort
+function! s:files_for(src) abort
   let l:base = claude#difftree#base()
-  let l:key  = a:wt.path . '|' . l:base
+  " The branch belongs in the key: several branches with no worktree all run
+  " git from the repository root and would otherwise collide.
+  let l:key = a:src.worktree . '|' . a:src.branch . '|' . l:base
   if has_key(s:cache, l:key)
     return s:cache[l:key]
   endif
 
+  " Without a worktree there is no HEAD to compare against and no working
+  " tree to inspect: the branch is diffed by name, and can only ever show
+  " committed changes.
+  let l:dir = a:src.has_worktree ? a:src.worktree : s:repo_root()
+  let l:rev = a:src.has_worktree ? 'HEAD' : a:src.branch
+
   let l:files = {}
 
   if !empty(l:base)
-    for l:line in s:git(a:wt.path, 'diff --name-status '
-          \ . shellescape(l:base) . '...HEAD')
+    for l:line in s:git(l:dir, 'diff --name-status '
+          \ . shellescape(l:base) . '...' . shellescape(l:rev))
       let [l:st, l:path] = s:parse_status(l:line)
       if empty(l:path)
         continue
       endif
-      let l:rec = get(l:files, l:path, s:blank(l:path, a:wt))
+      let l:rec = get(l:files, l:path, s:blank(l:path, a:src))
       let l:rec.committed = l:st
       let l:files[l:path] = l:rec
     endfor
   endif
 
-  for l:line in s:git(a:wt.path, 'diff --name-status HEAD')
-    let [l:st, l:path] = s:parse_status(l:line)
-    if empty(l:path)
-      continue
-    endif
-    let l:rec = get(l:files, l:path, s:blank(l:path, a:wt))
-    let l:rec.dirty = l:st
-    let l:files[l:path] = l:rec
-  endfor
-
-  if get(g:, 'claude_difftree_show_untracked', 1)
-    for l:path in s:git(a:wt.path, 'ls-files --others --exclude-standard')
+  if a:src.has_worktree
+    for l:line in s:git(l:dir, 'diff --name-status HEAD')
+      let [l:st, l:path] = s:parse_status(l:line)
       if empty(l:path)
         continue
       endif
-      let l:rec = get(l:files, l:path, s:blank(l:path, a:wt))
-      let l:rec.dirty = '?'
+      let l:rec = get(l:files, l:path, s:blank(l:path, a:src))
+      let l:rec.dirty = l:st
       let l:files[l:path] = l:rec
     endfor
+
+    if get(g:, 'claude_difftree_show_untracked', 1)
+      for l:path in s:git(l:dir, 'ls-files --others --exclude-standard')
+        if empty(l:path)
+          continue
+        endif
+        let l:rec = get(l:files, l:path, s:blank(l:path, a:src))
+        let l:rec.dirty = '?'
+        let l:files[l:path] = l:rec
+      endfor
+    endif
   endif
 
   let l:list = values(l:files)
@@ -320,7 +408,9 @@ function! s:field(rec) abort
 endfunction
 
 function! s:invalidate() abort
-  let s:cache = {}
+  let s:cache      = {}
+  let s:sources    = []
+  let s:sources_ok = 0
 endfunction
 
 " ── model ────────────────────────────────────────────────────────────────────
@@ -329,12 +419,12 @@ endfunction
 function! claude#difftree#files() abort
   let l:base = claude#difftree#base()
   let l:out  = []
-  for l:wt in s:worktrees()
-    " A worktree sitting on the base branch diffs against itself: always empty.
-    if l:wt.branch ==# l:base
+  for l:src in s:sources()
+    " A branch compared against itself is always empty.
+    if l:src.branch ==# l:base
       continue
     endif
-    call extend(l:out, s:files_for(l:wt))
+    call extend(l:out, s:files_for(l:src))
   endfor
   return l:out
 endfunction
@@ -395,15 +485,21 @@ function! s:collapse(node) abort
   endwhile
 endfunction
 
-" [{branch, path, root}] for every worktree with changes.
+" The tree, shaped like the session panel's: worktrees, each holding the
+" branches seen on it, each holding a directory tree of changed files.
+"
+" Branches with no worktree cannot hang off one, so they are collected under a
+" single synthetic node placed last.
 function! claude#difftree#tree() abort
   let l:base = claude#difftree#base()
   let l:out  = []
-  for l:wt in s:worktrees()
-    if l:wt.branch ==# l:base
+  let l:idx  = {}
+
+  for l:src in s:sources()
+    if l:src.branch ==# l:base
       continue
     endif
-    let l:files = s:files_for(l:wt)
+    let l:files = s:files_for(l:src)
     if empty(l:files)
       continue
     endif
@@ -411,8 +507,29 @@ function! claude#difftree#tree() abort
     if empty(l:root.dirs) && empty(l:root.files)
       continue           " everything filtered out
     endif
-    call add(l:out, {'branch': l:wt.branch, 'path': l:wt.path, 'root': l:root})
+
+    let l:wkey = l:src.has_worktree ? l:src.worktree : '(no worktree)'
+    if !has_key(l:idx, l:wkey)
+      let l:idx[l:wkey] = len(l:out)
+      call add(l:out, {
+            \ 'worktree':     l:src.worktree,
+            \ 'has_worktree': l:src.has_worktree,
+            \ 'label':        l:src.has_worktree
+            \                 ? claude#sidebar#home_relative(l:src.worktree)
+            \                 : '(no worktree)',
+            \ 'key':          'w:' . l:wkey,
+            \ 'branches':     [],
+            \ })
+    endif
+    call add(l:out[l:idx[l:wkey]].branches, {
+          \ 'branch': l:src.branch,
+          \ 'key':    'b:' . l:wkey . '|' . l:src.branch,
+          \ 'root':   l:root,
+          \ })
   endfor
+
+  " Real worktrees first, the synthetic node last.
+  call sort(l:out, {a, b -> b.has_worktree - a.has_worktree})
   return l:out
 endfunction
 
@@ -430,6 +547,8 @@ endfunction
 let s:highlights = [
       \ ['ClaudeDiffHeader',      'NERDTreeCWD',              'Statement'],
       \ ['ClaudeDiffProject',     'NERDTreeCWD',              'Statement'],
+      \ ['ClaudeDiffWorktree',    'NERDTreeDir',              'Directory'],
+      \ ['ClaudeDiffNoWorktree',  '',                         'Comment'],
       \ ['ClaudeDiffBranch',      'NERDTreeDir',              'Directory'],
       \ ['ClaudeDiffDir',         'NERDTreeDir',              'Directory'],
       \ ['ClaudeDiffMarker',      'NERDTreeClosable',         'Directory'],
@@ -453,11 +572,17 @@ function! s:setup_syntax() abort
   silent! syntax clear
   let l:m = claude#sidebar#marker_class()
 
-  execute 'syntax match ClaudeDiffProject /^' . l:m
+  " Node rows are told apart by indent, so all of these move when the tree
+  " gains the worktree level: project 0, worktree 2, branch 4, directories 6+.
+  execute 'syntax match ClaudeDiffProject    /^' . l:m
         \ . ' .*$/ contains=ClaudeDiffMarker'
-  execute 'syntax match ClaudeDiffBranch  /^  ' . l:m
+  execute 'syntax match ClaudeDiffNoWorktree /^  ' . l:m
+        \ . ' (no worktree)$/ contains=ClaudeDiffMarker'
+  execute 'syntax match ClaudeDiffWorktree   /^  ' . l:m
+        \ . ' \%((no worktree)$\)\@!.*$/ contains=ClaudeDiffMarker'
+  execute 'syntax match ClaudeDiffBranch     /^    ' . l:m
         \ . ' .*$/ contains=ClaudeDiffMarker'
-  execute 'syntax match ClaudeDiffDir     /^ \{4,}' . l:m
+  execute 'syntax match ClaudeDiffDir        /^ \{6,}' . l:m
         \ . ' .*$/ contains=ClaudeDiffMarker'
   execute 'syntax match ClaudeDiffMarker  /' . l:m . '/ contained'
 
@@ -606,20 +731,31 @@ function! s:build() abort
     return [l:lines, l:nodes]
   endif
 
+  " Project > Worktree > Branch > directories, at the same indents the session
+  " panel uses (0, 2, 4, 6) so the two panels read alike.
   let l:pkey = 'p:' . s:repo_root()
   call s:add(l:lines, l:nodes,
         \ s:marker(l:pkey) . ' ' . fnamemodify(s:repo_root(), ':t'),
         \ s:node('project', l:pkey, '', fnamemodify(s:repo_root(), ':t'), ''))
   if s:is_open(l:pkey)
     for l:wt in l:tree
-      let l:bkey = 'b:' . l:wt.path
       call s:add(l:lines, l:nodes,
-            \ '  ' . s:marker(l:bkey) . ' '
-            \ . claude#sidebar#fit(s:width(), '  ', l:wt.branch),
-            \ s:node('branch', l:bkey, '  ', l:wt.branch, l:wt.path))
-      if s:is_open(l:bkey)
-        call s:emit_dir(l:wt.root, l:wt.path, '', '    ', l:lines, l:nodes)
+            \ '  ' . s:marker(l:wt.key) . ' '
+            \ . claude#sidebar#fit(s:width(), '  ', l:wt.label),
+            \ s:node(l:wt.has_worktree ? 'worktree' : 'noworktree',
+            \        l:wt.key, '  ', l:wt.label, l:wt.worktree))
+      if !s:is_open(l:wt.key)
+        continue
       endif
+      for l:br in l:wt.branches
+        call s:add(l:lines, l:nodes,
+              \ '    ' . s:marker(l:br.key) . ' '
+              \ . claude#sidebar#fit(s:width(), '    ', l:br.branch),
+              \ s:node('branch', l:br.key, '    ', l:br.branch, l:wt.worktree))
+        if s:is_open(l:br.key)
+          call s:emit_dir(l:br.root, l:br.key, '', '      ', l:lines, l:nodes)
+        endif
+      endfor
     endfor
   endif
 
@@ -676,7 +812,7 @@ function! claude#difftree#open() abort
     return
   endif
   let s:prev_winid = win_getid()
-  execute claude#sidebar#split_cmd(s:width())
+  call claude#sidebar#open_window(s:width())
 
   if s:bufnr != -1 && bufexists(s:bufnr)
     execute 'buffer ' . s:bufnr
@@ -895,6 +1031,8 @@ function! claude#difftree#_reset() abort
   let s:collapsed  = {}
   let s:nodes      = []
   let s:cache      = {}
+  let s:sources    = []
+  let s:sources_ok = 0
   let s:base_over  = ''
   let s:base_cache = ''
   let s:filter     = ''

@@ -172,9 +172,17 @@ function! claude#sidebar#stack() abort
   if !s:stack_enabled()
     return
   endif
-  let l:wins = claude#sidebar#winids()
+  let l:wins    = claude#sidebar#winids()
+  let l:changed = l:wins !=# s:stacked_ids
+
   if len(l:wins) < 2 || claude#sidebar#is_stacked(l:wins)
     let s:stacked_ids = l:wins
+    " Already in one column. Apply heights only when the set of sidebars just
+    " changed -- a sidebar opening or closing is a transition; the poll timer
+    " repeating with the same set is not, and must not undo a manual resize.
+    if l:changed && len(l:wins) > 1
+      call s:apply_heights(l:wins)
+    endif
     return
   endif
 
@@ -247,6 +255,29 @@ function! claude#sidebar#split_cmd(width) abort
   let l:anchor = get(g:, 'claude_panel_anchor', 'left')
   let l:pos    = l:anchor ==# 'right' ? 'botright' : 'topleft'
   return l:pos . ' vertical ' . a:width . 'split'
+endfunction
+
+" Create the window a sidebar should live in.
+"
+" When another sidebar is already open, split inside its column instead of
+" opening a second one beside it. Two sidebar columns merged by
+" win_splitmove() leave the survivor too wide -- measured: a 35-column session
+" panel became 62 when the diff tree opened beside it and was then folded in,
+" and stayed 62 after the diff tree closed -- because Vim gives the freed
+" width to the remaining column rather than back to the main area.
+"
+" Splitting inside the column never creates the second column, so there is
+" nothing to merge and the width cannot drift.
+function! claude#sidebar#open_window(width) abort
+  " With stacking off the sidebars are meant to stay in separate columns, so
+  " the shared-column shortcut must not apply either.
+  let l:existing = s:stack_enabled() ? claude#sidebar#winids() : []
+  if empty(l:existing)
+    execute claude#sidebar#split_cmd(a:width)
+    return
+  endif
+  call win_gotoid(l:existing[0])
+  leftabove split
 endfunction
 
 function! claude#sidebar#buf_options(filetype) abort

@@ -161,16 +161,26 @@ It works whichever opens first, and closing either one hands the column to the o
 Git Diff                      main
 
 ▾ claude-pluing
-  ▾ feature/agent-session-panel
-    ▾ autoload/claude
-      [✚|✹] panel.vim
-      [✚]   session.vim
-      [✹]   input.vim
-      [ |✭] difftree.vim
-    ▾ doc
-      [✚]   design/git-diff-tree.md
-      [✹]   claude.txt
+  ▾ ~/Workspace/vim/claude-pluing
+    ▾ feature/git-diff-tree
+      ▾ autoload/claude
+        [✚|✹] difftree.vim
+        [✚]   panel.vim
+        [✹]   input.vim
+        [ |✭] scratch.vim
+      ▾ doc
+        [✚]   design/git-diff-tree.md
+        [✹]   claude.txt
+  ▾ (no worktree)
+    ▾ feature/agent-session-panel
+      ▾ autoload/claude
+        [✚]   session.vim
+        [✚]   sidebar.vim
 ```
+
+It nests the same way the session panel does — **project, worktree, branch** — so the two halves of the sidebar read alike.
+
+The branches listed are the union of every worktree, every branch a Claude session has run on (live or closed, taken from the session registry), and the branch you are on now. That is the point: a branch Claude worked on stays visible after you move off it. Branches no longer checked out anywhere are gathered under a dimmed `(no worktree)` node and show **committed changes only** — with no working tree there is nothing to be dirty, so their second indicator slot is always blank.
 
 Each row carries a bracketed field with **two slots**. The first says what the branch did to the file relative to the base; the second what the working tree has done since:
 

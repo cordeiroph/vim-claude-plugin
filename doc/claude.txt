@@ -435,6 +435,32 @@ Reopening a closed session~
   the panel entry, its name and its id are kept, and only the (empty) history
   is lost. Sessions that do have a transcript are resumed normally.
 
+Branches listed                                       *claude-diff-branches*
+
+The diff tree nests project, then worktree, then branch — the same shape as
+the session panel — with directories and files below.
+
+The branches it lists are the union of three things:
+
+  - every worktree, from `git worktree list`;
+  - every branch a Claude session has run on, live or closed, taken from the
+    session registry. A session records its branch when it starts, so work on
+    a branch you have since moved off stays visible;
+  - the branch currently checked out, if neither of the above covered it.
+
+A branch equal to the base is skipped, since it would diff against itself, and
+a branch deleted since its session ran is dropped.
+
+Branches not checked out in any worktree are gathered under a dimmed
+`(no worktree)` node, placed last. They are diffed by name rather than against
+HEAD, so they show committed changes only: with no working tree there is
+nothing to be dirty, and their second indicator slot is always blank.
+
+The branch list costs one git call per session branch, so it is computed on
+refresh — panel open, `R`, |:ClaudeDiffRefresh| or a write — and never on a
+redraw.
+
+==============================================================================
 Status indicators                                          *claude-diff-icons*
 
 Each file row in the diff tree carries a bracketed field with two slots: the

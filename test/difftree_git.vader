@@ -35,6 +35,15 @@ Before:
   call writefile(['untracked'],    g:_repo . '/u.txt')
   execute 'cd ' . fnameescape(g:_repo)
 
+  " Every branch in the tree, flattened out of its worktree node.
+  function! Branches() abort
+    let l:out = []
+    for l:wt in claude#difftree#tree()
+      call extend(l:out, map(copy(l:wt.branches), {_, b -> b.branch}))
+    endfor
+    return l:out
+  endfunction
+
   function! ByPath() abort
     let l:out = {}
     for l:r in claude#difftree#files()
@@ -46,6 +55,7 @@ Before:
 After:
   execute 'cd ' . fnameescape(g:_cwd)
   call claude#difftree#_reset()
+  call claude#session#_reset()
   call delete(g:_repo, 'rf')
 
 " ── discovery ────────────────────────────────────────────────────────────────
@@ -110,7 +120,7 @@ Execute (a second worktree contributes its own branch node):
   call writefile(['other work'], wt . '/a.txt')
   call system('git -C ' . shellescape(wt) . ' commit -qam other')
   call claude#difftree#refresh()
-  let branches = map(claude#difftree#tree(), {_, t -> t.branch})
+  let branches = Branches()
   call system(g:_g . 'worktree remove --force ' . shellescape(wt))
   Assert index(branches, 'feature') >= 0, 'expected feature, got ' . string(branches)
   Assert index(branches, 'other')   >= 0, 'expected other, got '   . string(branches)
@@ -120,7 +130,7 @@ Execute (a worktree sitting on the base branch is skipped):
   let wt = g:_repo . '-base'
   call system(g:_g . 'worktree add -q ' . shellescape(wt) . ' main')
   call claude#difftree#refresh()
-  let branches = map(claude#difftree#tree(), {_, t -> t.branch})
+  let branches = Branches()
   call system(g:_g . 'worktree remove --force ' . shellescape(wt))
   AssertEqual -1, index(branches, 'main'),
         \ 'a worktree on the base branch diffs against itself and is skipped'
@@ -146,3 +156,113 @@ Execute (a repository with no changes vs base lists nothing):
   call claude#difftree#_reset()
   AssertEqual 'main', claude#difftree#base()
   AssertEqual [], claude#difftree#tree()
+
+" ── branches taken from the Claude session registry ──────────────────────────
+"
+" The panel answers "what has Claude changed?", so a branch a session ran on is
+" listed even when it is no longer checked out anywhere. Session records are
+" fabricated rather than spawned.
+
+Execute (a session's branch with no worktree is listed, committed only):
+  " `other` exists but is checked out nowhere.
+  call system(g:_g . 'branch other feature')
+  call claude#session#_inject({'name': 'past work', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'other'})
+  call claude#difftree#refresh()
+  Assert index(Branches(), 'other') >= 0,
+        \ 'expected the session branch, got ' . string(Branches())
+  " No working tree, so nothing can be dirty and the second slot stays blank.
+  let dirty = filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'other' && !empty(f.dirty)})
+  AssertEqual [], dirty,
+        \ 'a branch with no worktree cannot have uncommitted files'
+  let committed = filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'other' && !empty(f.committed)})
+  Assert !empty(committed), 'it should still list its committed changes'
+
+Execute (such a branch is grouped under a synthetic no-worktree node):
+  call system(g:_g . 'branch other feature')
+  call claude#session#_inject({'name': 'past work', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'other'})
+  call claude#difftree#refresh()
+  let nodes = filter(copy(claude#difftree#tree()), {_, w -> !w.has_worktree})
+  AssertEqual 1, len(nodes), 'expected one synthetic node'
+  AssertEqual '(no worktree)', nodes[0].label
+  AssertEqual ['other'], map(copy(nodes[0].branches), {_, b -> b.branch})
+
+Execute (the synthetic node is ordered last):
+  call system(g:_g . 'branch other feature')
+  call claude#session#_inject({'name': 'past work', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'other'})
+  call claude#difftree#refresh()
+  let tree = claude#difftree#tree()
+  Assert len(tree) >= 2, 'expected a real worktree and the synthetic node'
+  AssertEqual 0, tree[-1].has_worktree, 'the synthetic node comes last'
+  AssertEqual 1, tree[0].has_worktree
+
+Execute (a session on the checked-out branch does not duplicate it):
+  call claude#session#_inject({'name': 'current work', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'feature'})
+  call claude#difftree#refresh()
+  AssertEqual 1, count(Branches(), 'feature'),
+        \ 'the branch must appear once, got ' . string(Branches())
+  " And it keeps its uncommitted files, because it does have a worktree.
+  let dirty = filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'feature' && !empty(f.dirty)})
+  Assert !empty(dirty), 'the checked-out branch still shows dirty files'
+
+Execute (a session on the base branch is skipped):
+  call claude#session#_inject({'name': 'on main', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'main'})
+  call claude#difftree#refresh()
+  AssertEqual -1, index(Branches(), 'main'),
+        \ 'the base diffs against itself and is never listed'
+
+Execute (a session naming a deleted branch is dropped without erroring):
+  call claude#session#_inject({'name': 'gone', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'deleted-long-ago'})
+  call claude#difftree#refresh()
+  AssertEqual -1, index(Branches(), 'deleted-long-ago')
+  Assert index(Branches(), 'feature') >= 0, 'the rest of the tree survives'
+
+Execute (a placeholder branch from a detached session is ignored):
+  call claude#session#_inject({'name': 'detached', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': '(detached: abc1234)'})
+  call claude#difftree#refresh()
+  Assert empty(filter(copy(Branches()), {_, b -> b[0] ==# '('})),
+        \ 'placeholders are not diffable: ' . string(Branches())
+
+Execute (an empty session registry leaves the worktree list unchanged):
+  call claude#session#_reset()
+  call claude#difftree#refresh()
+  AssertEqual ['feature'], Branches()
+
+Execute (two branches sharing the repository root do not share a cache entry):
+  " Both have no worktree, so both run git from the same directory: the cache
+  " key has to include the branch or one would serve the other's files.
+  call system(g:_g . 'branch other feature')
+  call system(g:_g . 'checkout -q -b third feature')
+  call writefile(['third only'], g:_repo . '/third.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm third')
+  call system(g:_g . 'checkout -q feature')
+  for b in ['other', 'third']
+    call claude#session#_inject({'name': b, 'status': 'closed',
+          \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+          \ 'branch': b})
+  endfor
+  call claude#difftree#refresh()
+  let third = map(filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'third'}), {_, f -> f.path})
+  let other = map(filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'other'}), {_, f -> f.path})
+  Assert index(third, 'third.txt') >= 0, 'third should have its own file'
+  AssertEqual -1, index(other, 'third.txt'),
+        \ 'other must not inherit third''s files from a shared cache entry'

@@ -95,7 +95,7 @@ function! claude#panel#open() abort
   " Remember where the user was: `i` and `s` split that window, not the panel.
   let s:prev_winid = win_getid()
 
-  execute claude#sidebar#split_cmd(s:width())
+  call claude#sidebar#open_window(s:width())
 
   if s:bufnr != -1 && bufexists(s:bufnr)
     execute 'buffer ' . s:bufnr

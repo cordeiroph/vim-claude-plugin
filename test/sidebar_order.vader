@@ -260,3 +260,11 @@ Execute (stacking disabled leaves the sidebars in separate columns):
   call claude#sidebar#stack()
   let g:claude_panel_nerdtree_stack = 1
   Assert !OneColumn(), 'with stacking off they must stay separate columns'
+
+Execute (heights are applied when a sidebar joins the column):
+  call OpenSess()
+  call OpenDiff()
+  call claude#sidebar#stack()
+  AssertEqual g:claude_panel_height,
+        \ winheight(win_id2win(claude#panel#winid())),
+        \ 'a sidebar joining the column is a transition, so heights apply'
