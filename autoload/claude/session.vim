@@ -929,6 +929,8 @@ endfunction
 "   branch     branch to give the session a workspace on; '' for none
 "   workspace  id of an existing workspace to run in — what the panel's n key
 "              passes. Ignored when a branch is given, which creates one
+"   cwd        directory to run in when there is no workspace to name: a
+"              worktree the plugin did not create, so there is no id for it
 "   placement  Ex command creating the window to spawn into; '' takes over the
 "              current window. Absent means the configured Claude split
 "
@@ -980,8 +982,13 @@ function! claude#session#spawn(opts) abort
     let l:named = 1
   endif
 
-  let l:id    = claude#session#uuid()
-  let l:cwd   = empty(l:ws) ? claude#workspace#cwd() : l:ws.path
+  let l:id  = claude#session#uuid()
+  let l:cwd = get(a:opts, 'cwd', '')
+  if !empty(l:ws)
+    let l:cwd = l:ws.path
+  elseif empty(l:cwd) || !isdirectory(l:cwd)
+    let l:cwd = claude#workspace#cwd()
+  endif
   let l:group = claude#session#group_of(l:cwd)
   let l:known = s:known_transcripts(l:cwd)
 

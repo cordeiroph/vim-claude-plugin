@@ -608,8 +608,8 @@ Keys inside the panel~
   i            Open the session in a horizontal split
   s            Open the session in a vertical split
   t            Open the session in a new tab
-  n            Start a session where the row under the cursor lives, asking
-               only what to call it
+  n            Start a session where the cursor is — the workspace of the row,
+               or of the worktree it sits under — asking only what to call it
   N            Start a session, asking for a branch and then a name
                (|claude-workspaces|)
   g            Swap the top level: state <-> place

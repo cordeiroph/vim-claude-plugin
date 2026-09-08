@@ -258,6 +258,7 @@ function! s:node(kind, key, id, indent, label, status) abort
         \ 'label':  a:label,
         \ 'status': a:status,
         \ 'suffix': '',
+        \ 'path':   '',
         \ }
 endfunction
 
@@ -454,12 +455,14 @@ function! s:build_tree(lines, nodes) abort
     let l:drawn += l:count
 
     call s:add_group(a:lines, a:nodes, 'project', l:proj.key, '', l:proj.label)
+    let a:nodes[-1].path = l:proj.path
     if has_key(s:collapsed, l:proj.key) && empty(s:filter)
       continue
     endif
 
     for l:wt in l:proj.worktrees
       let l:node = s:node('worktree', l:wt.key, '', '  ', l:wt.path, '')
+      let l:node.path = l:wt.path
       call add(a:lines, '  ' . s:marker(l:wt.key) . ' '
             \ . s:fit('  ', s:home_relative(l:wt.label)))
       call add(a:nodes, l:node)
@@ -760,29 +763,52 @@ function! s:prompt_filter() abort
   call s:render()
 endfunction
 
-" The workspace a new session should run in, given where the cursor is.
-" '' means "wherever a session with no workspace would run": the selected
-" workspace, else Vim's directory.
-function! s:workspace_under_cursor() abort
-  let l:node = s:current_node()
-  if !empty(l:node)
-    if l:node.kind ==# 'session'
-      let l:id = get(claude#session#get(l:node.id), 'workspace', '')
-      if !empty(l:id)
-        return l:id
+" Where a session started with n should run, as [workspace id, directory].
+" At most one of the two is set; both empty means "wherever a session with no
+" workspace would have run anyway".
+"
+" "Where the cursor is" means the whole subtree, not just the row it is on: a
+" branch row, a worktree row and every session row under them all answer with
+" the same worktree, because that is the checkout you are looking at.
+function! s:place_under_cursor() abort
+  let l:nodes = get(b:, 'claude_panel_nodes', [])
+  let l:idx   = line('.') - 1
+  let l:dir   = ''
+
+  if l:idx >= 0 && l:idx < len(l:nodes)
+    if l:nodes[l:idx].kind ==# 'session'
+      " A session row answers for itself, in either view: it knows both the
+      " workspace it belongs to and the directory it ran in.
+      let l:rec = claude#session#get(l:nodes[l:idx].id)
+      if !empty(get(l:rec, 'workspace', ''))
+        return [l:rec.workspace, '']
       endif
-    elseif l:node.kind ==# 'worktree'
-      " The place view names a directory, not a workspace id.
-      for l:ws in claude#workspace#list()
-        if l:ws.path ==# l:node.label
-          return l:ws.id
-        endif
-      endfor
+      let l:dir = get(l:rec, 'worktree', '')
     endif
+
+    " Otherwise walk up the drawn rows to the nearest node that names a
+    " directory: the worktree the cursor is inside, or the project root when
+    " it is on the project row itself.
+    let l:i = l:idx
+    while empty(l:dir) && l:i >= 0
+      if !empty(l:nodes[l:i].path)
+        let l:dir = l:nodes[l:i].path
+      endif
+      let l:i -= 1
+    endwhile
   endif
-  " Nothing under the cursor to go on: the workspace <leader>cw selected, and
-  " otherwise wherever a session with no workspace would have run anyway.
-  return get(claude#workspace#current(), 'id', '')
+
+  if empty(l:dir) || !isdirectory(l:dir)
+    return [get(claude#workspace#current(), 'id', ''), '']
+  endif
+  " A directory the plugin knows as a workspace is passed as one, so the new
+  " session records where it belongs and not merely where it ran.
+  for l:ws in claude#workspace#list()
+    if l:ws.path ==# l:dir
+      return [l:ws.id, '']
+    endif
+  endfor
+  return ['', l:dir]
 endfunction
 
 " n — a session here. One question, not two: the row under the cursor already
@@ -790,10 +816,11 @@ endfunction
 " it blank is still an answer — the session labels itself from its first
 " message — and g:claude_session_prompt_name = 0 skips the question entirely.
 function! s:new() abort
-  let l:ws = s:workspace_under_cursor()
+  let [l:ws, l:dir] = s:place_under_cursor()
   call s:enter_main()
   let l:id = claude#session#spawn({
         \ 'workspace': l:ws,
+        \ 'cwd':       l:dir,
         \ 'ask_name':  get(g:, 'claude_session_prompt_name', 1),
         \ })
   if !empty(l:id)

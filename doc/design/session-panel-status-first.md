@@ -173,7 +173,7 @@ composes a session line.
 | `q` `?` | Hide the panel / toggle help | Unchanged |
 
 `n` moves from "ask two questions" to "do the obvious thing"; `N` inherits the
-questions. Nothing else in `s:setup_keys()` (`panel.vim:656`) moves.
+questions. Nothing else in `s:setup_keys()` (`panel.vim:659`) moves.
 
 ---
 
@@ -238,7 +238,7 @@ Replaces the table in `agent-session-panel.md` §5.1:
 | Cannot tell, and it did not | `idle` |
 
 `waiting` is a fourth value, not a replacement for one. Every existing caller
-that tests `!=# 'closed'` — `claude#session#live()` (`:1231`),
+that tests `!=# 'closed'` — `claude#session#live()` (`:1242`),
 `s:cmp_records()` (`:608`) — keeps working unmodified.
 
 ### 4.4 Glyphs
@@ -268,15 +268,28 @@ configuration precisely so that this is a settings change and not a redesign.
 ## 5. Creating a session
 
 In a state-grouped tree the cursor is no longer over a workspace, so `n` has
-lost the context `s:new()` (`panel.vim:791`) never used anyway.
+lost the context `s:new()` (`panel.vim:818`) never used anyway.
 
 ### 5.1 `n` — here, and what to call it
 
+"Where the cursor is" means the subtree it is in, not only the row it is on.
+In the place view every row under a worktree — the worktree row, the branch
+row, the sessions — answers with that worktree, because that is the checkout
+you are looking at.
+
 | Cursor is on | Session is created in |
 |--------------|-----------------------|
-| A session row | That session's workspace (`claude#workspace#for_session()`, `workspace.vim:212`) |
-| A workspace or project row (`g` view) | That workspace |
-| A state group header, the title, or a blank | `claude#workspace#current()` (`workspace.vim:431`), else the root workspace |
+| A session row | Its workspace, else the worktree it ran in |
+| A branch row | The worktree it hangs under |
+| A worktree row | That worktree |
+| A project row | The repository root — the main checkout, whatever is selected |
+| A state group header, the title, or a blank | `claude#workspace#current()` (`workspace.vim:431`), else where Vim already is |
+
+A directory the plugin knows as a workspace is passed to `spawn()` as a
+workspace id, so the new session records where it *belongs*. A worktree nobody
+registered — one made by hand with `git worktree add`, or a record from before
+workspaces existed — is passed as a plain `cwd`, so the session still runs in
+the right place without a workspace being invented for it.
 
 One question, not two. The row under the cursor has already answered *where*,
 so the only thing worth asking is what to call it — and a blank answer is still
@@ -308,14 +321,14 @@ positional arguments (`name`, `placement`) cannot express "in this workspace,
 asking only for a name". One new entry point owns the work:
 
 ```vim
-" opts: workspace (id), name, branch, placement,
+" opts: workspace (id), cwd, name, branch, placement,
 "       prompt (branch then name), ask_name (name only)
 function! claude#session#spawn(opts) abort
 ```
 
 `claude#session#new(...)` becomes a thin wrapper over it with today's exact
 behaviour and signature, so `:ClaudeNew` (`plugin/claude.vim:240`),
-`claude#session#target()` (`session.vim:1258`) and every test calling it are untouched.
+`claude#session#target()` (`session.vim:1269`) and every test calling it are untouched.
 
 ---
 
@@ -348,7 +361,7 @@ consequences worth stating:
   spawn. `claude#session#poll()` reads it once, the first time the transcript
   appears, and never again — one 60-line read per session per Vim run.
 
-`s:disambiguate()` (`panel.vim:350`) keeps working: it appends `(2)` to
+`s:disambiguate()` (`panel.vim:351`) keeps working: it appends `(2)` to
 repeated labels, and two sessions asked the same first question genuinely do
 need telling apart.
 
@@ -370,7 +383,7 @@ session in every group. Under this design an unnamed session is perfectly
 visible in `Needs you`, `Working` and `Idle` — it has a readable label now, and
 a session waiting for you is the last thing to hide. Only `Done` buries.
 
-`claude#session#live()` (`:1231`) and the pickers still see everything, as
+`claude#session#live()` (`:1242`) and the pickers still see everything, as
 `test/session_hidden.vader` already asserts.
 
 When rows are buried, the group says so on its last line:
@@ -439,10 +452,10 @@ answers with one number.
 | `I` | `claude#session#show_hidden()` (`session.vim:544`) | No, as today |
 
 The two key namespaces never collide, so switching views with `g` preserves
-both sets of folds. `claude#panel#_reset()` (`panel.vim:931`) clears all of it, and
+both sets of folds. `claude#panel#_reset()` (`panel.vim:962`) clears all of it, and
 seeds `st:done` folded.
 
-**One implementation consequence.** `s:repaint()` (`panel.vim:622`) rewrites a
+**One implementation consequence.** `s:repaint()` (`panel.vim:625`) rewrites a
 row's glyph in place when only a status changed. In the state view a status
 change *moves the row to another group*, so that fast path is invalid: in
 `state` grouping a status change must call `s:render()`. `s:repaint()` stays
@@ -483,11 +496,11 @@ Reverting the design costs nothing on disk.
 | `claude#resume()` (`claude.vim:379`) | Reads `all()`, so a session you buried is still resumable — and is now labelled by its first message rather than a timestamp |
 | `s:build_sources()` (`difftree.vim:250`) | Reads `all()`: a branch is diffable whether or not its session was buried |
 | `claude#panel#icon()` (`panel.vim:46`) | Knows `waiting` |
-| `s:build()` (`:512`) | Dispatches to one of two views |
-| `s:setup_keys()` (`:656`) | Adds `g`, `/`, `N`; `n` changes meaning |
+| `s:build()` (`:515`) | Dispatches to one of two views |
+| `s:setup_keys()` (`:659`) | Adds `g`, `/`, `N`; `n` changes meaning |
 | `s:setup_syntax()` (`:198`) | A `ClaudeSessionWaiting` glyph group, and a match for the `…` note rows |
-| `s:repaint()` (`:622`) | Refuses the in-place fast path in the state view (§9) |
-| `claude#panel#_reset()` (`:931`) | Also clears the view, the filter and the Done expansion, and re-seeds `st:done` folded |
+| `s:repaint()` (`:625`) | Refuses the in-place fast path in the state view (§9) |
+| `claude#panel#_reset()` (`:962`) | Also clears the view, the filter and the Done expansion, and re-seeds `st:done` folded |
 
 ### New
 
@@ -497,11 +510,11 @@ Reverting the design costs nothing on disk.
 | `claude#session#is_buried(rec)` (`:560`) | The §6.2 predicate |
 | `claude#session#all()` (`:579`) | The registry, sorted, with nothing hidden — for callers that are not the panel |
 | `claude#session#buried_count()` (`:599`) | How many rows the hide rule is holding back, for the note under `Done` |
-| `claude#session#spawn(opts)` (`:939`) | The single creation path (§5.3) |
+| `claude#session#spawn(opts)` (`:943`) | The single creation path (§5.3) |
 | `s:classify(tail)` (`session.vim:323`) | §4.2 |
 | `s:adopt_snippet(rec)` (`:393`) | Reads a live session's first message once its transcript appears |
 | `s:row()`, `s:age()`, `s:where()`, `s:suffix()`, `s:matches()` (`panel.vim`) | §3.3 and §7 |
-| `s:workspace_under_cursor()` (`panel.vim:766`) | The §5.1 table |
+| `s:place_under_cursor()` (`panel.vim:773`) | The §5.1 table: `[workspace, directory]` for wherever the cursor is |
 | `g:claude_panel_waiting_pat`, `g:claude_panel_working_pat` | §4.2 |
 | `g:claude_panel_stale_days` (2) | §6.2 |
 | `g:claude_panel_done_rows` (10) | §8 |
@@ -529,7 +542,7 @@ changed are listed as such.
 | `test/session_hidden.vader` | **Changed**: the `I` assertions move from "unnamed anywhere" to "buried in Done" — an unnamed *live* session is now listed, and `all()` still sees what `list()` hides. A new section covers the staleness rule, including `stale_days = 0` |
 | `test/panel_render.vader` | **Changed**: the four place-shaped tests ask for the place view first; the duplicate-label test reads rows rather than a bare line, since rows now carry a suffix |
 | `test/panel_keys.vader` | **Changed**: `I` is tested on finished sessions, and the help text now reads `I show hidden`. New: `n` asking for a name and nothing else, a blank answer leaving it unnamed, `g:claude_session_prompt_name = 0` skipping the question, `N` mapped to the prompting path, and the new session being the one you land in |
-| `test/session_workspace.vader` | **Changed**: an unnamed live session is listed and only buried once it ends; the transcript case asserts `snippet` rather than a name. New: `n` inheriting the workspace of the row under the cursor, and falling back to the selected workspace with no row to read |
+| `test/session_workspace.vader` | **Changed**: an unnamed live session is listed and only buried once it ends; the transcript case asserts `snippet` rather than a name. New: `n` inheriting the workspace of the row under the cursor — from a session row, a branch row, a worktree row and the project row alike — a session with no workspace of its own still landing in its worktree, and the fall back to the selected workspace with no row to read |
 | `test/session_registry.vader`, the rest | Unchanged, re-run as regression guards |
 
 ---

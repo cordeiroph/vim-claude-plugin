@@ -331,3 +331,100 @@ Execute (n away from any session falls back to the selected workspace):
   AssertEqual 1, len(live)
   AssertEqual ws.id, live[0].workspace,
         \ 'with no row to read, <leader>cw decides'
+
+" The session n just started: the live record that was not there before it was
+" pressed. live()[0] cannot be trusted here — two sessions focused in the same
+" second sort by name, and every session these tests start is unnamed.
+Execute (helper):
+  function! LiveIds() abort
+    let out = []
+    for rec in claude#session#live()
+      call add(out, rec.id)
+    endfor
+    return out
+  endfunction
+
+  function! Newcomer(before) abort
+    for rec in claude#session#live()
+      if index(a:before, rec.id) < 0
+        return rec
+      endif
+    endfor
+    return {}
+  endfunction
+
+Execute (n from a branch row lands in that branch's workspace):
+  " Two workspaces, so there is a wrong answer to give.
+  let g:claude_session_prompt_name = 0
+  call system(g:_git . 'branch other-branch')
+  let a = claude#workspace#create('feature-branch', '')
+  let b = claude#workspace#create('other-branch', '')
+  call claude#session#spawn({'workspace': a.id, 'placement': 'new'})
+  call claude#session#spawn({'workspace': b.id, 'placement': 'new'})
+
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  " The branch row, not the worktree row above it whose path also says it.
+  call search('^    ▾ other-branch$', 'W')
+  Assert getline('.') =~# '^    ▾ other-branch$',
+        \ 'expected the branch row: ' . getline('.')
+  let before = LiveIds()
+  normal n
+  let g:claude_session_prompt_name = 1
+
+  let new = Newcomer(before)
+  AssertEqual b.id, new.workspace,
+        \ 'a branch row means the workspace it belongs to'
+  AssertEqual b.path, new.cwd
+
+Execute (n from a worktree row lands there too):
+  let g:claude_session_prompt_name = 0
+  let ws = claude#workspace#create('feature-branch', '')
+  call claude#session#spawn({'workspace': ws.id, 'placement': 'new'})
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('repo-feature-branch', 'W')
+  let before = LiveIds()
+  normal n
+  let g:claude_session_prompt_name = 1
+  AssertEqual ws.id, Newcomer(before).workspace
+
+Execute (a session with no workspace of its own still lands in its worktree):
+  let g:claude_session_prompt_name = 0
+  let ws = claude#workspace#create('feature-branch', '')
+  " A record from before workspaces existed: it ran in the worktree but names
+  " no workspace at all.
+  call claude#session#_inject({'id': 'old', 'name': 'legacy', 'workspace': '',
+        \ 'status': 'closed', 'cwd': ws.path, 'project': g:_repo,
+        \ 'worktree': ws.path, 'branch': 'feature-branch'})
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('legacy', 'W')
+  let before = LiveIds()
+  normal n
+  let g:claude_session_prompt_name = 1
+  let new = Newcomer(before)
+  AssertEqual ws.path, new.cwd, 'the row it is drawn under is where it lives'
+  AssertEqual ws.id,   new.workspace
+
+Execute (n on the project row lands in the main checkout):
+  let g:claude_session_prompt_name = 0
+  let ws = claude#workspace#create('feature-branch', '')
+  call claude#workspace#select(ws.id)
+  call claude#session#spawn({'workspace': ws.id, 'placement': 'new'})
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('^▾ repo$', 'W')
+  let before = LiveIds()
+  normal n
+  let g:claude_session_prompt_name = 1
+  AssertEqual g:_repo, Newcomer(before).cwd,
+        \ 'the project row is the repository root, whatever is selected'
