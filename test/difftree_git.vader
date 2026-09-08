@@ -33,15 +33,23 @@ Before:
   call writefile(['two changed'],  g:_repo . '/dir1/b.txt')
   call writefile(['both again'],   g:_repo . '/both.txt')
   call writefile(['untracked'],    g:_repo . '/u.txt')
+  " Keep the per-branch base store out of the plugin's data directory.
+  let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
+  let g:claude_difftree_store = g:_repo . '.bases.json'
   execute 'cd ' . fnameescape(g:_repo)
 
-  " Every branch in the tree, flattened out of its worktree node.
+  " The tree is one row per branch, so this is just the branch names.
   function! Branches() abort
-    let l:out = []
-    for l:wt in claude#difftree#tree()
-      call extend(l:out, map(copy(l:wt.branches), {_, b -> b.branch}))
-    endfor
-    return l:out
+    return map(claude#difftree#tree(), {_, b -> b.branch})
+  endfunction
+
+  function! Labels() abort
+    return map(claude#difftree#tree(), {_, b -> b.label})
+  endfunction
+
+  function! Node(branch) abort
+    let l:m = filter(claude#difftree#tree(), {_, b -> b.branch ==# a:branch})
+    return empty(l:m) ? {} : l:m[0]
   endfunction
 
   function! ByPath() abort
@@ -54,6 +62,8 @@ Before:
 
 After:
   execute 'cd ' . fnameescape(g:_cwd)
+  let g:claude_difftree_store = g:_saved_dtstore
+  call delete(g:_repo . '.bases.json')
   call claude#difftree#_reset()
   call claude#session#_reset()
   call delete(g:_repo, 'rf')
@@ -121,9 +131,13 @@ Execute (a second worktree contributes its own branch node):
   call system('git -C ' . shellescape(wt) . ' commit -qam other')
   call claude#difftree#refresh()
   let branches = Branches()
+  let labels   = Labels()
   call system(g:_g . 'worktree remove --force ' . shellescape(wt))
   Assert index(branches, 'feature') >= 0, 'expected feature, got ' . string(branches)
   Assert index(branches, 'other')   >= 0, 'expected other, got '   . string(branches)
+  " A linked worktree is named in the branch's label.
+  Assert index(labels, 'other (' . fnamemodify(wt, ':t') . ')') >= 0,
+        \ 'expected the worktree name in the label, got ' . string(labels)
 
 Execute (a worktree sitting on the base branch is skipped):
   " The fixture's main worktree is on `feature`; put a second one on `main`.
@@ -181,27 +195,31 @@ Execute (a session's branch with no worktree is listed, committed only):
         \ {_, f -> f.branch ==# 'other' && !empty(f.committed)})
   Assert !empty(committed), 'it should still list its committed changes'
 
-Execute (such a branch is grouped under a synthetic no-worktree node):
+Execute (a worktree-less branch is a peer row, marked so the reason shows):
   call system(g:_g . 'branch other feature')
   call claude#session#_inject({'name': 'past work', 'status': 'closed',
         \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
         \ 'branch': 'other'})
   call claude#difftree#refresh()
-  let nodes = filter(copy(claude#difftree#tree()), {_, w -> !w.has_worktree})
-  AssertEqual 1, len(nodes), 'expected one synthetic node'
-  AssertEqual '(no worktree)', nodes[0].label
-  AssertEqual ['other'], map(copy(nodes[0].branches), {_, b -> b.branch})
+  AssertEqual ['feature', 'other'], sort(Branches())
+  AssertEqual 0, Node('other').has_worktree
+  AssertEqual 'other (no worktree)', Node('other').label
+  " The branch checked out in the main worktree carries no suffix at all.
+  AssertEqual 1, Node('feature').has_worktree
+  AssertEqual 'feature', Node('feature').label
 
-Execute (the synthetic node is ordered last):
+Execute (there is no worktree level in the tree at all):
   call system(g:_g . 'branch other feature')
   call claude#session#_inject({'name': 'past work', 'status': 'closed',
         \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
         \ 'branch': 'other'})
   call claude#difftree#refresh()
-  let tree = claude#difftree#tree()
-  Assert len(tree) >= 2, 'expected a real worktree and the synthetic node'
-  AssertEqual 0, tree[-1].has_worktree, 'the synthetic node comes last'
-  AssertEqual 1, tree[0].has_worktree
+  " A worktree holds exactly one branch, so it is named in the label rather
+  " than given a node of its own.
+  for node in claude#difftree#tree()
+    Assert !has_key(node, 'branches'), 'branches must be the top level now'
+  endfor
+  AssertEqual [], filter(Labels(), {_, l -> l ==# '(no worktree)'})
 
 Execute (a session on the checked-out branch does not duplicate it):
   call claude#session#_inject({'name': 'current work', 'status': 'closed',

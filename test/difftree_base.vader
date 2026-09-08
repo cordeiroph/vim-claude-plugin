@@ -15,11 +15,16 @@ Before:
   call system(g:_g . 'commit -qm base')
   let g:_saved_base = get(g:, 'claude_difftree_base', '')
   let g:claude_difftree_base = ''
+  " Keep the per-branch base store out of the plugin's data directory.
+  let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
+  let g:claude_difftree_store = g:_repo . '.bases.json'
   execute 'cd ' . fnameescape(g:_repo)
 
 After:
   execute 'cd ' . fnameescape(g:_cwd)
   let g:claude_difftree_base = g:_saved_base
+  let g:claude_difftree_store = g:_saved_dtstore
+  call delete(g:_repo . '.bases.json')
   call claude#difftree#_reset()
   call delete(g:_repo, 'rf')
 
@@ -114,3 +119,157 @@ Execute (g:gitgutter_diff_base is never read or written):
   AssertEqual 'sentinel', g:gitgutter_diff_base
   AssertEqual 'other-branch', claude#difftree#base()
   unlet g:gitgutter_diff_base
+
+" ── per-branch bases ─────────────────────────────────────────────────────────
+"
+" Each branch can diff against something of its own, persisted so the choice
+" survives a Vim restart. Resolution, most specific first:
+"
+"   the branch's own override  ->  the session default (B)
+"   ->  g:claude_difftree_base  ->  auto-detection
+
+Execute (an override applies to one branch and leaves the others alone):
+  call system(g:_g . 'branch feature-x')
+  call system(g:_g . 'branch feature-y')
+  call claude#difftree#set_branch_base('feature-x', 'feature-y')
+  AssertEqual 'feature-y', claude#difftree#base_for('feature-x')
+  AssertEqual 'main',      claude#difftree#base_for('feature-y')
+  AssertEqual 'main',      claude#difftree#base_for('main')
+
+Execute (the override survives a reload, which is what a Vim restart is):
+  call system(g:_g . 'branch feature-x')
+  call claude#difftree#set_branch_base('feature-x', 'trunk-ish')
+  " Drop every scrap of in-memory state, as quitting Vim would.
+  call claude#difftree#_reset()
+  AssertEqual 'trunk-ish', claude#difftree#base_for('feature-x'),
+        \ 'the override must be read back from disk, not from memory'
+
+Execute (it is written to the store file, not the session store):
+  call claude#difftree#set_branch_base('feature-x', 'feature-y')
+  let raw = json_decode(join(readfile(g:claude_difftree_store), "\n"))
+  AssertEqual 1, raw.version
+  AssertEqual 'feature-y', raw.bases[resolve(g:_repo)]['feature-x']
+
+Execute (an empty base clears the override):
+  call claude#difftree#set_branch_base('feature-x', 'feature-y')
+  AssertEqual 'feature-y', claude#difftree#base_for('feature-x')
+  call claude#difftree#set_branch_base('feature-x', '')
+  AssertEqual 'main', claude#difftree#base_for('feature-x')
+  AssertEqual 0, claude#difftree#has_override('feature-x')
+  call claude#difftree#_reset()
+  AssertEqual 'main', claude#difftree#base_for('feature-x'),
+        \ 'clearing must persist too'
+
+" ── the session default ──────────────────────────────────────────────────────
+
+Execute (B sets a default for branches with no override of their own):
+  call claude#difftree#set_base('session-default')
+  AssertEqual 'session-default', claude#difftree#base_for('anything')
+  AssertEqual 'session-default', claude#difftree#base()
+
+Execute (a per-branch override always beats the session default):
+  call claude#difftree#set_branch_base('feature-x', 'mine')
+  call claude#difftree#set_base('session-default')
+  AssertEqual 'mine',            claude#difftree#base_for('feature-x')
+  AssertEqual 'session-default', claude#difftree#base_for('other')
+
+Execute (a cleared branch falls back to the session default):
+  call claude#difftree#set_branch_base('feature-x', 'mine')
+  call claude#difftree#set_base('session-default')
+  call claude#difftree#set_branch_base('feature-x', '')
+  AssertEqual 'session-default', claude#difftree#base_for('feature-x')
+
+Execute (the session default is not persisted):
+  call claude#difftree#set_base('session-default')
+  call claude#difftree#_reset()
+  AssertEqual 'main', claude#difftree#base(),
+        \ 'B lasts for the session only'
+
+Execute (full precedence: branch, then session, then global, then detection):
+  AssertEqual 'main', claude#difftree#base_for('feature-x')
+  let g:claude_difftree_base = 'from-global'
+  AssertEqual 'from-global', claude#difftree#base_for('feature-x')
+  call claude#difftree#set_base('from-session')
+  AssertEqual 'from-session', claude#difftree#base_for('feature-x')
+  call claude#difftree#set_branch_base('feature-x', 'from-branch')
+  AssertEqual 'from-branch', claude#difftree#base_for('feature-x')
+  let g:claude_difftree_base = ''
+
+" ── scoping ──────────────────────────────────────────────────────────────────
+
+Execute (the same branch name in two repositories keeps separate bases):
+  call claude#difftree#set_branch_base('main', 'here')
+  let other = tempname()
+  call mkdir(other, 'p')
+  let og = 'git -C ' . shellescape(other) . ' '
+  call system(og . 'init -q -b main')
+  call system(og . 'config user.email t@t')
+  call system(og . 'config user.name test')
+  call writefile(['x'], other . '/f.txt')
+  call system(og . 'add -A')
+  call system(og . 'commit -qm base')
+  execute 'cd ' . fnameescape(other)
+  call claude#difftree#_reset()
+  AssertEqual 'main', claude#difftree#base_for('main'),
+        \ 'the other repository must not inherit this one''s override'
+  execute 'cd ' . fnameescape(g:_repo)
+  call claude#difftree#_reset()
+  AssertEqual 'here', claude#difftree#base_for('main')
+  call delete(other, 'rf')
+
+" ── the store degrades like the session store ────────────────────────────────
+
+Execute (a missing store just means no overrides):
+  call delete(g:claude_difftree_store)
+  call claude#difftree#_reset()
+  AssertEqual 'main', claude#difftree#base_for('feature-x')
+
+Execute (a corrupt store is backed up and ignored):
+  call writefile(['{not json'], g:claude_difftree_store)
+  call claude#difftree#_reset()
+  silent let b = claude#difftree#base_for('feature-x')
+  AssertEqual 'main', b
+  Assert filereadable(g:claude_difftree_store . '.bak'),
+        \ 'the unreadable file should be preserved'
+  call delete(g:claude_difftree_store . '.bak')
+
+Execute (an unwritable store degrades instead of erroring):
+  let saved = g:claude_difftree_store
+  let g:claude_difftree_store = '/proc/nope/difftree.json'
+  call claude#store#_reset()
+  silent call claude#difftree#set_branch_base('feature-x', 'wherever')
+  AssertEqual 'main', claude#difftree#base_for('feature-x')
+  let g:claude_difftree_store = saved
+  call claude#store#_reset()
+
+" ── the file cache must follow the per-branch base ───────────────────────────
+
+Execute (two branches with different bases do not share a cache entry):
+  " `side` adds a file on top of feature; diffing it against feature shows
+  " only that file, while against main it shows feature's changes too.
+  call system(g:_g . 'checkout -q -b feature')
+  call writefile(['f'], g:_repo . '/feature.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm feature')
+  call system(g:_g . 'checkout -q -b side')
+  call writefile(['s'], g:_repo . '/side.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm side')
+  call system(g:_g . 'checkout -q main')
+  call claude#session#_inject({'name': 'a', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'feature'})
+  call claude#session#_inject({'name': 'b', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'side'})
+  call claude#difftree#set_branch_base('side', 'feature')
+  call claude#difftree#refresh()
+  let sidefiles = sort(map(filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'side'}), {_, f -> f.path}))
+  let featfiles = sort(map(filter(copy(claude#difftree#files()),
+        \ {_, f -> f.branch ==# 'feature'}), {_, f -> f.path}))
+  call claude#session#_reset()
+  AssertEqual ['side.txt'], sidefiles,
+        \ 'side vs feature should show only its own file'
+  AssertEqual ['feature.txt'], featfiles,
+        \ 'feature vs main should show only its own file'

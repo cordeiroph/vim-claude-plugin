@@ -22,6 +22,9 @@ Before:
   call system(g:_g . 'commit -qm work')
   call writefile(['dirty'], g:_repo . '/src/main.go')
   call writefile(['new'],   g:_repo . '/untracked.txt')
+  " Keep the per-branch base store out of the plugin's data directory.
+  let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
+  let g:claude_difftree_store = g:_repo . '.bases.json'
   execute 'cd ' . fnameescape(g:_repo)
   let g:_saved_collapse = get(g:, 'claude_difftree_collapse_dirs', 1)
 
@@ -52,6 +55,8 @@ After:
   execute 'cd ' . fnameescape(g:_cwd)
   let g:claude_difftree_collapse_dirs = g:_saved_collapse
   call UnstubPlugin()
+  let g:claude_difftree_store = g:_saved_dtstore
+  call delete(g:_repo . '.bases.json')
   call claude#difftree#_reset()
   call delete(g:_repo, 'rf')
   call delete(g:_stubdir, 'rf')
@@ -64,29 +69,31 @@ Execute (the header carries the base branch):
   Assert claude#difftree#_lines()[0] =~# '^Git Diff',  'expected a header'
   Assert claude#difftree#_lines()[0] =~# 'main$',      'expected the base branch'
 
-Execute (files nest under project, worktree, branch and directory nodes):
-  " The tree mirrors the session panel: project 0, worktree 2, branch 4,
-  " directories 6 and deeper.
+Execute (files nest under project, branch and directory nodes):
+  " A worktree holds one branch, so there is no worktree level: project 0,
+  " branch 2, directories 4 and deeper.
   call claude#difftree#open()
   let t = Text()
   Assert t =~# '\n▾ ' . fnamemodify(g:_repo, ':t'), 'project node missing: ' . t
-  Assert t =~# '\n  ▾ ',                           'worktree node missing: ' . t
-  Assert t =~# '\n    ▾ feature',                  'branch node missing: '  . t
-  Assert t =~# '\n      ▾ src',                    'directory node missing: ' . t
-  Assert t =~# 'handler\.go',                      'nested file missing'
-  Assert t =~# 'untracked\.txt',                   'root-level file missing'
+  Assert t =~# '\n  ▾ feature',                     'branch node missing: '  . t
+  Assert t =~# '\n    ▾ src',                       'directory node missing: ' . t
+  Assert t =~# 'handler\.go',                       'nested file missing'
+  Assert t =~# 'untracked\.txt',                    'root-level file missing'
 
-Execute (the worktree node sits between project and branch):
+Execute (branch rows sit directly under the project):
   call claude#difftree#open()
   let nodes = filter(copy(claude#difftree#_nodes()),
-        \ {_, n -> n.kind ==# 'worktree'})
-  Assert !empty(nodes), 'expected a worktree node'
+        \ {_, n -> n.kind ==# 'branch'})
+  Assert !empty(nodes), 'expected a branch node'
   AssertEqual '  ', nodes[0].indent
+  Assert empty(filter(copy(claude#difftree#_nodes()),
+        \ {_, n -> n.kind ==# 'worktree'})),
+        \ 'there is no worktree level any more'
 
 Execute (a directory is indented under its parent):
   call claude#difftree#open()
   let t = Text()
-  Assert t =~# '      ▾ src\n        ▾ api\n',
+  Assert t =~# '    ▾ src\n      ▾ api\n',
         \ 'expected api nested under src: ' . t
 
 " ── directory collapsing ─────────────────────────────────────────────────────
@@ -209,23 +216,43 @@ Execute (tree elements are highlighted):
 
 Execute (colours fall back to the groups NERDTree uses):
   call claude#difftree#open()
-  Assert execute('highlight ClaudeDiffDir')       =~# 'links to Directory'
+  " Worktree, branch and directory must each be a different colour, and the
+  " first two must not follow NERDTreeDir or they would collapse back into the
+  " folder colour as soon as NERDTree's syntax file is sourced.
+  Assert execute('highlight ClaudeDiffDir')    =~# 'links to Directory'
+  Assert execute('highlight ClaudeDiffBranch') =~# 'links to Type'
+  Assert execute('highlight ClaudeDiffLocal')  =~# 'links to Comment'
   Assert execute('highlight ClaudeDiffCommitted') =~# 'links to Normal'
   Assert execute('highlight ClaudeDiffHeader')    =~# 'links to Statement'
 
-Execute (the no-worktree node is dimmed so the reason is obvious):
+Execute (a branch with no upstream is greyed):
+  " Whether a branch has a remote-tracking branch is not visible in the row's
+  " text, so it is coloured with a text property rather than by :syntax.
   call claude#difftree#open()
-  Assert execute('highlight ClaudeDiffNoWorktree') =~# 'links to Comment'
-  Assert execute('highlight ClaudeDiffWorktree')   =~# 'links to Directory'
+  Assert execute('highlight ClaudeDiffLocal') =~# 'links to Comment'
+  if has('textprop')
+    call win_gotoid(bufwinid(claude#difftree#bufnr()))
+    let marked = []
+    for l in range(1, line('$'))
+      if !empty(prop_list(l))
+        call add(marked, getline(l))
+      endif
+    endfor
+    " The fixture has no remote at all, so every branch row is local-only.
+    Assert !empty(marked), 'expected a greyed branch row'
+    for row in marked
+      Assert row =~# '^  ', 'only branch rows are greyed, got [' . row . ']'
+    endfor
+  endif
 
 Execute (status colours fall back to nerdtree-git-plugin's own sources):
+  " Added and removed are excluded: they take an explicit green and red from
+  " DiffAdd/DiffDelete rather than linking to a group.
   call claude#difftree#open()
   Assert execute('highlight ClaudeDiffModified')  =~# 'links to Special'
-  Assert execute('highlight ClaudeDiffStaged')    =~# 'links to Function'
   Assert execute('highlight ClaudeDiffUntracked') =~# 'links to Comment'
   Assert execute('highlight ClaudeDiffRenamed')   =~# 'links to Title'
   Assert execute('highlight ClaudeDiffUnmerged')  =~# 'links to Label'
-  Assert execute('highlight ClaudeDiffDeleted')   =~# 'links to Operator'
 
 Execute (nerdtree-git-plugin's own groups win when they exist):
   call claude#difftree#open()
@@ -341,3 +368,118 @@ Execute (with no resolvable base the panel explains how to set one):
   Assert Text() =~# 'not a git repository\|no base branch', Text()
   execute 'cd ' . fnameescape(g:_repo)
   call delete(plain, 'rf')
+
+Execute (worktree, branch and directory are three different colours):
+  " The whole point: a folder, the worktree it lives in and the branch it is on
+  " must never render in the same colour.
+  call claude#difftree#open()
+  let seen = {}
+  for g in ['ClaudeDiffBranch', 'ClaudeDiffDir', 'ClaudeDiffLocal']
+    let seen[synIDattr(synIDtrans(hlID(g)), 'name')] = 1
+  endfor
+  AssertEqual 3, len(keys(seen)),
+        \ 'each level must resolve to its own group, got ' . string(keys(seen))
+
+Execute (they stay distinct once NERDTree's groups exist):
+  call claude#difftree#open()
+  highlight default link NERDTreeDir Directory
+  call claude#difftree#_relink()
+  let seen = {}
+  for g in ['ClaudeDiffBranch', 'ClaudeDiffDir', 'ClaudeDiffLocal']
+    let seen[synIDattr(synIDtrans(hlID(g)), 'name')] = 1
+  endfor
+  highlight link NERDTreeDir NONE
+  AssertEqual 3, len(keys(seen)),
+        \ 'loading NERDTree must not collapse them into one colour'
+
+" ── the bracketed base ───────────────────────────────────────────────────────
+
+Execute (a branch on the default base carries no prefix):
+  call claude#difftree#open()
+  Assert Text() =~# '▾ feature\n', 'expected a bare branch row: ' . Text()
+  Assert Text() !~# '\[main\]', 'the default base is not worth repeating'
+
+Execute (an overridden branch is prefixed with its base):
+  call system(g:_g . 'branch other main')
+  call claude#difftree#set_branch_base('feature', 'other')
+  call claude#difftree#open()
+  Assert Text() =~# '▾ \[other\] feature',
+        \ 'expected the base in brackets before the name: ' . Text()
+
+Execute (the prefix disappears again when the override is cleared):
+  call system(g:_g . 'branch other main')
+  " Open first: set_branch_base() re-renders, but only when the panel is up.
+  call claude#difftree#open()
+  call claude#difftree#set_branch_base('feature', 'other')
+  Assert Text() =~# '\[other\]', 'precondition: the prefix is there: ' . Text()
+  call claude#difftree#set_branch_base('feature', '')
+  Assert Text() !~# '\[other\]', 'the prefix should be gone: ' . Text()
+
+Execute (an override equal to the default shows no prefix):
+  " Setting a branch to exactly what it already used is not an exception.
+  call claude#difftree#set_branch_base('feature', 'main')
+  call claude#difftree#open()
+  AssertEqual 0, claude#difftree#has_override('feature')
+  Assert Text() !~# '\[main\]', Text()
+
+Execute (the prefix keeps the worktree suffix intact):
+  call system(g:_g . 'branch other main')
+  call claude#difftree#set_branch_base('feature', 'other')
+  call claude#difftree#open()
+  let rows = filter(copy(claude#difftree#_nodes()),
+        \ {_, n -> n.kind ==# 'branch'})
+  Assert !empty(rows)
+  AssertEqual '[other] feature', rows[0].label
+
+Execute (the prefix is highlighted as metadata, not as the branch name):
+  call system(g:_g . 'branch other main')
+  call claude#difftree#set_branch_base('feature', 'other')
+  call claude#difftree#open()
+  Assert execute('highlight ClaudeDiffBaseTag') =~# 'links to Identifier'
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  let found = 0
+  for l in range(1, line('$'))
+    let c = match(getline(l), '\[other\]')
+    if c >= 0
+      let found = 1
+      AssertEqual 'ClaudeDiffBaseTag', synIDattr(synID(l, c + 2, 1), 'name')
+    endif
+  endfor
+  Assert found, 'expected a prefixed row to check'
+
+" ── added is green, removed is red ───────────────────────────────────────────
+
+Execute (the add and remove glyphs take their colour from DiffAdd/DiffDelete):
+  " A headless Vim has no gui colours, so these assert on cterm.
+  highlight clear ClaudeDiffStaged
+  highlight clear ClaudeDiffDeleted
+  highlight DiffAdd    ctermfg=10 ctermbg=0
+  highlight DiffDelete ctermfg=9  ctermbg=0
+  call claude#difftree#_relink()
+  AssertEqual '10', synIDattr(synIDtrans(hlID('ClaudeDiffStaged')), 'fg', 'cterm')
+  AssertEqual '9',  synIDattr(synIDtrans(hlID('ClaudeDiffDeleted')), 'fg', 'cterm')
+
+Execute (only the foreground is taken, never the background):
+  " DiffAdd and DiffDelete usually carry a background; inheriting it would
+  " paint a block behind the glyph.
+  highlight clear ClaudeDiffStaged
+  highlight clear ClaudeDiffDeleted
+  highlight DiffAdd    ctermfg=10 ctermbg=0
+  highlight DiffDelete ctermfg=9  ctermbg=0
+  call claude#difftree#_relink()
+  AssertEqual '', synIDattr(synIDtrans(hlID('ClaudeDiffStaged')), 'bg', 'cterm')
+  AssertEqual '', synIDattr(synIDtrans(hlID('ClaudeDiffDeleted')), 'bg', 'cterm')
+
+Execute (added and removed are different colours from each other and modified):
+  highlight clear ClaudeDiffStaged
+  highlight clear ClaudeDiffDeleted
+  highlight DiffAdd    ctermfg=10
+  highlight DiffDelete ctermfg=9
+  call claude#difftree#_relink()
+  call claude#difftree#open()
+  let seen = {}
+  for g in ['ClaudeDiffStaged', 'ClaudeDiffDeleted', 'ClaudeDiffModified']
+    let seen[synIDattr(synIDtrans(hlID(g)), 'fg', 'cterm')] = 1
+  endfor
+  AssertEqual 3, len(keys(seen)),
+        \ 'add, remove and modify must be told apart, got ' . string(keys(seen))

@@ -155,32 +155,56 @@ Execute (folding a project hides its children and persists across redraws):
 " sidebar read as one thing. NERDTree's own highlight groups are preferred
 " when they exist, so restyling NERDTree restyles the panel too.
 
-Execute (without NERDTree the panel falls back to the groups NERDTree uses):
-  Assert !hlexists('NERDTreeDir'), 'precondition: NERDTree syntax not loaded'
+Execute (the panel falls back to the groups NERDTree uses):
+  " No precondition on NERDTreeDir existing: highlight groups are global and
+  " leak between suites, and these three no longer depend on it anyway --
+  " worktree and branch have their own colours, and the name follows
+  " NERDTreeFile, which nothing has defined at this point.
   call claude#panel#open()
-  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Directory'
+  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Identifier'
   Assert execute('highlight ClaudeSessionName')     =~# 'links to Normal'
   Assert execute('highlight ClaudeSessionHeader')   =~# 'links to Statement'
 
 Execute (NERDTree's own groups are picked up once they exist):
+  " Session names follow NERDTreeFile; worktree and branch deliberately do not
+  " follow any NERDTree group, so this is exercised through the name.
   call claude#panel#open()
-  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Directory'
+  Assert execute('highlight ClaudeSessionName') =~# 'links to Normal'
   " Stand in for NERDTree's syntax file being sourced.
+  highlight default link NERDTreeFile Normal
+  call claude#panel#_relink()
+  Assert execute('highlight ClaudeSessionName') =~# 'links to NERDTreeFile',
+        \ 'the fallback should be upgraded to NERDTree''s group'
+  highlight link NERDTreeFile NONE
+
+Execute (worktree and branch keep their own colours when NERDTree loads):
+  " They must not follow NERDTreeDir: three levels pointing at one group would
+  " collapse into a single colour the moment NERDTree's syntax file was read.
+  call claude#panel#open()
   highlight default link NERDTreeDir Directory
   call claude#panel#_relink()
-  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to NERDTreeDir',
-        \ 'the fallback should be upgraded to NERDTree''s group'
+  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Identifier'
+  Assert execute('highlight ClaudeSessionBranch')   =~# 'links to Type'
   highlight link NERDTreeDir NONE
+
+Execute (worktree, branch and the session name are three different colours):
+  call claude#panel#open()
+  let seen = {}
+  for g in ['ClaudeSessionWorktree', 'ClaudeSessionBranch', 'ClaudeSessionName']
+    let seen[synIDattr(synIDtrans(hlID(g)), 'name')] = 1
+  endfor
+  AssertEqual 3, len(keys(seen)),
+        \ 'each level must resolve to its own group, got ' . string(keys(seen))
 
 Execute (a colour the user chose is never overwritten):
   call claude#panel#open()
-  highlight! link ClaudeSessionWorktree ErrorMsg
-  highlight default link NERDTreeDir Directory
+  highlight! link ClaudeSessionName ErrorMsg
+  highlight default link NERDTreeFile Normal
   call claude#panel#_relink()
-  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to ErrorMsg',
+  Assert execute('highlight ClaudeSessionName') =~# 'links to ErrorMsg',
         \ 'a user override must survive the NERDTree upgrade'
-  highlight link ClaudeSessionWorktree NONE
-  highlight link NERDTreeDir NONE
+  highlight link ClaudeSessionName NONE
+  highlight link NERDTreeFile NONE
 
 Execute (every panel element is highlighted):
   call claude#session#_inject({'name': 'live', 'status': 'active',

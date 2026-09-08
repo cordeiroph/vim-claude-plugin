@@ -152,8 +152,8 @@ endfunction
 let s:highlights = [
       \ ['ClaudeSessionHeader',     'NERDTreeCWD',      'Statement'],
       \ ['ClaudeSessionProject',    'NERDTreeCWD',      'Statement'],
-      \ ['ClaudeSessionWorktree',   'NERDTreeDir',      'Directory'],
-      \ ['ClaudeSessionBranch',     'NERDTreeDir',      'Directory'],
+      \ ['ClaudeSessionWorktree',   '',                 'Identifier'],
+      \ ['ClaudeSessionBranch',     '',                 'Type'],
       \ ['ClaudeSessionMarker',     'NERDTreeClosable', 'Directory'],
       \ ['ClaudeSessionName',       'NERDTreeFile',     'Normal'],
       \ ['ClaudeSessionActive',     'NERDTreeFlags',    'Number'],

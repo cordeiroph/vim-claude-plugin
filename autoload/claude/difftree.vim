@@ -19,8 +19,10 @@ let s:nodes      = []    " parallel to the rendered lines
 let s:cache      = {}    " '<worktree>|<branch>|<base>' -> list of records
 let s:sources    = []    " branches to list, see s:sources()
 let s:sources_ok = 0
-let s:base_over  = ''    " set by :ClaudeDiffBase
-let s:base_cache = ''
+let s:base_over  = ''    " session-wide default, set with B
+let s:base_cache = ''    " the auto-detected default, resolved once
+let s:bases      = {}    " branch -> base, loaded from the store on refresh
+let s:bases_ok   = 0
 let s:filter     = ''
 let s:show_help  = 0
 
@@ -53,10 +55,9 @@ function! claude#difftree#is_repo() abort
   return !empty(s:repo_root())
 endfunction
 
-" Base branch, resolved once per Vim session unless overridden.
+" The default base: what a branch uses when it has no override of its own.
 "
-" An explicit :ClaudeDiffBase wins over the configured default: the command is
-" a deliberate act, the global is only a starting point.
+"   B (session-wide)  ->  g:claude_difftree_base  ->  auto-detection
 function! claude#difftree#base() abort
   if !empty(s:base_over)
     return s:base_over
@@ -71,6 +72,8 @@ function! claude#difftree#base() abort
   return s:base_cache
 endfunction
 
+" The auto-detected default: what the remote calls its trunk, else main, else
+" master, else nothing.
 function! s:detect_base() abort
   let l:root = s:repo_root()
   if empty(l:root)
@@ -88,9 +91,75 @@ function! s:detect_base() abort
   return ''
 endfunction
 
+" The base for one branch: its own override, or the default above.
+function! claude#difftree#base_for(branch) abort
+  return get(s:branch_bases(), a:branch, claude#difftree#base())
+endfunction
+
+" True when {branch} diffs against something other than the default, which is
+" what the panel shows in brackets.
+function! claude#difftree#has_override(branch) abort
+  let l:own = get(s:branch_bases(), a:branch, '')
+  return !empty(l:own) && l:own !=# claude#difftree#base()
+endfunction
+
+" ── the per-branch store ─────────────────────────────────────────────────────
+"
+" Overrides live in their own JSON file beside the session store, keyed by
+" repository root and then by branch, so the same branch name in two
+" repositories keeps separate bases. Read once per refresh, never on a redraw.
+
+function! s:load_bases() abort
+  let l:data = claude#store#load_at(claude#store#difftree_path(),
+        \ 'bases', 'diff base store')
+  return get(l:data.bases, s:repo_root(), {})
+endfunction
+
+function! s:branch_bases() abort
+  if !s:bases_ok
+    let s:bases    = s:load_bases()
+    let s:bases_ok = 1
+  endif
+  return s:bases
+endfunction
+
+" Set {branch}'s base, or clear it when {base} is empty.
+function! claude#difftree#set_branch_base(branch, base) abort
+  let l:path = claude#store#difftree_path()
+  let l:data = claude#store#load_at(l:path, 'bases', 'diff base store')
+  let l:root = s:repo_root()
+  if !has_key(l:data.bases, l:root)
+    let l:data.bases[l:root] = {}
+  endif
+  if empty(a:base)
+    if has_key(l:data.bases[l:root], a:branch)
+      call remove(l:data.bases[l:root], a:branch)
+    endif
+  else
+    let l:data.bases[l:root][a:branch] = a:base
+  endif
+  call claude#store#save_at(l:path, l:data, 'diff base store')
+  let s:bases_ok = 0
+  call claude#difftree#refresh()
+endfunction
+
+" Set the session-wide default, used by branches with no override.
 function! claude#difftree#set_base(branch) abort
   let s:base_over = a:branch
   call claude#difftree#refresh()
+endfunction
+
+" :ClaudeDiffBase [base] — sets the base for the branch under the cursor.
+" With no argument it clears that branch's override.
+function! claude#difftree#base_command(args) abort
+  let l:branch = s:cursor_branch()
+  if empty(l:branch)
+    echohl WarningMsg
+    echomsg 'claude.vim: put the cursor on a branch row first'
+    echohl None
+    return
+  endif
+  call claude#difftree#set_branch_base(l:branch, trim(a:args))
 endfunction
 
 " Completion for :ClaudeDiffBase.
@@ -170,6 +239,13 @@ function! s:branch_listed(list, branch) abort
   return v:false
 endfunction
 
+" Whether {branch} has a remote-tracking branch. A branch without one exists
+" only on this machine, which the panel greys out.
+function! s:has_upstream(branch) abort
+  return !empty(s:git(s:repo_root(), 'rev-parse --abbrev-ref '
+        \ . shellescape(a:branch . '@{upstream}')))
+endfunction
+
 function! s:build_sources() abort
   let l:root = s:repo_root()
   if empty(l:root)
@@ -177,11 +253,16 @@ function! s:build_sources() abort
   endif
   let l:out = []
 
+  " git lists the main worktree first — the checkout that owns .git/ as a real
+  " directory — so the first entry is the root workspace.
+  let l:first = 1
   for l:wt in s:worktrees()
     if !s:branch_listed(l:out, l:wt.branch)
       call add(l:out, {'project': l:root, 'worktree': l:wt.path,
-            \ 'branch': l:wt.branch, 'has_worktree': 1})
+            \ 'branch': l:wt.branch, 'has_worktree': 1, 'is_root': l:first,
+            \ 'has_upstream': s:has_upstream(l:wt.branch)})
     endif
+    let l:first = 0
   endfor
 
   " Sessions are only on the registry once refresh() has scanned the
@@ -203,22 +284,49 @@ function! s:build_sources() abort
       continue
     endif
     call add(l:out, {'project': l:root, 'worktree': '',
-          \ 'branch': l:branch, 'has_worktree': 0})
+          \ 'branch': l:branch, 'has_worktree': 0, 'is_root': 0,
+          \ 'has_upstream': s:has_upstream(l:branch)})
   endfor
 
   let l:cur = s:git(getcwd(), 'rev-parse --abbrev-ref HEAD')
   if !empty(l:cur) && l:cur[0] !=# 'HEAD'
         \ && !s:branch_listed(l:out, l:cur[0])
     call add(l:out, {'project': l:root, 'worktree': getcwd(),
-          \ 'branch': l:cur[0], 'has_worktree': 1})
+          \ 'branch': l:cur[0], 'has_worktree': 1, 'is_root': 0,
+          \ 'has_upstream': s:has_upstream(l:cur[0])})
   endif
 
   return l:out
 endfunction
 
 " Every changed file in {wt}, cached per (worktree, base).
+" A branch equal to the base has no committed changes to show against it, but
+" a worktree on that branch is still the only place uncommitted work can live.
+" So only a base-branch source with no worktree is skipped: the checkout you
+" are editing in must never disappear from the panel.
+function! s:skip(src) abort
+  return a:src.branch ==# claude#difftree#base_for(a:src.branch)
+        \ && !a:src.has_worktree
+endfunction
+
+" What the committed half of the diff is taken against.
+"
+" Normally the base branch. When the source *is* the base branch, comparing it
+" with itself yields nothing, so the upstream is used instead and unpushed
+" commits show as committed changes. With no upstream there is nothing
+" committed to show and the committed half is skipped entirely.
+function! s:compare_against(src) abort
+  let l:base = claude#difftree#base_for(a:src.branch)
+  if a:src.branch !=# l:base
+    return l:base
+  endif
+  let l:up = s:git(s:repo_root(), 'rev-parse --abbrev-ref '
+        \ . shellescape(a:src.branch . '@{upstream}'))
+  return empty(l:up) ? '' : l:up[0]
+endfunction
+
 function! s:files_for(src) abort
-  let l:base = claude#difftree#base()
+  let l:base = claude#difftree#base_for(a:src.branch)
   " The branch belongs in the key: several branches with no worktree all run
   " git from the repository root and would otherwise collide.
   let l:key = a:src.worktree . '|' . a:src.branch . '|' . l:base
@@ -231,12 +339,13 @@ function! s:files_for(src) abort
   " committed changes.
   let l:dir = a:src.has_worktree ? a:src.worktree : s:repo_root()
   let l:rev = a:src.has_worktree ? 'HEAD' : a:src.branch
+  let l:against = s:compare_against(a:src)
 
   let l:files = {}
 
-  if !empty(l:base)
+  if !empty(l:against)
     for l:line in s:git(l:dir, 'diff --name-status '
-          \ . shellescape(l:base) . '...' . shellescape(l:rev))
+          \ . shellescape(l:against) . '...' . shellescape(l:rev))
       let [l:st, l:path] = s:parse_status(l:line)
       if empty(l:path)
         continue
@@ -411,17 +520,16 @@ function! s:invalidate() abort
   let s:cache      = {}
   let s:sources    = []
   let s:sources_ok = 0
+  let s:bases_ok   = 0
 endfunction
 
 " ── model ────────────────────────────────────────────────────────────────────
 
 " Flat list of every changed file across every listed worktree.
 function! claude#difftree#files() abort
-  let l:base = claude#difftree#base()
-  let l:out  = []
+  let l:out = []
   for l:src in s:sources()
-    " A branch compared against itself is always empty.
-    if l:src.branch ==# l:base
+    if s:skip(l:src)
       continue
     endif
     call extend(l:out, s:files_for(l:src))
@@ -485,18 +593,19 @@ function! s:collapse(node) abort
   endwhile
 endfunction
 
-" The tree, shaped like the session panel's: worktrees, each holding the
-" branches seen on it, each holding a directory tree of changed files.
+" The tree: one row per branch, directly under the project.
 "
-" Branches with no worktree cannot hang off one, so they are collected under a
-" single synthetic node placed last.
+" A worktree holds exactly one branch, so a separate worktree level would only
+" ever have a single child. The worktree is named in the branch's label
+" instead — `feature/delta (beta)` — and left off entirely for the repository's
+" main worktree, which is the implicit home. A branch with no checkout at all
+" is marked `(no worktree)`.
 function! claude#difftree#tree() abort
-  let l:base = claude#difftree#base()
-  let l:out  = []
-  let l:idx  = {}
+  let l:rootkey = s:root_key()
+  let l:out     = []
 
   for l:src in s:sources()
-    if l:src.branch ==# l:base
+    if s:skip(l:src)
       continue
     endif
     let l:files = s:files_for(l:src)
@@ -507,34 +616,63 @@ function! claude#difftree#tree() abort
     if empty(l:root.dirs) && empty(l:root.files)
       continue           " everything filtered out
     endif
-
-    let l:wkey = l:src.has_worktree ? l:src.worktree : '(no worktree)'
-    if !has_key(l:idx, l:wkey)
-      let l:idx[l:wkey] = len(l:out)
-      call add(l:out, {
-            \ 'worktree':     l:src.worktree,
-            \ 'has_worktree': l:src.has_worktree,
-            \ 'label':        l:src.has_worktree
-            \                 ? claude#sidebar#home_relative(l:src.worktree)
-            \                 : '(no worktree)',
-            \ 'key':          'w:' . l:wkey,
-            \ 'branches':     [],
-            \ })
-    endif
-    call add(l:out[l:idx[l:wkey]].branches, {
-          \ 'branch': l:src.branch,
-          \ 'key':    'b:' . l:wkey . '|' . l:src.branch,
-          \ 'root':   l:root,
+    call add(l:out, {
+          \ 'branch':       l:src.branch,
+          \ 'label':        s:branch_label(l:src, l:rootkey),
+          \ 'worktree':     l:src.has_worktree ? l:src.worktree : l:rootkey,
+          \ 'has_worktree': l:src.has_worktree,
+          \ 'has_upstream': get(l:src, 'has_upstream', 0),
+          \ 'key':          'b:' . l:src.branch,
+          \ 'root':         l:root,
           \ })
   endfor
 
-  " Real worktrees first, the synthetic node last.
-  call sort(l:out, {a, b -> b.has_worktree - a.has_worktree})
+  " The branch checked out in the main worktree first, then the rest.
+  call sort(l:out, {a, b -> s:branch_rank(a, l:rootkey)
+        \                 - s:branch_rank(b, l:rootkey)})
   return l:out
+endfunction
+
+function! s:branch_rank(node, rootkey) abort
+  return (a:node.has_worktree && a:node.worktree ==# a:rootkey) ? 0 : 1
+endfunction
+
+" `main`, `feature/delta (beta)`, `hotfix/beta (no worktree)`, and with a
+" base of its own, `[feature/alpha] feature/delta (beta)`.
+"
+" The bracketed base is shown only when the branch diffs against something
+" other than the default, so it reads as the exception it is rather than
+" repeating the same token down the whole panel.
+function! s:branch_label(src, rootkey) abort
+  let l:name = a:src.branch
+  if !a:src.has_worktree
+    let l:name .= ' (no worktree)'
+  elseif a:src.worktree !=# a:rootkey
+    let l:name .= ' (' . fnamemodify(a:src.worktree, ':t') . ')'
+  endif
+  if claude#difftree#has_override(a:src.branch)
+    let l:name = '[' . claude#difftree#base_for(a:src.branch) . '] ' . l:name
+  endif
+  return l:name
+endfunction
+
+" Path of the repository's main worktree.
+function! s:root_key() abort
+  for l:src in s:sources()
+    if get(l:src, 'is_root', 0)
+      return l:src.worktree
+    endif
+  endfor
+  return s:repo_root()
 endfunction
 
 " ── colours ──────────────────────────────────────────────────────────────────
 
+" Worktree and branch deliberately do NOT prefer NERDTreeDir. Directories keep
+" it, so folders stay NERDTree's colour, but if all three levels pointed at the
+" same group they would collapse to one colour the moment NERDTree's syntax
+" file was sourced -- which is exactly what they used to do.
+"
 " Tree furniture follows NERDTree; the status glyphs follow
 " nerdtree-git-plugin, preferring its own groups when its syntax file has been
 " sourced and otherwise the groups it links them to
@@ -547,25 +685,59 @@ endfunction
 let s:highlights = [
       \ ['ClaudeDiffHeader',      'NERDTreeCWD',              'Statement'],
       \ ['ClaudeDiffProject',     'NERDTreeCWD',              'Statement'],
-      \ ['ClaudeDiffWorktree',    'NERDTreeDir',              'Directory'],
-      \ ['ClaudeDiffNoWorktree',  '',                         'Comment'],
-      \ ['ClaudeDiffBranch',      'NERDTreeDir',              'Directory'],
+      \ ['ClaudeDiffBranch',      '',                         'Type'],
+      \ ['ClaudeDiffBaseTag',     '',                         'Identifier'],
+      \ ['ClaudeDiffLocal',       '',                         'Comment'],
       \ ['ClaudeDiffDir',         'NERDTreeDir',              'Directory'],
       \ ['ClaudeDiffMarker',      'NERDTreeClosable',         'Directory'],
       \ ['ClaudeDiffCommitted',   'NERDTreeFile',             'Normal'],
       \ ['ClaudeDiffUncommitted', 'NERDTreeFlags',            'Number'],
       \ ['ClaudeDiffModified',    'NERDTreeGitStatusModified',  'Special'],
-      \ ['ClaudeDiffStaged',      'NERDTreeGitStatusStaged',    'Function'],
       \ ['ClaudeDiffUntracked',   'NERDTreeGitStatusUntracked', 'Comment'],
       \ ['ClaudeDiffRenamed',     'NERDTreeGitStatusRenamed',   'Title'],
       \ ['ClaudeDiffUnmerged',    'NERDTreeGitStatusUnmerged',  'Label'],
-      \ ['ClaudeDiffDeleted',     'NERDTreeGitStatusDeleted',   'Operator'],
       \ ['ClaudeDiffField',       '',                         'Normal'],
       \ ['ClaudeDiffHelp',        'NERDTreeHelp',             'String'],
       \ ]
 
+" Added is green and removed is red, taken from DiffAdd and DiffDelete so they
+" follow whatever the colourscheme (or the user's vimrc) calls green and red.
+"
+" Only the *foreground* is copied, with the background forced off: DiffAdd and
+" DiffDelete commonly carry a background, which would paint a block behind the
+" glyph. This is nerdtree-git-plugin's own technique
+" (after/syntax/nerdtree.vim:s:highlightFromGroup).
+let s:fg_sources = [
+      \ ['ClaudeDiffStaged',  'DiffAdd'],
+      \ ['ClaudeDiffDeleted', 'DiffDelete'],
+      \ ]
+
+function! s:link_fg(group, source) abort
+  let l:id    = synIDtrans(hlID(a:source))
+  let l:cterm = synIDattr(l:id, 'fg', 'cterm')
+  let l:gui   = synIDattr(l:id, 'fg', 'gui')
+  if empty(l:cterm) && empty(l:gui)
+    return
+  endif
+  " `highlight default` is no use here: :syntax match creates the group
+  " implicitly, and `default` then refuses to touch it. Check by hand instead
+  " so a colour the user set is still left alone.
+  let l:own = synIDtrans(hlID(a:group))
+  if !empty(synIDattr(l:own, 'fg', 'cterm'))
+        \ || !empty(synIDattr(l:own, 'fg', 'gui'))
+    return
+  endif
+  execute 'highlight ' . a:group
+        \ . ' cterm=NONE gui=NONE ctermbg=NONE guibg=NONE'
+        \ . (empty(l:cterm) ? '' : ' ctermfg=' . l:cterm)
+        \ . (empty(l:gui)   ? '' : ' guifg='   . l:gui)
+endfunction
+
 function! claude#difftree#_relink() abort
   call claude#sidebar#link_highlights(s:highlights)
+  for [l:group, l:source] in s:fg_sources
+    call s:link_fg(l:group, l:source)
+  endfor
 endfunction
 
 function! s:setup_syntax() abort
@@ -576,13 +748,17 @@ function! s:setup_syntax() abort
   " gains the worktree level: project 0, worktree 2, branch 4, directories 6+.
   execute 'syntax match ClaudeDiffProject    /^' . l:m
         \ . ' .*$/ contains=ClaudeDiffMarker'
-  execute 'syntax match ClaudeDiffNoWorktree /^  ' . l:m
-        \ . ' (no worktree)$/ contains=ClaudeDiffMarker'
-  execute 'syntax match ClaudeDiffWorktree   /^  ' . l:m
-        \ . ' \%((no worktree)$\)\@!.*$/ contains=ClaudeDiffMarker'
-  execute 'syntax match ClaudeDiffBranch     /^    ' . l:m
-        \ . ' .*$/ contains=ClaudeDiffMarker'
-  execute 'syntax match ClaudeDiffDir        /^ \{6,}' . l:m
+  " Branch rows are yellow by default; a branch with no upstream is greyed by
+  " a text property instead, since whether one exists is not visible in the
+  " row's text and :syntax has nothing to match on.
+  execute 'syntax match ClaudeDiffBranch  /^  ' . l:m
+        \ . ' .*$/ contains=ClaudeDiffMarker,ClaudeDiffBaseTag'
+  " The bracketed base reads as metadata, not part of the branch name. It sits
+  " right after the fold marker, so it cannot be confused with a file row's
+  " indicator field, which has no marker before it.
+  execute 'syntax match ClaudeDiffBaseTag /\%(^  ' . l:m
+        \ . ' \)\@<=\[[^]]*\]/ contained'
+  execute 'syntax match ClaudeDiffDir     /^ \{4,}' . l:m
         \ . ' .*$/ contains=ClaudeDiffMarker'
   execute 'syntax match ClaudeDiffMarker  /' . l:m . '/ contained'
 
@@ -731,37 +907,55 @@ function! s:build() abort
     return [l:lines, l:nodes]
   endif
 
-  " Project > Worktree > Branch > directories, at the same indents the session
-  " panel uses (0, 2, 4, 6) so the two panels read alike.
+  " Project, then one row per branch, then its directories.
   let l:pkey = 'p:' . s:repo_root()
   call s:add(l:lines, l:nodes,
         \ s:marker(l:pkey) . ' ' . fnamemodify(s:repo_root(), ':t'),
         \ s:node('project', l:pkey, '', fnamemodify(s:repo_root(), ':t'), ''))
   if s:is_open(l:pkey)
-    for l:wt in l:tree
+    for l:br in l:tree
+      let l:node = s:node('branch', l:br.key, '  ', l:br.label, l:br.worktree)
+      let l:node.has_upstream = l:br.has_upstream
+      let l:node.branch       = l:br.branch
       call s:add(l:lines, l:nodes,
-            \ '  ' . s:marker(l:wt.key) . ' '
-            \ . claude#sidebar#fit(s:width(), '  ', l:wt.label),
-            \ s:node(l:wt.has_worktree ? 'worktree' : 'noworktree',
-            \        l:wt.key, '  ', l:wt.label, l:wt.worktree))
-      if !s:is_open(l:wt.key)
-        continue
+            \ '  ' . s:marker(l:br.key) . ' '
+            \ . claude#sidebar#fit(s:width(), '  ', l:br.label), l:node)
+      if s:is_open(l:br.key)
+        call s:emit_dir(l:br.root, l:br.key, '', '    ', l:lines, l:nodes)
       endif
-      for l:br in l:wt.branches
-        call s:add(l:lines, l:nodes,
-              \ '    ' . s:marker(l:br.key) . ' '
-              \ . claude#sidebar#fit(s:width(), '    ', l:br.branch),
-              \ s:node('branch', l:br.key, '    ', l:br.branch, l:wt.worktree))
-        if s:is_open(l:br.key)
-          call s:emit_dir(l:br.root, l:br.key, '', '      ', l:lines, l:nodes)
-        endif
-      endfor
     endfor
   endif
 
   call s:add(l:lines, l:nodes, '', s:node('blank', '', '', '', ''))
   call s:add(l:lines, l:nodes, '? help', s:node('help', '', '', '', ''))
   return [l:lines, l:nodes]
+endfunction
+
+" A branch with no remote-tracking branch exists only on this machine. That
+" cannot be expressed in the row's text, so it is coloured with a text
+" property, which draws over the syntax highlighting.
+function! s:mark_local_branches(nodes) abort
+  if !has('textprop')
+    return
+  endif
+  if empty(prop_type_get('ClaudeDiffLocal', {'bufnr': s:bufnr}))
+    call prop_type_add('ClaudeDiffLocal',
+          \ {'bufnr': s:bufnr, 'highlight': 'ClaudeDiffLocal'})
+  endif
+  call prop_clear(1, len(a:nodes), {'bufnr': s:bufnr})
+  let l:i = 0
+  for l:node in a:nodes
+    let l:i += 1
+    if l:node.kind !=# 'branch' || get(l:node, 'has_upstream', 1)
+      continue
+    endif
+    let l:line = getbufline(s:bufnr, l:i)
+    if empty(l:line)
+      continue
+    endif
+    call prop_add(l:i, 1, {'bufnr': s:bufnr, 'type': 'ClaudeDiffLocal',
+          \ 'length': len(l:line[0])})
+  endfor
 endfunction
 
 function! s:render() abort
@@ -777,6 +971,7 @@ function! s:render() abort
   call setbufline(s:bufnr, 1, l:lines)
   call setbufvar(s:bufnr, '&modifiable', 0)
   let s:nodes = l:nodes
+  call s:mark_local_branches(l:nodes)
 
   if l:restore > 0
     call win_execute(l:win,
@@ -879,6 +1074,7 @@ function! s:setup_keys() abort
   nnoremap <buffer> <silent> t       :call <SID>open_mode('tab')<CR>
   nnoremap <buffer> <silent> R       :call claude#difftree#refresh()<CR>
   nnoremap <buffer> <silent> b       :call <SID>prompt_base()<CR>
+  nnoremap <buffer> <silent> B       :call <SID>prompt_default_base()<CR>
   nnoremap <buffer> <silent> /       :call <SID>prompt_filter()<CR>
   nnoremap <buffer> <silent> <Esc>   :call <SID>clear_filter()<CR>
   nnoremap <buffer> <silent> za      :call <SID>fold()<CR>
@@ -932,13 +1128,42 @@ function! s:help() abort
   call s:render()
 endfunction
 
+" b: set the base for the branch under the cursor. An empty answer clears the
+" override, so the branch falls back to the default.
 function! s:prompt_base() abort
-  let l:new = input('Diff against branch: ', claude#difftree#base(),
+  let l:branch = s:cursor_branch()
+  if empty(l:branch)
+    return
+  endif
+  let l:new = input('Diff ' . l:branch . ' against: ',
+        \ claude#difftree#base_for(l:branch),
+        \ 'customlist,claude#difftree#complete_branch')
+  redraw
+  call claude#difftree#set_branch_base(l:branch, l:new)
+endfunction
+
+" B: set the session-wide default, used by branches with no override.
+function! s:prompt_default_base() abort
+  let l:new = input('Diff against (default): ', claude#difftree#base(),
         \ 'customlist,claude#difftree#complete_branch')
   redraw
   if !empty(l:new)
     call claude#difftree#set_base(l:new)
   endif
+endfunction
+
+" The branch a row belongs to: the branch row itself, or the branch owning the
+" directory or file under the cursor.
+function! s:cursor_branch() abort
+  let l:idx = line('.') - 1
+  while l:idx >= 0
+    let l:node = get(s:nodes, l:idx, {})
+    if get(l:node, 'kind', '') ==# 'branch'
+      return get(l:node, 'branch', '')
+    endif
+    let l:idx -= 1
+  endwhile
+  return ''
 endfunction
 
 " ── filtering ────────────────────────────────────────────────────────────────
@@ -1035,6 +1260,8 @@ function! claude#difftree#_reset() abort
   let s:sources_ok = 0
   let s:base_over  = ''
   let s:base_cache = ''
+  let s:bases      = {}
+  let s:bases_ok   = 0
   let s:filter     = ''
   let s:show_help  = 0
 endfunction

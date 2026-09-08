@@ -19,6 +19,9 @@ Before:
   call writefile(['hello'], g:_repo . '/src/main.go')
   call system(g:_g . 'add -A')
   call system(g:_g . 'commit -qm work')
+  " Keep the per-branch base store out of the plugin's data directory.
+  let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
+  let g:claude_difftree_store = g:_repo . '.bases.json'
   execute 'cd ' . fnameescape(g:_repo)
 
   " Line of the file row labelled {name}, or -1.
@@ -41,6 +44,8 @@ Before:
 
 After:
   execute 'cd ' . fnameescape(g:_cwd)
+  let g:claude_difftree_store = g:_saved_dtstore
+  call delete(g:_repo . '.bases.json')
   call claude#difftree#_reset()
   call claude#panel#_reset()
   call claude#sidebar#_reset()
@@ -199,32 +204,28 @@ Execute (double-click does exactly what <CR> does):
 " The tree gained a Worktree node between Project and Branch, so fold targets
 " moved: line 3 is the project, 4 the worktree, 5 the branch.
 
-Execute (the rows are project, worktree, branch, in that order):
+Execute (the rows are project then branch, with no worktree level):
   call claude#difftree#open()
   let kinds = map(copy(claude#difftree#_nodes()), {_, n -> n.kind})
   let tree  = filter(copy(kinds),
         \ {_, k -> index(['project', 'worktree', 'branch'], k) >= 0})
-  AssertEqual ['project', 'worktree', 'branch'], tree[0:2]
+  AssertEqual ['project', 'branch'], tree[0:1]
+  AssertEqual -1, index(kinds, 'worktree'),
+        \ 'a worktree holds one branch, so it has no row of its own'
 
-Execute (a worktree folds independently of the branches under it):
+Execute (folding the project hides every branch):
   call claude#difftree#open()
   call win_gotoid(bufwinid(claude#difftree#bufnr()))
-  let nodes = claude#difftree#_nodes()
-  let wline = -1
-  for i in range(len(nodes))
-    if nodes[i].kind ==# 'worktree' | let wline = i + 1 | break | endif
-  endfor
-  Assert wline > 0, 'expected a worktree row'
-  call cursor(wline, 1)
+  call cursor(3, 1)
   normal za
   let t = join(claude#difftree#_lines(), "\n")
-  Assert t !~# 'main\.go',  'folding a worktree hides its branches'
+  Assert t !~# 'main\.go',  'folding the project hides its branches'
   Assert t !~# '▾ feature', 'the branch row goes with it'
   Assert t =~# fnamemodify(g:_repo, ':t'), 'the project row stays'
   normal za
   Assert join(claude#difftree#_lines(), "\n") =~# 'main\.go'
 
-Execute (a branch folds without hiding its worktree):
+Execute (a branch folds without hiding the project):
   call claude#difftree#open()
   call win_gotoid(bufwinid(claude#difftree#bufnr()))
   let nodes = claude#difftree#_nodes()
@@ -238,6 +239,7 @@ Execute (a branch folds without hiding its worktree):
   let t = join(claude#difftree#_lines(), "\n")
   Assert t !~# 'main\.go',   'folding a branch hides its files'
   Assert t =~# '▸ feature',  'the branch row itself stays, marked collapsed'
+  Assert t =~# fnamemodify(g:_repo, ':t'), 'the project row stays'
 
 " ── the shared column keeps its width ────────────────────────────────────────
 "

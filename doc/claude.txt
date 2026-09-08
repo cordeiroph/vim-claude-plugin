@@ -149,6 +149,17 @@ g:claude_panel_nerdtree_stack~
   See also: |claude-nerdtree|
 
 ------------------------------------------------------------------------------
+                                                       *g:claude_difftree_store*
+g:claude_difftree_store~
+  Path of the JSON file remembering each branch's diff base.
+
+  When empty (the default) it lives at `data/difftree.json` inside the plugin
+  directory, and carries the same warning as |g:claude_session_store|: a plugin
+  update or reinstall removes it. Point it somewhere durable to keep the
+  bases: >
+    let g:claude_difftree_store = expand('~/.claude/vim-difftree.json')
+<
+------------------------------------------------------------------------------
                                                       *g:claude_panel_auto_open*
 g:claude_panel_auto_open~
   Set to 1 to open the session panel automatically on |VimEnter|.
@@ -437,8 +448,37 @@ Reopening a closed session~
 
 Branches listed                                       *claude-diff-branches*
 
-The diff tree nests project, then worktree, then branch — the same shape as
-the session panel — with directories and files below.
+The diff tree lists one row per branch directly under the project, with
+directories and files below. A worktree holds exactly one branch, so it never
+gets a level of its own; it is named in the branch's label instead:
+
+  main                      checked out in the main worktree
+  hotfix/e947 (wt-hotfix)   checked out in a linked worktree
+  feature/x (no worktree)   commits but no checkout: committed changes only
+
+Branch names are yellow. A branch with no remote-tracking branch — work that
+exists only on this machine — is greyed instead, which is applied with a text
+property since the fact is not visible in the row's text.
+
+The branch checked out in the repository's main worktree comes first, with no
+suffix. It is what makes your own uncommitted work visible: a
+branch has no committed changes against itself, so while you sit on the base
+branch every other rule would skip your checkout and the panel would be empty.
+The node is hidden when there is genuinely nothing to show.
+
+When a branch is the base, the committed half of the diff is taken against its
+upstream instead, so commits you have not pushed still appear. With no upstream
+configured, only uncommitted work is listed.
+
+Each branch can be diffed against a base of its own. Press `b` on a branch row
+to set it, or clear it with an empty answer; |:ClaudeDiffBase| does the same
+from the command line. The choice is remembered across Vim restarts in
+|g:claude_difftree_store|, keyed by repository so the same branch name in two
+repositories keeps separate bases. `B` sets a default for the session, used
+only by branches with no base of their own.
+
+A branch diffing against something other than the default shows it in brackets
+before the name, e.g. `[feature/alpha] feature/delta (beta)`.
 
 The branches it lists are the union of three things:
 
@@ -451,10 +491,14 @@ The branches it lists are the union of three things:
 A branch equal to the base is skipped, since it would diff against itself, and
 a branch deleted since its session ran is dropped.
 
-Branches not checked out in any worktree are gathered under a dimmed
-`(no worktree)` node, placed last. They are diffed by name rather than against
-HEAD, so they show committed changes only: with no working tree there is
-nothing to be dirty, and their second indicator slot is always blank.
+A worktree is never skipped for being on the base branch — it is a place
+uncommitted work can live whatever branch it holds. A session branch equal to
+the base with no checkout is still skipped, having nothing to show either way.
+
+A branch not checked out in any worktree is marked `(no worktree)`. It is
+diffed by name rather than against HEAD, so it shows committed changes only:
+with no working tree there is nothing to be dirty, and its second indicator
+slot is always blank.
 
 The branch list costs one git call per session branch, so it is computed on
 refresh — panel open, `R`, |:ClaudeDiffRefresh| or a write — and never on a
@@ -479,11 +523,16 @@ not say which of the two slots it came from.
 The glyphs are nerdtree-git-plugin's, so the diff tree and NERDTree label git
 state the same way:
 
-  Staged     ✚  (+)   a file added on the branch, or staged in the index
+  Staged     ✚  (+)   added on the branch, or staged in the index — green
   Modified   ✹  (*)   changed
-  Deleted    ✖  (D)   removed
+  Deleted    ✖  (D)   removed — red
   Renamed    ➜  (R)   renamed or copied
   Untracked  ✭  (!)   not known to git
+
+The add and remove glyphs take their colour from |hl-DiffAdd| and
+|hl-DiffDelete|, so they follow whatever the colourscheme calls green and red.
+Only the foreground is copied: those groups usually carry a background, which
+would paint a block behind the glyph.
 
 The bracketed characters are used when |g:claude_panel_ascii| is set.
 

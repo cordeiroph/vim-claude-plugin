@@ -173,8 +173,10 @@ command! ClaudeDiff        call claude#difftree#toggle()
 command! ClaudeDiffOpen    call claude#difftree#open()
 command! ClaudeDiffClose   call claude#difftree#close()
 command! ClaudeDiffRefresh call claude#difftree#refresh()
-command! -nargs=1 -complete=customlist,claude#difftree#complete_branch
-      \ ClaudeDiffBase call claude#difftree#set_base(<q-args>)
+" Sets the base for one branch: the argument's, or the one under the cursor.
+" An empty argument clears that branch's override.
+command! -nargs=* -complete=customlist,claude#difftree#complete_branch
+      \ ClaudeDiffBase call claude#difftree#base_command(<q-args>)
 
 " Window navigation commands (wrappers around wincmd h/l/k/j).
 command! ClaudeFocus      call claude#focus()

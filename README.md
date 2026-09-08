@@ -161,26 +161,37 @@ It works whichever opens first, and closing either one hands the column to the o
 Git Diff                      main
 
 ▾ claude-pluing
-  ▾ ~/Workspace/vim/claude-pluing
-    ▾ feature/git-diff-tree
-      ▾ autoload/claude
-        [✚|✹] difftree.vim
-        [✚]   panel.vim
-        [✹]   input.vim
-        [ |✭] scratch.vim
-      ▾ doc
-        [✚]   design/git-diff-tree.md
-        [✹]   claude.txt
-  ▾ (no worktree)
-    ▾ feature/agent-session-panel
-      ▾ autoload/claude
-        [✚]   session.vim
-        [✚]   sidebar.vim
+  ▾ main
+    ▾ autoload/claude
+      [✚|✹] difftree.vim
+      [✚]   panel.vim
+      [ |✭] scratch.vim
+    ▾ doc
+      [✹]   claude.txt
+  ▾ hotfix/e947 (wt-hotfix)
+    ▾ autoload/claude
+      [✹]   input.vim
+  ▾ feature/agent-session-panel (no worktree)
+    ▾ autoload/claude
+      [✚]   session.vim
+      [✚]   sidebar.vim
 ```
 
-It nests the same way the session panel does — **project, worktree, branch** — so the two halves of the sidebar read alike.
+One row per **branch**, directly under the project. A worktree holds exactly one branch, so it never needs a level of its own — it is named in the label instead:
 
-The branches listed are the union of every worktree, every branch a Claude session has run on (live or closed, taken from the session registry), and the branch you are on now. That is the point: a branch Claude worked on stays visible after you move off it. Branches no longer checked out anywhere are gathered under a dimmed `(no worktree)` node and show **committed changes only** — with no working tree there is nothing to be dirty, so their second indicator slot is always blank.
+| Label | Meaning |
+|---|---|
+| `main` | checked out in the repository's main worktree |
+| `hotfix/e947 (wt-hotfix)` | checked out in a linked worktree of that name |
+| `feature/x (no worktree)` | has commits but no checkout anywhere — committed changes only |
+
+The branch you are actually sitting on comes first. It is what shows *your* uncommitted work: a branch has no committed changes against itself, so on the base branch every other rule would skip your checkout and the panel would come up empty. When a branch is the base, the committed half is compared against its upstream instead, so unpushed commits still show. A row disappears when it has nothing to report.
+
+Branch names are **yellow**, except a branch with no remote-tracking branch — work that exists only on your machine — which is **grey**. In the status glyphs, added is **green** and removed is **red**, taken from your `DiffAdd` and `DiffDelete` colours.
+
+Each branch can diff against a base of its own: press `b` on a branch row to set it, or clear it with an empty answer. The choice persists across Vim restarts in `g:claude_difftree_store`, keyed by repository. `B` sets a session-wide default for branches with no base of their own. A branch on a non-default base shows it in brackets: `[feature/alpha] feature/delta (beta)`.
+
+The branches listed are the union of every worktree, every branch a Claude session has run on (live or closed, taken from the session registry), and the branch you are on now. That is the point: a branch Claude worked on stays visible after you move off it. A branch no longer checked out anywhere is listed under the root workspace beside the branch that *is* checked out there, marked `(no worktree)` and dimmed. It shows **committed changes only** — with no working tree there is nothing to be dirty, so its second indicator slot is always blank.
 
 Each row carries a bracketed field with **two slots**. The first says what the branch did to the file relative to the base; the second what the working tree has done since:
 

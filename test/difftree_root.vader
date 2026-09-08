@@ -1,0 +1,187 @@
+" Tests for the root workspace node.
+"
+" Regression: while you were sitting on the base branch, the panel showed
+" nothing at all. Both files() and tree() skipped any source whose branch
+" equalled the base — true for committed changes, which are empty when a
+" branch is compared with itself, but it threw away the worktree too, and the
+" worktree is the only place uncommitted and untracked files can live.
+"
+" The fixture is checked out on `main`, which is also the base.
+
+Before:
+  call claude#difftree#_reset()
+  call claude#session#_reset()
+  let g:_cwd  = getcwd()
+  let g:_repo = tempname()
+  call mkdir(g:_repo, 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['one'], g:_repo . '/tracked.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  let g:_saved_base = get(g:, 'claude_difftree_base', '')
+  let g:claude_difftree_base = ''
+  " Keep the per-branch base store out of the plugin's data directory.
+  let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
+  let g:claude_difftree_store = g:_repo . '.bases.json'
+  execute 'cd ' . fnameescape(g:_repo)
+
+  function! Labels() abort
+    return map(claude#difftree#tree(), {_, w -> w.label})
+  endfunction
+
+  function! Paths() abort
+    return sort(map(copy(claude#difftree#files()), {_, f -> f.path}))
+  endfunction
+
+  function! Dirty() abort
+    return sort(map(filter(copy(claude#difftree#files()),
+          \ {_, f -> !empty(f.dirty)}), {_, f -> f.path}))
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  let g:claude_difftree_base = g:_saved_base
+  let g:claude_difftree_store = g:_saved_dtstore
+  call delete(g:_repo . '.bases.json')
+  call claude#difftree#_reset()
+  call claude#session#_reset()
+  call delete(g:_repo, 'rf')
+  silent! only
+
+" ── the regression ───────────────────────────────────────────────────────────
+
+Execute (uncommitted changes show while sitting on the base branch):
+  AssertEqual 'main', claude#difftree#base()
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call writefile(['new'],     g:_repo . '/untracked.txt')
+  call claude#difftree#refresh()
+  AssertEqual ['tracked.txt', 'untracked.txt'], Dirty(),
+        \ 'the working tree must be visible even on the base branch'
+
+Execute (they are rendered, not merely collected):
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call claude#difftree#refresh()
+  call claude#difftree#open()
+  Assert join(claude#difftree#_lines(), "\n") =~# 'tracked\.txt',
+        \ 'the panel should not be empty on the base branch'
+
+" ── the node itself ──────────────────────────────────────────────────────────
+
+Execute (the checked-out branch comes first and carries no suffix):
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call claude#difftree#refresh()
+  " The main worktree is the implicit home, so its branch is unadorned.
+  AssertEqual 'main', Labels()[0]
+
+Execute (a clean root workspace is not listed at all):
+  " Nothing dirty, no unpushed commits: an empty row would just be noise.
+  call claude#difftree#refresh()
+  AssertEqual [], Labels()
+
+Execute (only the working-tree slot is filled, since committed is empty):
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call claude#difftree#refresh()
+  let rec = filter(copy(claude#difftree#files()),
+        \ {_, f -> f.path ==# 'tracked.txt'})[0]
+  AssertEqual '', rec.committed,
+        \ 'a branch compared with itself has no committed changes'
+  AssertEqual 'M', rec.dirty
+
+" ── unpushed commits ─────────────────────────────────────────────────────────
+
+Execute (commits ahead of the upstream count as committed changes):
+  " A bare repo stands in for origin.
+  let origin = tempname()
+  call system('git init -q --bare ' . shellescape(origin))
+  call system(g:_g . 'remote add origin ' . shellescape(origin))
+  call system(g:_g . 'push -q -u origin main')
+  " Now commit locally without pushing.
+  call writefile(['ahead'], g:_repo . '/ahead.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm "not pushed"')
+  call claude#difftree#refresh()
+  let rec = filter(copy(claude#difftree#files()),
+        \ {_, f -> f.path ==# 'ahead.txt'})
+  Assert !empty(rec), 'an unpushed commit should show: ' . string(Paths())
+  AssertEqual 'A', rec[0].committed
+  AssertEqual '',  rec[0].dirty
+  call delete(origin, 'rf')
+
+Execute (a branch level with its upstream shows no committed changes):
+  let origin = tempname()
+  call system('git init -q --bare ' . shellescape(origin))
+  call system(g:_g . 'remote add origin ' . shellescape(origin))
+  call system(g:_g . 'push -q -u origin main')
+  call claude#difftree#refresh()
+  AssertEqual [], Paths(), 'nothing is ahead and nothing is dirty'
+  call delete(origin, 'rf')
+
+Execute (no upstream at all: uncommitted work only, and no error):
+  Assert empty(systemlist('git -C ' . shellescape(g:_repo) . ' remote')),
+        \ 'precondition: no remote configured'
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call claude#difftree#refresh()
+  AssertEqual ['tracked.txt'], Paths()
+  AssertEqual ['tracked.txt'], Dirty()
+
+" ── other worktrees on the base ──────────────────────────────────────────────
+
+Execute (another worktree on the base shows its uncommitted files):
+  " The fixture's main worktree holds `main`, so the second one is detached at
+  " the same commit — still a worktree, still a place work can live.
+  " The lambda below cannot capture a block-local, so the path is a global.
+  let g:_wt = g:_repo . '-wt'
+  call system(g:_g . 'worktree add -q --detach ' . shellescape(g:_wt))
+  call writefile(['dirty there'], g:_wt . '/tracked.txt')
+  call claude#difftree#refresh()
+  " git resolves symlinks in worktree paths (/var -> /private/var), so the
+  " recorded path is not the tempname verbatim.
+  let g:_wtr = resolve(g:_wt)
+  let there = filter(copy(claude#difftree#files()),
+        \ {_, f -> resolve(f.worktree) ==# g:_wtr})
+  call system(g:_g . 'worktree remove --force ' . shellescape(g:_wt))
+  unlet g:_wt g:_wtr
+  Assert !empty(there), 'a second worktree must not be invisible'
+
+Execute (a session-only branch equal to the base is still skipped):
+  " It has no worktree, so there is genuinely nothing to show for it.
+  call claude#session#_inject({'name': 'on main', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'main'})
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call claude#difftree#refresh()
+  AssertEqual ['main'], Labels(),
+        \ 'the session adds no second row for the same branch'
+
+" ── ordering across all three tiers ──────────────────────────────────────────
+
+Execute (the root workspace comes first, then the other worktrees):
+  " A branch with a worktree, and a branch with none.
+  call system(g:_g . 'branch orphan main')
+  call system(g:_g . 'checkout -q -b sidebranch main')
+  call writefile(['side'], g:_repo . '/side.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm side')
+  call system(g:_g . 'checkout -q main')
+  let wt = g:_repo . '-side'
+  call system(g:_g . 'worktree add -q ' . shellescape(wt) . ' sidebranch')
+  " Give `orphan` a commit so it has something to list, with no checkout.
+  call system(g:_g . 'branch -f orphan sidebranch')
+  call claude#session#_inject({'name': 'orphan work', 'status': 'closed',
+        \ 'cwd': g:_repo, 'project': g:_repo, 'worktree': g:_repo,
+        \ 'branch': 'orphan'})
+  call writefile(['changed'], g:_repo . '/tracked.txt')
+  call claude#difftree#refresh()
+  let labels = Labels()
+  call system(g:_g . 'worktree remove --force ' . shellescape(wt))
+  " One row per branch: the checked-out one first, unadorned; a linked
+  " worktree named in parentheses; a branch with no checkout marked.
+  AssertEqual 'main', labels[0]
+  Assert index(labels, 'sidebranch (' . fnamemodify(wt, ':t') . ')') >= 0,
+        \ 'expected the worktree name in the label, got ' . string(labels)
+  Assert index(labels, 'orphan (no worktree)') >= 0,
+        \ 'expected the orphan branch, got ' . string(labels)
+  AssertEqual 3, len(labels), 'expected three branch rows, got ' . string(labels)

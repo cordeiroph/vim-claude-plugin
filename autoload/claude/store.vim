@@ -1,8 +1,15 @@
-" ── session name store ───────────────────────────────────────────────────────
+" ── JSON stores ──────────────────────────────────────────────────────────────
 "
-" Persists session *naming and grouping* metadata to a JSON file so names
-" survive a Vim restart. Runtime state (buffer numbers, jobs, status) is never
-" written here — see autoload/claude/session.vim for the live registry.
+" Persists small dictionaries to JSON so they survive a Vim restart. Two of
+" them exist: session naming and grouping metadata (see
+" autoload/claude/session.vim), and per-branch diff bases (see
+" autoload/claude/difftree.vim). Runtime state — buffer numbers, jobs, status
+" — is never written here.
+"
+" The *_at() functions take a path and a payload key so both stores share one
+" implementation of the awkward parts: atomic write, corruption recovery,
+" schema-version refusal and graceful degradation when the file cannot be
+" written. claude#store#load()/save() are the session-store wrappers.
 "
 " This module is deliberately pure I/O: no terminal, no jobs, no git. That
 " makes it testable in isolation (test/store.vader).
@@ -33,6 +40,16 @@ function! claude#store#path() abort
   return s:plugin_root . '/data/sessions.json'
 endfunction
 
+" Path of the per-branch diff base store, with the same override-or-plugin-dir
+" rule and the same reinstall caveat.
+function! claude#store#difftree_path() abort
+  let l:override = get(g:, 'claude_difftree_store', '')
+  if !empty(l:override)
+    return expand(l:override)
+  endif
+  return s:plugin_root . '/data/difftree.json'
+endfunction
+
 " Echo {msg} as a warning the first time {kind} is seen in this Vim session.
 function! s:warn_once(kind, msg) abort
   if has_key(s:warned, a:kind)
@@ -44,68 +61,69 @@ function! s:warn_once(kind, msg) abort
   echohl None
 endfunction
 
-" An empty, well-formed store.
-function! s:empty() abort
-  return {'version': s:VERSION, 'sessions': {}}
+" An empty, well-formed store holding {key}.
+function! s:empty(key) abort
+  return {'version': s:VERSION, a:key: {}}
 endfunction
 
-" Read the store from disk. Always returns a usable dict — a missing file, a
+" Read a store from disk. Always returns a usable dict — a missing file, a
 " corrupt file or a future schema never raises.
-function! claude#store#load() abort
+"
+" {key} is the payload key ("sessions", "bases"); {what} names the store in
+" warnings.
+function! claude#store#load_at(path, key, what) abort
   let s:read_only = v:false
-  let l:path = claude#store#path()
 
-  if !filereadable(l:path)
-    return s:empty()
+  if !filereadable(a:path)
+    return s:empty(a:key)
   endif
 
-  let l:raw = join(readfile(l:path), "\n")
+  let l:raw = join(readfile(a:path), "\n")
   try
     let l:data = json_decode(l:raw)
   catch
     " Never overwrite unreadable data silently: keep a copy and start fresh.
-    let l:bak = l:path . '.bak'
-    call rename(l:path, l:bak)
-    call s:warn_once('corrupt',
-          \ 'session store was corrupt; moved to ' . l:bak)
-    return s:empty()
+    let l:bak = a:path . '.bak'
+    call rename(a:path, l:bak)
+    call s:warn_once('corrupt-' . a:key,
+          \ a:what . ' was corrupt; moved to ' . l:bak)
+    return s:empty(a:key)
   endtry
 
-  if type(l:data) != v:t_dict || type(get(l:data, 'sessions', 0)) != v:t_dict
-    let l:bak = l:path . '.bak'
-    call rename(l:path, l:bak)
-    call s:warn_once('corrupt',
-          \ 'session store was malformed; moved to ' . l:bak)
-    return s:empty()
+  if type(l:data) != v:t_dict || type(get(l:data, a:key, 0)) != v:t_dict
+    let l:bak = a:path . '.bak'
+    call rename(a:path, l:bak)
+    call s:warn_once('corrupt-' . a:key,
+          \ a:what . ' was malformed; moved to ' . l:bak)
+    return s:empty(a:key)
   endif
 
   if get(l:data, 'version', s:VERSION) > s:VERSION
     " Written by a newer plugin. Reading is safe; writing would drop fields
     " this build knows nothing about.
     let s:read_only = v:true
-    call s:warn_once('future',
-          \ 'session store uses a newer format; running read-only')
+    call s:warn_once('future-' . a:key,
+          \ a:what . ' uses a newer format; running read-only')
   endif
 
   return l:data
 endfunction
 
-" Write {data} to disk atomically. Returns 1 on success, 0 on failure.
+" Write {data} to {path} atomically. Returns 1 on success, 0 on failure.
 " A failure is warned about once and is never fatal: the caller keeps its
-" in-memory registry and simply loses persistence for this Vim session.
-function! claude#store#save(data) abort
+" in-memory state and simply loses persistence for this Vim session.
+function! claude#store#save_at(path, data, what) abort
   if s:read_only
     return 0
   endif
 
-  let l:path = claude#store#path()
-  let l:dir  = fnamemodify(l:path, ':h')
+  let l:dir = fnamemodify(a:path, ':h')
   if !isdirectory(l:dir)
     try
       call mkdir(l:dir, 'p')
     catch
-      call s:warn_once('write',
-            \ 'cannot create ' . l:dir . '; session names are in-memory only')
+      call s:warn_once('write-' . a:path,
+            \ 'cannot create ' . l:dir . '; ' . a:what . ' is in-memory only')
       return 0
     endtry
   endif
@@ -114,23 +132,32 @@ function! claude#store#save(data) abort
 
   " Write to a sibling temp file and rename over the target, so a crash
   " mid-write cannot leave a truncated store behind.
-  let l:tmp = l:path . '.tmp'
+  let l:tmp = a:path . '.tmp'
   try
     if writefile([json_encode(a:data)], l:tmp) != 0
       throw 'writefile failed'
     endif
-    if rename(l:tmp, l:path) != 0
+    if rename(l:tmp, a:path) != 0
       throw 'rename failed'
     endif
   catch
     call delete(l:tmp)
-    call s:warn_once('write',
-          \ 'session store not writable (' . l:path
-          \ . '); names are in-memory only')
+    call s:warn_once('write-' . a:path,
+          \ a:what . ' not writable (' . a:path . '); in-memory only')
     return 0
   endtry
 
   return 1
+endfunction
+
+" ── the session name store ───────────────────────────────────────────────────
+
+function! claude#store#load() abort
+  return claude#store#load_at(claude#store#path(), 'sessions', 'session store')
+endfunction
+
+function! claude#store#save(data) abort
+  return claude#store#save_at(claude#store#path(), a:data, 'session store')
 endfunction
 
 " Merge {entry} for {id} into the store and write it back. The file is
