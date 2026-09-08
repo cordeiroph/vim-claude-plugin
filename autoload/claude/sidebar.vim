@@ -229,8 +229,12 @@ endfunction
 
 " NERDTree is optional: without it installed the two Claude sidebars simply
 " share the column between them.
-function! s:nerdtree_available() abort
+function! claude#sidebar#nerdtree_available() abort
   return exists(':NERDTree') == 2
+endfunction
+
+function! s:nerdtree_available() abort
+  return claude#sidebar#nerdtree_available()
 endfunction
 
 function! s:nerdtree_open() abort

@@ -109,7 +109,8 @@ function! s:rename_id(id, name) abort
   endif
   let l:name = a:name
   if empty(l:name)
-    let l:name = input('Rename to: ', claude#session#get(a:id).name)
+    let l:rec  = claude#session#get(a:id)
+    let l:name = input('Rename to: ', get(l:rec, 'name', ''))
     redraw
   endif
   if !empty(l:name)
@@ -377,7 +378,10 @@ endfunction
 " timestamp and first message.
 function! claude#resume() abort
   call claude#session#refresh()
-  let l:closed = filter(claude#session#list(),
+  " all(), not list(): the panel buries the sessions nobody named and the ones
+  " nobody has touched for days, and resuming one is exactly when you want it
+  " back. Each is labelled by its first message.
+  let l:closed = filter(claude#session#all(),
         \ {_, r -> r.status ==# 'closed'})
 
   if empty(l:closed)
@@ -388,7 +392,7 @@ function! claude#resume() abort
   let l:menu = ['Resume Claude session:']
   let l:i = 1
   for l:rec in l:closed
-    call add(l:menu, printf('%d. %s', l:i, l:rec.name))
+    call add(l:menu, printf('%d. %s', l:i, claude#session#label(l:rec)))
     let l:i += 1
   endfor
 

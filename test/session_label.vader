@@ -1,0 +1,131 @@
+" Tests for what a row is called.
+"
+" Only 11 of the 130 sessions on this machine carry a name a human typed, so a
+" name is the exception. What was asked of a session first is the label when
+" there is no name, and it is read from the transcript that placed the record.
+
+Before:
+  call claude#session#_reset()
+  call claude#store#_reset()
+  call claude#panel#_reset()
+  let g:_saved_cwd   = getcwd()
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_saved_limit = get(g:, 'claude_panel_closed_limit', 10)
+  let g:claude_panel_closed_limit = 10
+  let g:_root = resolve(tempname())
+  let g:_dir  = g:_root . '/work'
+  call mkdir(g:_dir, 'p')
+  let g:claude_session_store = g:_root . '/sessions.json'
+  execute 'cd ' . fnameescape(g:_dir)
+  let g:_transcripts = claude#session#project_dir(g:_dir)
+  call mkdir(g:_transcripts, 'p')
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  " Named after a path under g:_root, so nothing of the user's own is caught.
+  if g:_transcripts =~# '/\.claude/projects/'
+        \ && g:_transcripts =~# escape(fnamemodify(g:_root, ':t'), '\')
+    call delete(g:_transcripts, 'rf')
+  endif
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  call claude#store#_reset()
+  let g:claude_session_store      = g:_saved_store
+  let g:claude_panel_closed_limit = g:_saved_limit
+  call delete(g:_root, 'rf')
+
+" Write a transcript whose first user message is {text}.
+Execute (helper):
+  function! Transcript(id, text) abort
+    call writefile([json_encode({'type': 'user', 'cwd': g:_dir,
+          \ 'gitBranch': 'main', 'message': {'content': a:text}})],
+          \ g:_transcripts . '/' . a:id . '.jsonl')
+  endfunction
+
+" ── the rule ─────────────────────────────────────────────────────────────────
+
+Execute (a name someone typed wins):
+  call claude#session#_inject({'id': 'a', 'name': 'panel rework',
+        \ 'snippet': 'rework the whole panel'})
+  AssertEqual 'panel rework', claude#session#label(claude#session#get('a'))
+
+Execute (with no name, the first thing asked of it):
+  call claude#session#_inject({'id': 'a', 'name': '', 'named': 0,
+        \ 'snippet': 'pick a diff base'})
+  AssertEqual 'pick a diff base', claude#session#label(claude#session#get('a'))
+
+Execute (with neither, the id, as it always was):
+  call claude#session#_inject({'id': '9c926d10-ad3d', 'name': '', 'named': 0})
+  AssertEqual '(unnamed 9c926d10)',
+        \ claude#session#label(claude#session#get('9c926d10-ad3d'))
+
+" ── where the snippet comes from ─────────────────────────────────────────────
+
+Execute (a scanned transcript labels an unnamed session by its first message):
+  call Transcript('11111111-2222-3333-4444-555555555555', 'rework the diff tree')
+  call claude#session#refresh()
+  call claude#session#toggle_hidden()
+  let recs = claude#session#list()
+  AssertEqual 1, len(recs)
+  AssertEqual '',                     recs[0].name, 'nobody typed a name'
+  AssertEqual 0,                      recs[0].named
+  AssertEqual 'rework the diff tree', recs[0].snippet
+  AssertEqual 'rework the diff tree', claude#session#label(recs[0])
+
+Execute (the timestamp fallback is gone: a label is not a name):
+  call Transcript('11111111-2222-3333-4444-555555555555', 'rework the diff tree')
+  call claude#session#refresh()
+  call claude#session#toggle_hidden()
+  Assert claude#session#list()[0].name !~# '\d\{4}-\d\{2}-\d\{2}',
+        \ 'a record marked unnamed must not carry a name'
+
+Execute (a name from the store still wins over the transcript):
+  call Transcript('11111111-2222-3333-4444-555555555555', 'rework the diff tree')
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'11111111-2222-3333-4444-555555555555':
+        \   {'name': 'diff tree work', 'named': 1, 'cwd': g:_dir,
+        \    'created': 1}}})
+  call claude#session#refresh()
+  let rec = claude#session#get('11111111-2222-3333-4444-555555555555')
+  AssertEqual 'diff tree work',       claude#session#label(rec)
+  AssertEqual 'rework the diff tree', rec.snippet,
+        \ 'the snippet is still read, in case the name is ever cleared'
+
+Execute (a name nobody chose is dropped, and the first message speaks instead):
+  call Transcript('11111111-2222-3333-4444-555555555555', 'rework the diff tree')
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'11111111-2222-3333-4444-555555555555':
+        \   {'name': 'claude 2026-09-07 15:41', 'named': 1, 'cwd': g:_dir,
+        \    'created': 1}}})
+  call claude#session#refresh()
+  let rec = claude#session#get('11111111-2222-3333-4444-555555555555')
+  AssertEqual 0,  rec.named
+  AssertEqual '', rec.name
+  AssertEqual 'rework the diff tree', claude#session#label(rec)
+
+Execute (a transcript with no user message yet has nothing to say):
+  call writefile([json_encode({'type': 'system', 'cwd': g:_dir})],
+        \ g:_transcripts . '/11111111-2222-3333-4444-555555555555.jsonl')
+  call claude#session#refresh()
+  call claude#session#toggle_hidden()
+  AssertEqual '(unnamed 11111111)', claude#session#label(claude#session#list()[0])
+
+" ── in the panel ─────────────────────────────────────────────────────────────
+
+Execute (two sessions asked the same thing are told apart):
+  call claude#session#_inject({'id': 'a', 'name': '', 'named': 0,
+        \ 'status': 'active', 'snippet': 'run the tests'})
+  call claude#session#_inject({'id': 'b', 'name': '', 'named': 0,
+        \ 'status': 'active', 'snippet': 'run the tests'})
+  call claude#panel#open()
+  let rows = filter(claude#panel#_lines(), {_, l -> l =~# 'run the tests'})
+  AssertEqual 2, len(rows)
+  Assert rows[1] =~# '(2)', 'the second gets a display-only suffix: ' . rows[1]
+
+Execute (an unnamed session is readable in the panel while it runs):
+  call claude#session#_inject({'id': 'a', 'name': '', 'named': 0,
+        \ 'status': 'waiting', 'snippet': 'pick a diff base'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'pick a diff base',
+        \ 'the session that needs you must never read as a hex id: ' . text

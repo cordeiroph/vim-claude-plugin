@@ -200,7 +200,7 @@ function! s:input_split() abort
 
   execute 'botright 10split ' . fnameescape(l:tmpfile)
   setlocal noswapfile nobuflisted bufhidden=wipe
-  setlocal statusline=Claude\ Input\ ——\ <C-s>\ send,\ <Esc>\ hide
+  setlocal statusline=Claude\ Input\ ——\ <C-s>\ send,\ <C-c>\ hide
 
   let t:claude_input_bufnr = bufnr('%')
   let b:claude_tmpfile      = l:tmpfile
@@ -215,7 +215,14 @@ function! s:input_split() abort
 
   nnoremap <buffer> <silent> <C-s> :call claude#input#submit()<CR>
   inoremap <buffer> <silent> <C-s> <Esc>:call claude#input#submit()<CR>
-  nnoremap <buffer> <silent> <Esc> :call <SID>input_split_save_and_close()<CR>
+  " Hiding is on CTRL-C, not <Esc>: the window opens in insert mode, so an
+  " <Esc> mapping here would make the first press leave insert and the second
+  " silently close the window.
+  nnoremap <buffer> <silent> <C-c> :call <SID>input_split_save_and_close()<CR>
+  " Vim's own CTRL-C leaves insert mode without firing InsertLeave, which
+  " would strand 'completeopt' on the value InsertEnter set below. Going out
+  " through <Esc> keeps that pair balanced; the second press then hides.
+  inoremap <buffer> <C-c> <Esc>
   nnoremap <buffer> <silent> q     :call claude#input#cancel()<CR>
 
   setlocal completefunc=claude#input#complete

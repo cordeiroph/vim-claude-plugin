@@ -1,0 +1,31 @@
+" Tests for the default <leader> mappings. They are defined once when
+" plugin/claude.vim is sourced, so these only read what is already there.
+"
+" <leader> is not expanded by maparg(); with the default mapleader the
+" mappings are literally \co, \cn and so on.
+
+Execute (<leader>co focuses, picks or creates — the resolving verb):
+  AssertEqual ':ClaudeOpen<CR>', maparg('\co', 'n')
+
+Execute (<leader>cn always starts a session):
+  AssertEqual ':ClaudeNew<CR>', maparg('\cn', 'n')
+
+Execute (the two are distinct commands, not aliases):
+  Assert maparg('\co', 'n') !=# maparg('\cn', 'n'),
+        \ '\co resolves a session; \cn never does'
+
+Execute (the rest of the default set is still mapped):
+  for [key, cmd] in [['\ct', ':ClaudeToggle<CR>'], ['\cx', ':ClaudeClose<CR>'],
+        \ ['\cf', ':ClaudeFocus<CR>'], ['\cs', ':ClaudeSessions<CR>'],
+        \ ['\cd', ':ClaudeDiff<CR>'], ['\cw', ':ClaudeWorkspaces<CR>'],
+        \ ['\cm', ':ClaudeModel<CR>'], ['\cr', ':ClaudeResume<CR>'],
+        \ ['\ci', ':ClaudeInput<CR>']]
+    AssertEqual cmd, maparg(key, 'n'), key . ' should be mapped'
+  endfor
+
+Execute (every mapped command exists):
+  for cmd in ['ClaudeOpen', 'ClaudeNew', 'ClaudeToggle', 'ClaudeClose',
+        \ 'ClaudeFocus', 'ClaudeSessions', 'ClaudeDiff', 'ClaudeWorkspaces',
+        \ 'ClaudeModel', 'ClaudeResume', 'ClaudeInput']
+    AssertEqual 2, exists(':' . cmd), cmd . ' should be defined'
+  endfor

@@ -15,6 +15,7 @@ Before:
   let g:_store_dir = tempname()
   call mkdir(g:_store_dir, 'p')
   let g:claude_session_store = g:_store_dir . '/sessions.json'
+  let g:_saved_limit = get(g:, 'claude_panel_closed_limit', 10)
   let g:claude_panel_closed_limit = 0
   let g:claude_panel_nerdtree_stack = 1
   let g:claude_panel_height = 15
@@ -73,6 +74,7 @@ After:
   unlet! g:_fake_win
   unlet! t:NERDTreeBufName
   let g:claude_cmd           = g:_saved_cmd
+  let g:claude_panel_closed_limit = g:_saved_limit
   let g:claude_session_store = g:_saved_store
   call claude#store#_reset()
   call delete(g:_store_dir, 'rf')

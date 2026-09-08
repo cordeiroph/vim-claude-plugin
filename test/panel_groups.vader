@@ -1,0 +1,210 @@
+" Tests for the state view: the four groups the panel draws by default, what
+" each row says, and how the Done tail folds, caps and hides.
+"
+" No terminal and no jobs: every record here is fabricated.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  call claude#store#_reset()
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_saved_rows  = get(g:, 'claude_panel_done_rows', 10)
+  let g:_saved_cwd = getcwd()
+  let g:_dir = tempname()
+  call mkdir(g:_dir, 'p')
+  let g:claude_session_store = g:_dir . '/sessions.json'
+  " Somewhere with no transcripts of its own: refresh() scans the directory
+  " Vim is in, and this file is about fabricated records only.
+  execute 'cd ' . fnameescape(g:_dir)
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  call claude#store#_reset()
+  let g:claude_session_store   = g:_saved_store
+  let g:claude_panel_done_rows = g:_saved_rows
+  call delete(g:_dir, 'rf')
+  only
+
+" ── the groups ───────────────────────────────────────────────────────────────
+
+Execute (the state view is what the panel opens on):
+  call claude#panel#open()
+  AssertEqual 'state', claude#panel#_grouping()
+
+Execute (sessions are grouped by what they are doing, in a fixed order):
+  call claude#session#_inject({'name': 'asking',   'status': 'waiting'})
+  call claude#session#_inject({'name': 'running',  'status': 'active'})
+  call claude#session#_inject({'name': 'sitting',  'status': 'idle'})
+  call claude#session#_inject({'name': 'finished', 'status': 'closed'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▾ Needs you (1)', 'the waiting group is missing: ' . text
+  Assert text =~# '▾ Working (1)',   'the working group is missing'
+  Assert text =~# '▾ Idle (1)',      'the idle group is missing'
+  Assert text =~# '▸ Done (1)',      'the done group is missing'
+
+  let order = filter(claude#panel#_lines(), {_, l -> l =~# '^[▾▸] '})
+  Assert order[0] =~# 'Needs you', 'who needs me comes first: ' . string(order)
+  Assert order[1] =~# 'Working'
+  Assert order[2] =~# 'Idle'
+  Assert order[3] =~# 'Done'
+
+Execute (a group with nothing in it is not drawn at all):
+  call claude#session#_inject({'name': 'running', 'status': 'active'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'Working (1)'
+  Assert text !~# 'Needs you', 'nothing is waiting, so the group is absent'
+  Assert text !~# 'Idle',      'nor is anything idle'
+  Assert text !~# 'Done',      'and nothing has finished'
+
+Execute (an empty registry still says so):
+  call claude#panel#open()
+  Assert index(claude#panel#_lines(), '  (no sessions)') >= 0
+
+Execute (the waiting glyph marks the row):
+  call claude#session#_inject({'name': 'asking', 'status': 'waiting'})
+  call claude#panel#open()
+  Assert join(claude#panel#_lines(), "\n") =~# '✻ asking',
+        \ 'a waiting session gets its own glyph'
+
+Execute (ascii mode has a glyph for waiting too):
+  let g:claude_panel_ascii = 1
+  AssertEqual '[?]', claude#panel#icon('waiting')
+  unlet g:claude_panel_ascii
+
+" ── the header ───────────────────────────────────────────────────────────────
+
+Execute (the header counts what is waiting, not what is live):
+  call claude#session#_inject({'name': 'asking one', 'status': 'waiting'})
+  call claude#session#_inject({'name': 'asking two', 'status': 'waiting'})
+  call claude#session#_inject({'name': 'running',    'status': 'active'})
+  call claude#panel#open()
+  Assert claude#panel#_lines()[0] =~# '2 waiting$',
+        \ 'the header should lead with the question: ' . claude#panel#_lines()[0]
+
+Execute (with nothing waiting it counts live sessions, as it always has):
+  call claude#session#_inject({'name': 'running', 'status': 'active'})
+  call claude#session#_inject({'name': 'gone',    'status': 'closed'})
+  call claude#panel#open()
+  Assert claude#panel#_lines()[0] =~# '(1)$'
+
+" ── the row ──────────────────────────────────────────────────────────────────
+
+Execute (a row says where the session lives and how long ago it stirred):
+  call claude#session#_inject({'name': 'panel design', 'status': 'idle',
+        \ 'worktree': '/w/alpha', 'branch': 'main',
+        \ 'created': localtime() - 7200})
+  call claude#panel#open()
+  let row = filter(claude#panel#_lines(), {_, l -> l =~# 'panel design'})[0]
+  Assert row =~# 'alpha', 'the row should name the workspace: ' . row
+  Assert row =~# '2h$',   'and how old it is: ' . row
+  AssertEqual 35, strchars(row), 'the suffix is flush with the panel edge'
+
+Execute (a long label is trimmed rather than pushing the suffix off):
+  call claude#session#_inject({
+        \ 'name': 'rework the whole session panel and everything under it',
+        \ 'status': 'idle', 'worktree': '/w/alpha', 'branch': 'main'})
+  call claude#panel#open()
+  let row = filter(claude#panel#_lines(), {_, l -> l =~# 'alpha'})[0]
+  AssertEqual 35, strchars(row)
+  Assert row =~# '…', 'the label should be the part that gives: ' . row
+
+Execute (the place view drops the workspace, which its parent rows already say):
+  call claude#session#_inject({'name': 'panel design', 'status': 'idle',
+        \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main',
+        \ 'created': localtime() - 7200})
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  let row = filter(claude#panel#_lines(), {_, l -> l =~# 'panel design'})[0]
+  Assert row =~# '2h$',    'the age stays: ' . row
+  Assert row !~# 'alpha ', 'the workspace does not: ' . row
+
+" ── the Done tail ────────────────────────────────────────────────────────────
+
+Execute (Done starts folded):
+  call claude#session#_inject({'name': 'finished', 'status': 'closed'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▸ Done (1)', 'the tail starts shut: ' . text
+  Assert text !~# 'finished',   'so its rows are not drawn'
+
+Execute (and opens on the fold key like any other group):
+  call claude#session#_inject({'name': 'finished', 'status': 'closed'})
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('Done', 'W')
+  normal za
+  Assert join(claude#panel#_lines(), "\n") =~# 'finished',
+        \ 'unfolding Done should draw its rows'
+
+Execute (Done stops after done_rows and says how many are left):
+  let g:claude_panel_done_rows = 3
+  for i in range(9)
+    call claude#session#_inject({'id': 'c' . i, 'name': 'done ' . i,
+          \ 'status': 'closed'})
+  endfor
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('Done', 'W')
+  normal za
+  let lines = claude#panel#_lines()
+  AssertEqual 3, len(filter(copy(lines), {_, l -> l =~# '✗ done '})),
+        \ 'only done_rows of them are drawn'
+  Assert join(lines, "\n") =~# '… 6 more', 'and the rest are counted'
+
+Execute (activating that row draws the rest):
+  let g:claude_panel_done_rows = 3
+  for i in range(9)
+    call claude#session#_inject({'id': 'c' . i, 'name': 'done ' . i,
+          \ 'status': 'closed'})
+  endfor
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('Done', 'W')
+  normal za
+  call search('more', 'W')
+  execute "normal \<CR>"
+  let lines = claude#panel#_lines()
+  AssertEqual 9, len(filter(copy(lines), {_, l -> l =~# '✗ done '})),
+        \ 'all of them, once asked for'
+  Assert join(lines, "\n") !~# 'more'
+
+Execute (Done reports the rows the hide rule is keeping out):
+  call claude#session#_inject({'id': 'kept', 'name': 'named one',
+        \ 'status': 'closed'})
+  call claude#session#_inject({'id': 'anon', 'name': '', 'named': 0,
+        \ 'status': 'closed'})
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search('Done', 'W')
+  normal za
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▾ Done (1)',              'only the listed one is counted'
+  Assert text =~# '… 1 hidden — I to show',  'the rest are reported: ' . text
+
+Execute (Done is drawn even when every row in it is hidden):
+  call claude#session#_inject({'id': 'anon', 'name': '', 'named': 0,
+        \ 'status': 'closed'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'Done (0)', 'the tail must never be invisible: ' . text
+
+Execute (I reveals them, and the note goes away with them):
+  call claude#session#_inject({'id': 'anon', 'name': '', 'named': 0,
+        \ 'status': 'closed'})
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  normal I
+  call cursor(1, 1)
+  call search('Done', 'W')
+  normal za
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'unnamed anon', 'I should reveal it: ' . text
+  Assert text !~# 'hidden — I',   'and stop reporting a count'

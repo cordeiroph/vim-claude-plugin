@@ -42,6 +42,7 @@ Execute (an empty registry renders the placeholder, not an empty buffer):
 " ── grouping ─────────────────────────────────────────────────────────────────
 
 Execute (sessions nest Project > Worktree > Branch):
+  " The place view: g swaps to it, and these are its rows.
   call claude#session#_inject({'name': 'panel design', 'status': 'active',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
   call claude#session#_inject({'name': 'registry spike', 'status': 'idle',
@@ -49,6 +50,7 @@ Execute (sessions nest Project > Worktree > Branch):
   call claude#session#_inject({'name': 'E947 repro', 'status': 'closed',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha-wt', 'branch': 'hotfix'})
   call claude#panel#open()
+  call claude#panel#_grouping('place')
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# '▾ alpha',        'project node missing: ' . text
   Assert text =~# '  ▾ /w/alpha\n', 'worktree node missing: ' . text
@@ -65,6 +67,7 @@ Execute (two worktrees of one repo share a single project node):
   call claude#session#_inject({'name': 'b', 'status': 'active',
         \ 'project': '/w/repo', 'worktree': '/w/repo-wt', 'branch': 'topic'})
   call claude#panel#open()
+  call claude#panel#_grouping('place')
   let lines = claude#panel#_lines()
   let projects = filter(copy(lines), {_, l -> l =~# '^[▾▸] '})
   AssertEqual 1, len(projects),
@@ -108,9 +111,10 @@ Execute (same-named sessions in one group get a display-only suffix):
   call claude#session#_inject({'name': 'work', 'status': 'active',
         \ 'worktree': '/w/x', 'branch': 'main'})
   call claude#panel#open()
-  let text = join(claude#panel#_lines(), "\n")
-  Assert text =~# 'work\n',      'the first duplicate keeps its bare name'
-  Assert text =~# 'work (2)',    'the second should be suffixed: ' . text
+  let rows = filter(claude#panel#_lines(), {_, l -> l =~# 'work'})
+  AssertEqual 2, len(rows), 'both should be listed: ' . string(rows)
+  Assert rows[0] !~# '(2)', 'the first duplicate keeps its bare name'
+  Assert rows[1] =~# 'work (2)', 'the second should be suffixed: ' . rows[1]
   " The stored names are untouched.
   let names = map(claude#session#list(), {_, r -> r.name})
   AssertEqual ['work', 'work'], names
@@ -135,6 +139,7 @@ Execute (folding a project hides its children and persists across redraws):
   call claude#session#_inject({'name': 'hidden me', 'status': 'active',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
   call claude#panel#open()
+  call claude#panel#_grouping('place')
   Assert join(claude#panel#_lines(), "\n") =~# 'hidden me'
   " Put the cursor on the project node and fold it.
   call cursor(3, 1)
@@ -212,6 +217,7 @@ Execute (every panel element is highlighted):
   call claude#session#_inject({'name': 'gone', 'status': 'closed',
         \ 'worktree': '/w/x', 'branch': 'main'})
   call claude#panel#open()
+  call claude#panel#_grouping('place')
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   let seen = {}
   for l in range(1, line('$'))

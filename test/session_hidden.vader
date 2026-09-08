@@ -1,0 +1,198 @@
+" Tests for the tail the panel buries — the finished sessions nobody named,
+" and the finished sessions nobody has touched for days — and for the I toggle
+" that reveals them. No terminal, no jobs.
+"
+" Most of these are about the naming rule, so the staleness rule is turned off
+" for them and tested on its own at the bottom of the file.
+
+Before:
+  call claude#session#_reset()
+  call claude#store#_reset()
+  let g:_saved_cwd   = getcwd()
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_dir = tempname()
+  call mkdir(g:_dir, 'p')
+  let g:_dir = resolve(g:_dir)
+  let g:claude_session_store = g:_dir . '/sessions.json'
+  let g:_saved_stale = get(g:, 'claude_panel_stale_days', 2)
+  let g:claude_panel_stale_days = 0
+  execute 'cd ' . fnameescape(g:_dir)
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  let g:claude_session_store    = g:_saved_store
+  let g:claude_panel_stale_days = g:_saved_stale
+  call claude#session#_reset()
+  call claude#store#_reset()
+  call delete(g:_dir, 'rf')
+
+" ── the filter ───────────────────────────────────────────────────────────────
+
+Execute (an unnamed session is left out of the list):
+  call claude#session#_inject({'id': 'aaa', 'name': 'panel design'})
+  call claude#session#_inject({'id': 'bbb', 'name': '', 'named': 0})
+  let ids = map(copy(claude#session#list()), {_, r -> r.id})
+  AssertEqual ['aaa'], ids
+
+Execute (the toggle reveals it, and puts it away again):
+  call claude#session#_inject({'id': 'aaa', 'name': 'panel design'})
+  call claude#session#_inject({'id': 'bbb', 'name': '', 'named': 0})
+
+  AssertEqual 1, claude#session#toggle_hidden()
+  Assert claude#session#show_hidden(), 'hidden sessions should be shown'
+  let ids = sort(map(copy(claude#session#list()), {_, r -> r.id}))
+  AssertEqual ['aaa', 'bbb'], ids
+
+  AssertEqual 0, claude#session#toggle_hidden()
+  AssertEqual ['aaa'], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (a live session is never hidden, named or not):
+  call claude#session#_inject(
+        \ {'id': 'bbb', 'name': '', 'named': 0, 'status': 'active'})
+  AssertEqual ['bbb'], map(copy(claude#session#list()), {_, r -> r.id}),
+        \ 'an unnamed session that is running is the last thing to hide'
+  AssertEqual 1, len(claude#session#live())
+
+Execute (the same session is hidden once it finishes):
+  call claude#session#_inject(
+        \ {'id': 'bbb', 'name': '', 'named': 0, 'status': 'closed'})
+  AssertEqual [], claude#session#list()
+  AssertEqual 1, len(claude#session#all()),
+        \ 'all() is the unfiltered view: the resume picker still sees it'
+
+Execute (an injected record is named unless it says otherwise):
+  call claude#session#_inject({'id': 'aaa', 'name': 'panel design'})
+  AssertEqual 1, len(claude#session#list())
+
+" ── the tree ─────────────────────────────────────────────────────────────────
+
+Execute (a branch group whose sessions are all hidden is not built):
+  call claude#session#_inject({'id': 'aaa', 'name': 'named one',
+        \ 'project': '/p', 'worktree': '/p', 'branch': 'main'})
+  call claude#session#_inject({'id': 'bbb', 'name': '', 'named': 0,
+        \ 'project': '/p', 'worktree': '/p', 'branch': 'sidebar'})
+
+  let tree = claude#session#tree()
+  AssertEqual 1, len(tree)
+  let branches = map(copy(tree[0].worktrees[0].branches), {_, b -> b.label})
+  AssertEqual ['main'], branches
+
+  call claude#session#toggle_hidden()
+  let tree = claude#session#tree()
+  let branches = sort(map(copy(tree[0].worktrees[0].branches),
+        \ {_, b -> b.label}))
+  AssertEqual ['main', 'sidebar'], branches
+
+" ── labels ───────────────────────────────────────────────────────────────────
+
+Execute (an unnamed session is labelled by its id):
+  let rec = {'id': 'abcdef0123456789', 'name': ''}
+  AssertEqual '(unnamed abcdef01)', claude#session#label(rec)
+
+Execute (a named session is labelled by its name):
+  AssertEqual 'panel design',
+        \ claude#session#label({'id': 'aaa', 'name': 'panel design'})
+
+Execute (naming a session is what un-hides it):
+  call claude#session#_inject({'id': 'bbb', 'name': '', 'named': 0})
+  AssertEqual [], claude#session#list()
+  call claude#session#rename('bbb', 'given a name')
+  AssertEqual ['bbb'], map(copy(claude#session#list()), {_, r -> r.id})
+
+" ── the store ────────────────────────────────────────────────────────────────
+
+Execute (a stored entry from before the flag existed counts as named):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'old': {'name': 'named yesterday', 'cwd': getcwd(),
+        \          'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual ['old'], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (a timestamp name from an older version is not a name):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'auto': {'name': 'claude 2026-09-07 15:41', 'cwd': getcwd(),
+        \           'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual [], claude#session#list(),
+        \ 'nobody chose that name, so it should be hidden'
+  call claude#session#toggle_hidden()
+  AssertEqual ['auto'], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (a timestamp name is not a name even when the record claims it is):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'auto': {'name': 'claude 2026-09-08 09:53', 'named': 1,
+        \           'cwd': getcwd(), 'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual [], claude#session#list(),
+        \ 'records written while the prompt was skipped are hidden too'
+
+Execute (a name that merely starts like one is left alone):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'a': {'name': 'claude 2026-09-07 15:41 rewrite', 'cwd': getcwd(),
+        \        'created': 1},
+        \  'b': {'name': 'claude the sequel', 'cwd': getcwd(),
+        \        'created': 2}}})
+  call claude#session#refresh()
+  AssertEqual ['b', 'a'], map(copy(claude#session#list()), {_, r -> r.id}),
+        \ 'only the exact timestamp form is auto-generated'
+
+Execute (a stored entry that was never named stays hidden):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'auto': {'name': '', 'named': 0, 'cwd': getcwd(),
+        \           'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual [], claude#session#list()
+  call claude#session#toggle_hidden()
+  AssertEqual ['auto'], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (a stored entry remembers the workspace it ran in):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'ws': {'name': 'in a worktree', 'named': 1, 'workspace': 'feature',
+        \         'cwd': getcwd(), 'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual 'feature', claude#session#get('ws').workspace
+
+Execute (a reset puts the toggle back):
+  call claude#session#toggle_hidden()
+  call claude#session#_reset()
+  Assert !claude#session#show_hidden()
+
+" ── the staleness rule ───────────────────────────────────────────────────────
+"
+" A finished session is buried once nobody has touched it for
+" g:claude_panel_stale_days, whoever named it.
+
+Execute (a named session finished days ago is buried):
+  let g:claude_panel_stale_days = 2
+  call claude#session#_inject({'id': 'old', 'name': 'last week',
+        \ 'status': 'closed', 'created': localtime() - 9 * 86400})
+  AssertEqual [], claude#session#list()
+  call claude#session#toggle_hidden()
+  AssertEqual ['old'], map(copy(claude#session#list()), {_, r -> r.id}),
+        \ 'I reveals the stale ones too'
+
+Execute (a named session finished this morning is not):
+  let g:claude_panel_stale_days = 2
+  call claude#session#_inject({'id': 'new', 'name': 'this morning',
+        \ 'status': 'closed', 'created': localtime() - 3600})
+  AssertEqual ['new'], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (opening a session is what keeps it out of the tail):
+  let g:claude_panel_stale_days = 2
+  call claude#session#_inject({'id': 'old', 'name': 'made long ago',
+        \ 'status': 'closed', 'created': localtime() - 9 * 86400,
+        \ 'last_focus': localtime() - 600})
+  AssertEqual ['old'], map(copy(claude#session#list()), {_, r -> r.id}),
+        \ 'age is measured from the last time it was opened'
+
+Execute (a stale session that is running again is listed):
+  let g:claude_panel_stale_days = 2
+  call claude#session#_inject({'id': 'old', 'name': 'back from the dead',
+        \ 'status': 'active', 'created': localtime() - 9 * 86400})
+  AssertEqual ['old'], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (zero days buries nothing but the nameless):
+  let g:claude_panel_stale_days = 0
+  call claude#session#_inject({'id': 'old', 'name': 'ancient',
+        \ 'status': 'closed', 'created': 1})
+  AssertEqual ['old'], map(copy(claude#session#list()), {_, r -> r.id})

@@ -9,9 +9,10 @@ CONTENTS                                                        *claude-contents
   4. Commands .................. |claude-commands|
   5. Mappings .................. |claude-mappings|
   6. Session panel ............. |claude-session-panel|
-  7. Model selection ........... |claude-models|
-  8. Input window .............. |claude-input|
-  9. License ................... |claude-license|
+  7. Workspaces ................ |claude-workspaces|
+  8. Model selection ........... |claude-models|
+  9. Input window .............. |claude-input|
+ 10. License ................... |claude-license|
 
 ==============================================================================
 1. INTRODUCTION                                             *claude-introduction*
@@ -109,9 +110,51 @@ g:claude_panel_refresh_ms~
                                                       *g:claude_panel_idle_secs*
 g:claude_panel_idle_secs~
   Seconds without terminal output before a running session is shown as idle
-  rather than active.
+  rather than active. Consulted only when the bottom of the terminal says
+  nothing conclusive; see the two patterns below.
 
   Default: 30
+
+------------------------------------------------------------------------------
+                                                    *g:claude_panel_working_pat*
+g:claude_panel_working_pat~
+  Pattern marking a session as working, matched against the bottom rows of its
+  terminal — where Claude prints its spinner while it runs.
+
+  Default: 'esc to interrupt'
+
+------------------------------------------------------------------------------
+                                                    *g:claude_panel_waiting_pat*
+g:claude_panel_waiting_pat~
+  Pattern marking a session as waiting for you: a numbered choice, a
+  permission question, a yes/no. Matching sessions are collected under
+  "Needs you" at the top of the panel and counted in its header.
+
+  Both patterns track another program's output, which is not this plugin's to
+  promise, so both are yours to change. A pattern that stops matching costs
+  the state, never a wrong answer: the session falls back to
+  |g:claude_panel_idle_secs|.
+
+  Default: '\%(^\|\n\)\s*>\=\s*1\.\s\|Do you want\|(y/n)'
+           (the first alternative matches Claude's numbered choices)
+
+------------------------------------------------------------------------------
+                                                    *g:claude_panel_stale_days*
+g:claude_panel_stale_days~
+  Days after which a finished session is hidden from the panel, whoever named
+  it. 0 hides none. `I` reveals them (|claude-unnamed|).
+
+  Default: 2
+
+------------------------------------------------------------------------------
+                                                     *g:claude_panel_done_rows*
+g:claude_panel_done_rows~
+  How many finished sessions the Done group draws before it stops with a
+  `... N more` row. Distinct from |g:claude_panel_closed_limit|, which caps
+  how many transcripts are read from disk in the first place: how much is
+  scanned and how much is drawn are different questions.
+
+  Default: 10
 
 ------------------------------------------------------------------------------
                                                     *g:claude_panel_show_closed*
@@ -209,8 +252,10 @@ g:claude_session_store~
 ------------------------------------------------------------------------------
                                                   *g:claude_session_prompt_name*
 g:claude_session_prompt_name~
-  When 1 (default), starting a session prompts for a name. Set to 0 to name
-  new sessions after the current time instead.
+  When 1 (default), starting a session asks for a branch and then a name
+  (see |claude-workspaces|). Set to 0 to skip both: the session gets no
+  workspace and no name, Claude names the conversation itself, and the row
+  stays hidden until `I` reveals it (see |claude-unnamed|).
 
   Default: 1
 
@@ -237,6 +282,32 @@ g:claude_models~
           \ 'claude-sonnet-4-6',
           \ 'claude-haiku-4-5-20251001',
           \ ]
+<
+------------------------------------------------------------------------------
+                                                        *g:claude_workspace_dir*
+g:claude_workspace_dir~
+  Parent directory for the git worktrees new workspaces check out into.
+
+  Empty (the default) puts each workspace beside the main checkout, named
+  <repo>-<workspace name>, which keeps every worktree of one project in one
+  parent directory. Set it to gather them somewhere else instead; the
+  directory is created if it does not exist.
+
+  Default: ''
+  Example: >
+    let g:claude_workspace_dir = '~/src/worktrees'
+<
+  See also: |claude-workspaces|
+
+------------------------------------------------------------------------------
+                                                      *g:claude_workspace_store*
+g:claude_workspace_store~
+  Where workspaces are persisted, with the same override-or-plugin-directory
+  rule — and the same reinstall caveat — as |g:claude_session_store|.
+
+  Default: '' (data/workspaces.json inside the plugin directory)
+  Example: >
+    let g:claude_workspace_store = '~/.claude/vim-workspaces.json'
 <
 ------------------------------------------------------------------------------
                                                    *g:claude_sidebar_toggle_key*
@@ -273,13 +344,22 @@ g:claude_no_default_mappings~
                                                                    *:ClaudeNew*
 :ClaudeNew [name]
   Start a new session even when others are already running. Without an
-  argument the name is prompted for.
+  argument the branch and then the name are prompted for, and the branch
+  decides whether the session gets a workspace of its own
+  (see |claude-workspaces|).
 
 ------------------------------------------------------------------------------
                                                                 *:ClaudeRename*
 :ClaudeRename [name]
   Rename a session. Without an argument the new name is prompted for. The name
   is remembered across Vim restarts (see |g:claude_session_store|).
+
+------------------------------------------------------------------------------
+                                                            *:ClaudeWorkspaces*
+:ClaudeWorkspaces
+  List the workspaces of this repository and choose the one to work in.
+  NERDTree is re-rooted onto the choice, and sessions started without a branch
+  run there. See |claude-workspaces|.
 
 ------------------------------------------------------------------------------
                                                               *:ClaudeSessions*
@@ -338,7 +418,7 @@ g:claude_no_default_mappings~
   Toggle the input window for composing multi-line messages. If the window is
   already open, the content is discarded and the window closes.
 
-  Press <C-s> to send the buffer contents to Claude; press <Esc> (normal
+  Press <C-s> to send the buffer contents to Claude; press CTRL-C (normal
   mode) to save the draft and hide the window; press `q` (normal mode) to
   discard the draft and close.
 
@@ -379,10 +459,12 @@ g:claude_no_default_mappings~
 Default mappings (disabled when |g:claude_no_default_mappings| is set):
 
   <leader>co    Open Claude (|:ClaudeOpen|)
+  <leader>cn    Start a new session (|:ClaudeNew|)
   <leader>ct    Toggle Claude window (|:ClaudeToggle|)
   <leader>cx    Close Claude (|:ClaudeClose|)
   <leader>cf    Focus Claude window (|:ClaudeFocus|)
   <leader>cs    Toggle the session panel (|:ClaudeSessions|)
+  <leader>cw    Choose the workspace to work in (|:ClaudeWorkspaces|)
   <C-z>         Raise or dismiss the whole sidebar column (|:ClaudeSidebars|).
                 Normal mode only, so |CTRL-Z| still suspends Vim from a
                 terminal buffer and from insert mode. Rebind or disable it
@@ -414,34 +496,87 @@ To define your own mappings after disabling defaults: >
 listing every Claude session: the ones running in this Vim instance and the
 ones that have ended but can still be resumed from their transcript.
 
-Sessions are grouped by project, then worktree, then the branch that was
-checked out when the session started. Worktrees of one repository share a
-single project node. >
+The panel has two views, swapped with `g`.
 
-    Claude Sessions               (3)
+The state view                                        *claude-panel-state*
+  What each session is doing. This is what the panel opens on, because with
+  several agents running the question is almost always "which one is waiting
+  for me?" — and only this view answers it without being asked. >
+
+    Claude Sessions           2 waiting
+
+    v Needs you (2)
+      * pick a diff base        wt . 2m
+      * rerun the tests?      root . 5m
+    v Working (1)
+      o panel rework          root . 1m
+    v Idle (1)
+      . user_interface        root . 2h
+    > Done (10)
+
+    ? help
+<
+  Four groups, always in this order: Needs you, Working, Idle, Done. A group
+  with nothing in it is not drawn — except Done, which is always listed while
+  the registry holds a finished session, folded shut (|claude-panel-done|).
+
+  Each row ends with the workspace the session lives in and how long ago it
+  last stirred, so a state-grouped row still says where it is.
+
+The place view                                        *claude-panel-place*
+  Where the sessions live: project, then worktree, then the branch that was
+  checked out when the session started. Worktrees of one repository share a
+  single project node. Press `g` for it, and `g` again to come back. >
+
+    Claude Sessions           2 waiting
 
     v claude-pluing
       v ~/Workspace/vim/claude-pluing
         v main
-          * panel design
-          o doc rewrite
+          o panel design           1m
+          . doc rewrite            2h
         v feature/session-registry
-          o registry spike
+          . registry spike         4h
       v ~/Workspace/vim/wt-hotfix
         v hotfix/e947
-          x E947 repro
+          x E947 repro             2d
 
     ? help
 <
-The glyph before each name is the session's status:
+  Each view keeps its own folds, so swapping back and forth loses neither.
 
-  active   the process is running and has produced output recently
-  idle     the process is running but has been quiet for
-           |g:claude_panel_idle_secs|
+Status                                                *claude-panel-status*
+  The glyph before each name is what the session is doing:
+
+  waiting  the terminal is showing a question — a permission prompt, a
+           numbered choice, a yes/no. These sessions are what "Needs you"
+           collects, and the header counts them
+  active   the process is working, or has produced output recently
+  idle     the process is running, is not asking anything, and has been quiet
+           for |g:claude_panel_idle_secs|
   closed   the process is not running here; the conversation can be resumed
 
-Status is polled only while the panel is visible; hiding it stops the poller
-completely.
+  Waiting and working are read from the bottom rows of the session's terminal,
+  where Claude prints its own state, using |g:claude_panel_waiting_pat| and
+  |g:claude_panel_working_pat|. When neither matches, the idle timer decides,
+  as it did before those patterns existed.
+
+  Status is polled only while the panel is visible; hiding it stops the poller
+  completely.
+
+The Done group                                        *claude-panel-done*
+  Finished sessions. It starts folded, draws at most
+  |g:claude_panel_done_rows| of them with a `... N more` row for the rest, and
+  hides the ones nobody named or nobody has touched for
+  |g:claude_panel_stale_days| days (|claude-unnamed|). It reports how many it
+  is hiding, and `I` reveals them.
+
+Finding one                                           *claude-panel-filter*
+  `/` filters every group by what a row could be recognised by: its label, its
+  workspace and its branch. Groups left empty are dropped, folds that hid a
+  match are opened, and the hidden tail is searched too — a row you asked for
+  by name is not a row to hide. The header shows the active filter in place of
+  the count; `/` with an empty answer clears it.
 
 Colours~
   The panel borrows NERDTree's palette so the two halves of the sidebar look
@@ -459,6 +594,7 @@ Colours~
     highlight link ClaudeSessionMarker     Directory
     highlight link ClaudeSessionName       Normal
     highlight link ClaudeSessionNameClosed NonText
+    highlight link ClaudeSessionWaiting    WarningMsg
     highlight link ClaudeSessionActive     Number
     highlight link ClaudeSessionIdle       Comment
     highlight link ClaudeSessionClosed     Comment
@@ -471,11 +607,17 @@ Keys inside the panel~
   i            Open the session in a horizontal split
   s            Open the session in a vertical split
   t            Open the session in a new tab
-  n            Start a new session
+  n            Start a session where the row under the cursor lives, asking
+               nothing at all
+  N            Start a session, asking for a branch and then a name
+               (|claude-workspaces|)
+  g            Swap the top level: state <-> place
+  /            Filter every group (|claude-panel-filter|)
   r            Rename the session under the cursor
   d            End the session (its transcript is kept, so it can be resumed)
   D            Purge: delete the session's transcript and stored name
   R            Rescan transcripts and rebuild the tree
+  I            Show or hide the buried sessions (|claude-unnamed|)
   <Space>, za  Fold or unfold the node under the cursor
   q            Hide the panel
   ?            Toggle the inline key reference
@@ -667,7 +809,85 @@ survive a Vim restart. Sessions that were never named in Vim fall back to their
 timestamp and first message.
 
 ==============================================================================
-7. MODEL SELECTION                                              *claude-models*
+7. WORKSPACES                                                *claude-workspaces*
+
+A workspace is a git worktree that a session owns: its own checkout of one
+branch, so two sessions can work on two branches at once without fighting over
+a single directory.
+
+Creating one~
+  Starting a session (|:ClaudeNew|, or `n` in the panel) asks two questions:
+>
+    Branch (blank for no workspace): <Tab>
+    Session name:
+<
+  The branch completes over local and remote branches, the same list
+  |:ClaudeDiffBase| offers. A name that matches nothing is accepted and
+  becomes a new branch off the current HEAD; a branch that exists only on a
+  remote gets a local tracking branch.
+
+  Between them the two answers decide where the session runs:
+
+  branch + name   a workspace called <name>, checked out on <branch>
+  branch only     a workspace named after the branch
+  name only       no workspace: the session runs in the selected workspace,
+                  or in the current directory
+  neither         the same, and the session is left unnamed
+
+  A workspace name is unique within the repository: a name already taken gains
+  a number, so a second workspace on `feature-branch` becomes
+  `feature-branch-1`, then `feature-branch-2`. Slashes become dashes, so
+  `feature/deep` is one directory and not a tree.
+
+  The worktree is created beside the main checkout as <repo>-<name>, or
+  wherever |g:claude_workspace_dir| points. Workspaces are remembered across
+  Vim restarts in |g:claude_workspace_store|, keyed by repository.
+
+  A branch that already has a checkout is not an error: the session runs in
+  that checkout. If it is a workspace the session joins it; if it is a worktree
+  you made yourself, it is adopted as a workspace and listed from then on; and
+  if it is the main checkout, the session simply runs there.
+
+  Nothing is created when the directory is in the way; you are told, and the
+  session runs where you already were.
+
+  Removing a workspace is left to `git worktree remove`. A worktree that is
+  gone drops out of the list on its own.
+
+Choosing one~
+  |:ClaudeWorkspaces| (or |<leader>cw|) lists the main checkout and every
+  workspace, and re-roots NERDTree onto the one you pick so the file tree
+  shows that checkout and nothing else. The choice is where sessions started
+  without a branch run, and it lasts for this Vim session only.
+
+Unnamed sessions, and the buried tail                            *claude-unnamed*
+  Leaving both prompts blank is a real answer: the session goes unnamed and
+  Claude names the conversation itself. Sessions carrying a
+  `claude <date> <time>` name count as unnamed too — that is what earlier
+  versions minted when the prompt was left empty, so nobody ever chose it.
+
+  An unnamed session is not a nameless row. It is labelled by the first thing
+  that was asked of it, read from its transcript, and only falls back to its
+  id (`(unnamed 4f3c9a02)`) when there is no message yet.
+
+  A finished session is buried — left out of the panel list, the way NERDTree
+  leaves out dotfiles — when either is true:
+
+    - nobody named it, or
+    - nobody has touched it for |g:claude_panel_stale_days| days.
+
+  A running session is never buried, whatever it is called: the one that is
+  waiting for you is the last thing to hide.
+
+  Press `I` in the panel to show the buried ones, and again to put them away.
+  Renaming one with `r` un-hides it for good, until it goes stale.
+
+  They are hidden from the panel list only. A buried session still counts in
+  the panel header while it runs, still appears in the session pickers, still
+  appears in |:ClaudeResume|, and still runs.
+
+==============================================================================
+8. MODEL SELECTION                                              *claude-models*
 
 |:ClaudeModel| (or |<leader>cm|) presents a numbered list built from
 |g:claude_models| and sends `/model <name>` to Claude for the chosen entry.
@@ -675,16 +895,19 @@ You can call this at any point during a session to switch models
 mid-conversation. Opens a new session first if none is running.
 
 ==============================================================================
-8. INPUT WINDOW                                                   *claude-input*
+9. INPUT WINDOW                                                   *claude-input*
 
 |:ClaudeInput| (or |<leader>ci|) toggles a dedicated buffer for composing
 multi-line prompts. A 10-line horizontal split opens at the bottom of the
 screen.
 
 Pressing |<leader>ci| again discards the content and closes the window.
-To preserve work-in-progress text, press <Esc> instead — it saves the current
+To preserve work-in-progress text, press CTRL-C instead — it saves the current
 text as a draft and hides the window. The draft is automatically restored the
 next time the window opens.
+
+The window opens in insert mode, so <Esc> is left to do what it always does:
+leave insert mode. Press it, then CTRL-C, or CTRL-C twice.
 
 The buffer is backed by a temporary `.md` file, so filetype-aware features
 work: syntax highlighting, spell checking, and Copilot completions (if
@@ -693,7 +916,7 @@ vim-copilot is installed).
 Keys inside the input window~
   <C-s>    Send the buffer contents to Claude and close the window.
            Opens a new session automatically if Claude is not running.
-  <Esc>    Save the draft and hide the window (normal mode).
+  <C-c>    Save the draft and hide the window (normal mode).
   q        Discard the draft and close (normal mode).
 
 Completions~
@@ -714,7 +937,7 @@ Sending behaviour~
   moves to the Claude terminal automatically.
 
 ==============================================================================
-9. LICENSE                                                       *claude-license*
+10. LICENSE                                                      *claude-license*
 
 MIT License. Copyright (c) 2024 pedro cordeiro.
 

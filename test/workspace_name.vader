@@ -1,0 +1,95 @@
+" Tests for workspace naming — the uniquifying suffix and the branch fallback.
+
+Before:
+  call claude#workspace#_reset()
+  call claude#store#_reset()
+  let g:_saved_cwd   = getcwd()
+  let g:_saved_store = get(g:, 'claude_workspace_store', '')
+  let g:_saved_dir   = get(g:, 'claude_workspace_dir', '')
+
+  let g:_root = tempname()
+  call mkdir(g:_root, 'p')
+  let g:_root = resolve(g:_root)
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo, 'p')
+  let g:_git  = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_git . 'init -q -b main')
+  call system(g:_git . 'config user.email t@t')
+  call system(g:_git . 'config user.name test')
+  call writefile(['hello'], g:_repo . '/file.txt')
+  call system(g:_git . 'add -A')
+  call system(g:_git . 'commit -qm first')
+
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  " Out of the way of the repository, so a name can be reused freely.
+  let g:claude_workspace_dir   = g:_root . '/trees'
+  execute 'cd ' . fnameescape(g:_repo)
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  let g:claude_workspace_store = g:_saved_store
+  let g:claude_workspace_dir   = g:_saved_dir
+  call claude#workspace#_reset()
+  call claude#store#_reset()
+  call delete(g:_root, 'rf')
+
+" ── unique_name ──────────────────────────────────────────────────────────────
+
+Execute (a free name is returned unchanged):
+  AssertEqual 'feature-branch',
+        \ claude#workspace#unique_name('feature-branch')
+
+Execute (a taken name gains a number, and keeps counting):
+  call system(g:_git . 'branch feature-branch')
+  call claude#workspace#create('feature-branch', '')
+  AssertEqual 'feature-branch-1',
+        \ claude#workspace#unique_name('feature-branch')
+
+  call system(g:_git . 'branch second')
+  call claude#workspace#create('second', 'feature-branch')
+  AssertEqual 'feature-branch-2',
+        \ claude#workspace#unique_name('feature-branch')
+
+Execute (slashes and spaces become one directory-safe segment):
+  AssertEqual 'topic-deep', claude#workspace#unique_name('topic/deep')
+  AssertEqual 'two-words',  claude#workspace#unique_name('two words')
+
+Execute (a name that slugs away falls back to a usable one):
+  AssertEqual 'workspace', claude#workspace#unique_name('///')
+
+" ── the branch fallback ──────────────────────────────────────────────────────
+
+Execute (a blank name names the workspace after its branch):
+  call system(g:_git . 'branch feature-branch')
+  let ws = claude#workspace#create('feature-branch', '')
+  AssertEqual 'feature-branch', ws.name
+
+Execute (the second workspace on one branch is suffixed):
+  call system(g:_git . 'branch feature-branch')
+  call claude#workspace#create('feature-branch', '')
+  " The branch is taken by the first worktree, so the second names itself
+  " after another branch but asks for the same name.
+  call system(g:_git . 'branch other')
+  let ws = claude#workspace#create('other', 'feature-branch')
+  AssertEqual 'feature-branch-1', ws.name
+  AssertEqual 'other',            ws.branch
+  AssertEqual g:_root . '/trees/feature-branch-1', ws.path
+
+Execute (names are per repository, so another repo starts from scratch):
+  call system(g:_git . 'branch feature-branch')
+  call claude#workspace#create('feature-branch', '')
+
+  let other = g:_root . '/other'
+  call mkdir(other, 'p')
+  let git2 = 'git -C ' . shellescape(other) . ' '
+  call system(git2 . 'init -q -b main')
+  call system(git2 . 'config user.email t@t')
+  call system(git2 . 'config user.name test')
+  call writefile(['x'], other . '/f.txt')
+  call system(git2 . 'add -A')
+  call system(git2 . 'commit -qm first')
+  execute 'cd ' . fnameescape(other)
+  call claude#workspace#_reset()
+
+  AssertEqual 'feature-branch',
+        \ claude#workspace#unique_name('feature-branch')

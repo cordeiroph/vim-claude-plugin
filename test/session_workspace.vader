@@ -1,0 +1,326 @@
+" End-to-end tests for the branch/name prompts and the workspace a session
+" ends up running in. Real git worktrees, real terminal jobs, prompts answered
+" with feedkeys(); the CLI itself is stood in for.
+
+Before:
+  call claude#session#_reset()
+  call claude#workspace#_reset()
+  call claude#store#_reset()
+  call claude#panel#_reset()
+  let g:_saved_cwd = getcwd()
+  let g:_saved_cmd = get(g:, 'claude_cmd', 'claude')
+  let g:claude_cmd = 'sleep 30'
+  " --session-id/--name are never probed for with a stand-in command, but be
+  " explicit: this one understands neither.
+  let g:_saved_flags = get(g:, 'claude_session_flags', -1)
+  let g:claude_session_flags = 0
+  let g:_root = tempname()
+  call mkdir(g:_root, 'p')
+  let g:_root = resolve(g:_root)
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo, 'p')
+  let g:_git = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_git . 'init -q -b main')
+  call system(g:_git . 'config user.email t@t')
+  call system(g:_git . 'config user.name test')
+  call writefile(['hello'], g:_repo . '/file.txt')
+  call system(g:_git . 'add -A')
+  call system(g:_git . 'commit -qm first')
+  call system(g:_git . 'branch feature-branch')
+  " The transcript scan is capped by this, and other test files leave it at 0.
+  let g:_saved_limit = get(g:, 'claude_panel_closed_limit', 10)
+  let g:claude_panel_closed_limit = 10
+  let g:claude_session_store   = g:_root . '/sessions.json'
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  let g:claude_workspace_dir   = ''
+  execute 'cd ' . fnameescape(g:_repo)
+  let g:_transcript_dirs = []
+
+After:
+  " Any transcript directory a test fabricated. Each is named after a path
+  " under g:_root, so nothing of the user's own can be caught by this.
+  for d in g:_transcript_dirs
+    if d =~# '/\.claude/projects/' && d =~# escape(fnamemodify(g:_root, ':t'), '\')
+      call delete(d, 'rf')
+    endif
+  endfor
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  let g:claude_cmd                = g:_saved_cmd
+  let g:claude_session_flags      = g:_saved_flags
+  let g:claude_panel_closed_limit = g:_saved_limit
+  call claude#session#_reset()
+  call claude#workspace#_reset()
+  call claude#store#_reset()
+  call claude#panel#_reset()
+  call delete(g:_root, 'rf')
+  only
+
+Execute (branch + blank name: a worktree is created and the session runs in it):
+  call feedkeys("feature-branch\<CR>\<CR>", 't')
+  let id = claude#session#new('', '')
+  Assert !empty(id), 'a session should have started'
+  let rec = claude#session#get(id)
+  AssertEqual 'feature-branch', rec.name, 'named after the branch'
+  AssertEqual 'feature-branch', rec.workspace
+  AssertEqual g:_root . '/repo-feature-branch', rec.cwd
+  AssertEqual 'feature-branch', rec.branch, 'grouped under the branch'
+  AssertEqual g:_repo, rec.project, 'grouped under the main repo'
+  Assert isdirectory(rec.cwd), 'the worktree should exist'
+  AssertEqual 'run', job_status(term_getjob(rec.bufnr))
+  AssertEqual 1, len(claude#session#list()), 'it is listed'
+
+Execute (the job itself is started in the worktree, not in Vim's directory):
+  " /bin/pwd reports the directory the process was actually given.
+  let g:claude_cmd = '/bin/pwd'
+  call feedkeys("feature-branch\<CR>\<CR>", 't')
+  let id = claude#session#new('', '')
+  let bufnr = claude#session#get(id).bufnr
+  " A path wider than the terminal wraps, so read the first rows as one.
+  let printed = ''
+  for _ in range(50)
+    let printed = ''
+    for row in range(1, 3)
+      let printed .= term_getline(bufnr, row)
+    endfor
+    let printed = trim(printed)
+    if !empty(printed)
+      break
+    endif
+    sleep 20m
+  endfor
+  AssertEqual g:_root . '/repo-feature-branch', printed
+
+Execute (a second session on the same name gets a suffixed workspace):
+  call system(g:_git . 'branch second')
+  call feedkeys("feature-branch\<CR>\<CR>", 't')
+  call claude#session#new('', '')
+  call feedkeys("second\<CR>feature-branch\<CR>", 't')
+  let id = claude#session#new('', '')
+  AssertEqual 'feature-branch-1', claude#session#get(id).workspace
+  AssertEqual 'feature-branch',   claude#session#get(id).name
+
+Execute (both blank: no worktree, unnamed, hidden from the panel):
+  call feedkeys("\<CR>\<CR>", 't')
+  let id = claude#session#new('', '')
+  let rec = claude#session#get(id)
+  AssertEqual '', rec.name
+  AssertEqual '', rec.workspace
+  AssertEqual 0,  rec.named
+  AssertEqual g:_repo, rec.cwd, 'it runs where Vim already was'
+  AssertEqual [], claude#workspace#list(), 'no worktree was created'
+  " It is running, so it is listed even though nobody named it: it will label
+  " itself from its first message, and be buried once it has finished.
+  AssertEqual [id], map(copy(claude#session#list()), {_, r -> r.id})
+  call claude#session#delete(id)
+  AssertEqual [], claude#session#list(), 'finished and nameless: hidden'
+
+Execute (name only: no worktree, but listed):
+  call feedkeys("\<CR>just a name\<CR>", 't')
+  let id = claude#session#new('', '')
+  let rec = claude#session#get(id)
+  AssertEqual 'just a name', rec.name
+  AssertEqual '',            rec.workspace
+  AssertEqual g:_repo,       rec.cwd
+  AssertEqual [id], map(copy(claude#session#list()), {_, r -> r.id})
+
+Execute (a selected workspace is where a branch-less session runs):
+  let ws = claude#workspace#create('feature-branch', '')
+  call claude#workspace#set_current('feature-branch')
+  call feedkeys("\<CR>in the workspace\<CR>", 't')
+  let id = claude#session#new('', '')
+  AssertEqual ws.path, claude#session#get(id).cwd
+  AssertEqual '', claude#session#get(id).workspace,
+        \ 'it borrows the workspace rather than owning one'
+
+Execute (the panel groups a workspace session under its own worktree):
+  call feedkeys("feature-branch\<CR>\<CR>", 't')
+  call claude#session#new('', '')
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  let lines = join(claude#panel#_lines(), "\n")
+  Assert lines =~# 'repo-feature-branch', 'the worktree node should appear'
+  Assert lines =~# 'feature-branch', 'the branch node should appear'
+
+Execute (resuming puts the session back in its workspace):
+  call feedkeys("feature-branch\<CR>\<CR>", 't')
+  let id = claude#session#new('', '')
+  let dir = claude#session#get(id).cwd
+  call claude#session#delete(id)
+  AssertEqual 'closed', claude#session#status(id)
+  " Resume into a window of its own: taking over this one would fail on the
+  " modified scratch buffer the test harness is sitting in.
+  call claude#session#resume(id, 'new')
+  let bufnr = claude#session#get(id).bufnr
+  Assert bufnr != -1, 'the session should be live again'
+  AssertEqual dir, claude#session#get(id).cwd
+
+Execute (the main checkout's branch runs the session there, not in a worktree):
+  call feedkeys("main\<CR>named anyway\<CR>", 't')
+  let id = claude#session#new('', '')
+  let rec = claude#session#get(id)
+  AssertEqual 'named anyway', rec.name
+  AssertEqual '',      rec.workspace, 'the main checkout is not a workspace'
+  AssertEqual g:_repo, rec.cwd
+  AssertEqual 'main',  rec.branch
+
+Execute (a branch whose workspace exists runs the session in that workspace):
+  " Exactly the case of asking twice for one branch: the second session
+  " belongs in the worktree the first one made, not back in the main checkout.
+  let ws = claude#workspace#create('feature-branch', '')
+  call feedkeys("feature-branch\<CR>blah\<CR>", 't')
+  let id = claude#session#new('', '')
+  let rec = claude#session#get(id)
+  AssertEqual 'blah',           rec.name
+  AssertEqual ws.id,            rec.workspace, 'it joins the workspace'
+  AssertEqual ws.path,          rec.cwd
+  AssertEqual 'feature-branch', rec.branch,
+        \ 'and is grouped under its own branch, not the one Vim is on'
+  AssertEqual 1, len(claude#workspace#list()),
+        \ 'no second worktree was made for the same branch'
+
+" ── surviving a restart ──────────────────────────────────────────────────────
+"
+" Claude files a transcript under the directory a session ran in, and a
+" workspace session runs in its own worktree. Both halves of the registry —
+" the store and the transcripts — have to look past the directory Vim happens
+" to be in, or the session vanishes the next time you open Vim in the repo.
+
+Execute (a workspace session is still listed after Vim restarts in the repo):
+  call feedkeys("feature-branch\<CR>diff tree work\<CR>", 't')
+  let id = claude#session#new('', '')
+  " Both answers given, so the workspace is named after the name.
+  AssertEqual 'diff-tree-work', claude#session#get(id).workspace
+
+  " Restart: drop every in-memory record, keep what is on disk.
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#session#_reset()
+  call claude#store#_reset()
+  call claude#session#refresh()
+
+  let recs = claude#session#list()
+  AssertEqual 1, len(recs), 'the session should have come back'
+  AssertEqual 'diff tree work', recs[0].name
+  AssertEqual 'diff-tree-work', recs[0].workspace
+  AssertEqual g:_root . '/repo-diff-tree-work', recs[0].cwd
+
+Execute (it comes back grouped under its own worktree and branch):
+  call feedkeys("feature-branch\<CR>diff tree work\<CR>", 't')
+  call claude#session#new('', '')
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#session#_reset()
+  call claude#store#_reset()
+  call claude#session#refresh()
+
+  let tree = claude#session#tree()
+  AssertEqual 1, len(tree)
+  AssertEqual g:_repo, tree[0].path, 'one project node, the main checkout'
+  AssertEqual g:_root . '/repo-diff-tree-work', tree[0].worktrees[0].path
+  AssertEqual 'feature-branch', tree[0].worktrees[0].branches[0].label
+
+Execute (a transcript written in the workspace is found from the main checkout):
+  let ws = claude#workspace#create('feature-branch', '')
+  let dir = claude#session#project_dir(ws.path)
+  call add(g:_transcript_dirs, dir)
+  call mkdir(dir, 'p')
+  call writefile([json_encode({'type': 'user', 'cwd': ws.path,
+        \ 'gitBranch': 'feature-branch',
+        \ 'message': {'content': 'rework the diff tree'}})],
+        \ dir . '/11111111-2222-3333-4444-555555555555.jsonl')
+
+  call claude#session#refresh()
+  call claude#session#toggle_hidden()
+  let recs = claude#session#list()
+  AssertEqual 1, len(recs), 'the transcript should have been picked up'
+  AssertEqual ws.path,        recs[0].cwd
+  AssertEqual 'feature-branch', recs[0].branch
+  AssertEqual '', recs[0].name, 'nobody typed a name, so there is none'
+  AssertEqual 'rework the diff tree', recs[0].snippet
+  AssertEqual 'rework the diff tree', claude#session#label(recs[0]),
+        \ 'the first message labels it, as it always has'
+  AssertEqual 0, recs[0].named, 'never named here, so hidden by default'
+
+Execute (a session from another repository is not adopted):
+  let other = g:_root . '/other'
+  call mkdir(other, 'p')
+  call system('git -C ' . shellescape(other) . ' init -q -b main')
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'elsewhere': {'name': 'not ours', 'named': 1, 'cwd': other,
+        \                'project': other, 'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual [], claude#session#list()
+
+Execute (an old record with no project and another cwd is still skipped):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'old': {'name': 'somewhere else', 'cwd': g:_root . '/nowhere',
+        \          'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual [], claude#session#list()
+
+Execute (with the prompts turned off a session is left nameless):
+  let saved = g:claude_session_prompt_name
+  let g:claude_session_prompt_name = 0
+  try
+    let id = claude#session#new('', '')
+    let rec = claude#session#get(id)
+    AssertEqual '',      rec.name, 'nothing was asked, so nothing was named'
+    AssertEqual 0,       rec.named
+    AssertEqual '',      rec.workspace, 'and no branch was asked for either'
+    AssertEqual g:_repo, rec.cwd
+    AssertEqual [id], map(copy(claude#session#list()), {_, r -> r.id}),
+          \ 'running, so listed; nameless, so buried once it finishes'
+    call claude#session#delete(id)
+    AssertEqual [], claude#session#list()
+  finally
+    let g:claude_session_prompt_name = saved
+  endtry
+
+Execute (a name passed as an argument still names the session):
+  let id = claude#session#new('from the command line', '')
+  AssertEqual 'from the command line', claude#session#get(id).name
+  AssertEqual 1, claude#session#get(id).named
+  AssertEqual 1, len(claude#session#list())
+
+Execute (n starts a session in the workspace of the row under the cursor):
+  call feedkeys("feature-branch\<CR>\<CR>", 't')
+  let first = claude#session#new('', '')
+  let ws    = claude#session#get(first).workspace
+  Assert !empty(ws), 'the fixture session should have a workspace'
+
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  call search(claude#session#label(claude#session#get(first)), 'W')
+  normal n
+
+  let ids = []
+  for rec in claude#session#live()
+    if rec.id !=# first
+      call add(ids, rec.id)
+    endif
+  endfor
+  AssertEqual 1, len(ids), 'n should have started exactly one more'
+  AssertEqual ws, claude#session#get(ids[0]).workspace,
+        \ 'a session started from a row lands where that row lives'
+  AssertEqual claude#session#get(first).cwd, claude#session#get(ids[0]).cwd
+
+Execute (n away from any session falls back to the selected workspace):
+  let ws = claude#workspace#create('feature-branch', '')
+  call claude#workspace#select(ws.id)
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  normal n
+  let live = claude#session#live()
+  AssertEqual 1, len(live)
+  AssertEqual ws.id, live[0].workspace,
+        \ 'with no row to read, <leader>cw decides'

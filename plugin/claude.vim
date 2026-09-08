@@ -62,9 +62,37 @@ if !exists('g:claude_panel_refresh_ms')
 endif
 
 " g:claude_panel_idle_secs — seconds without terminal output before a running
-" session is shown as idle rather than active.
+" session is shown as idle rather than active. Only consulted when the bottom
+" of the terminal says nothing conclusive; see the two patterns below.
 if !exists('g:claude_panel_idle_secs')
   let g:claude_panel_idle_secs = 30
+endif
+
+" g:claude_panel_working_pat — pattern marking a session as working, matched
+" against the bottom of its terminal. Claude prints this while it runs.
+if !exists('g:claude_panel_working_pat')
+  let g:claude_panel_working_pat = 'esc to interrupt'
+endif
+
+" g:claude_panel_waiting_pat — pattern marking a session as waiting for you:
+" a numbered choice, a permission question, a yes/no. Matching sessions are
+" grouped under "Needs you" at the top of the panel.
+if !exists('g:claude_panel_waiting_pat')
+  let g:claude_panel_waiting_pat =
+        \ '\%(^\|\n\)\s*❯\=\s*1\.\s\|Do you want\|(y/n)'
+endif
+
+" g:claude_panel_stale_days — days after which a finished session is hidden
+" from the panel, whoever named it. 0 hides none. The panel's I key reveals
+" them, along with the finished sessions nobody named.
+if !exists('g:claude_panel_stale_days')
+  let g:claude_panel_stale_days = 2
+endif
+
+" g:claude_panel_done_rows — how many finished sessions the Done group draws
+" before it stops with a "… N more" row.
+if !exists('g:claude_panel_done_rows')
+  let g:claude_panel_done_rows = 10
 endif
 
 " g:claude_panel_show_closed — 0 lists only live sessions.
@@ -110,8 +138,9 @@ if !exists('g:claude_session_store')
   let g:claude_session_store = ''
 endif
 
-" g:claude_session_prompt_name — 0 skips the name prompt for new sessions and
-" names them after the current time instead.
+" g:claude_session_prompt_name — 0 skips both prompts for new sessions: no
+" branch, no workspace, and no name — Claude names the conversation itself,
+" which leaves the session hidden from the panel until I reveals it.
 if !exists('g:claude_session_prompt_name')
   let g:claude_session_prompt_name = 1
 endif
@@ -122,6 +151,23 @@ endif
 " a wrapper with another name.
 if !exists('g:claude_session_flags')
   let g:claude_session_flags = -1
+endif
+
+" ── workspace configuration ──────────────────────────────────────────────────
+
+" g:claude_workspace_dir — parent directory for the git worktrees new
+" workspaces check out into. Empty (default) puts each one beside the main
+" checkout as <repo>-<workspace name>; set it to keep them elsewhere, e.g.
+" '~/src/worktrees'.
+if !exists('g:claude_workspace_dir')
+  let g:claude_workspace_dir = ''
+endif
+
+" g:claude_workspace_store — where workspaces are persisted, with the same
+" override-or-plugin-dir rule (and reinstall caveat) as
+" |g:claude_session_store|.
+if !exists('g:claude_workspace_store')
+  let g:claude_workspace_store = ''
 endif
 
 " ── git diff tree configuration ──────────────────────────────────────────────
@@ -194,6 +240,9 @@ command!          ClaudeSessionsClose call claude#panel#close()
 command! -nargs=? ClaudeNew           call claude#new(<q-args>)
 command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
 
+" Workspaces: the git worktrees sessions run in.
+command! ClaudeWorkspaces call claude#workspace#pick()
+
 " Git diff tree.
 " The whole sidebar column: sessions, diff tree and NERDTree together.
 command! ClaudeSidebars call claude#sidebar#toggle_all()
@@ -263,11 +312,18 @@ if !exists('g:claude_no_default_mappings')
   nnoremap <silent> <leader>cx :ClaudeClose<CR>
   nnoremap <silent> <leader>cf :ClaudeFocus<CR>
 
+  " Start a session even when others are running. <leader>co focuses or picks
+  " one instead, and only creates when nothing is live.
+  nnoremap <silent> <leader>cn :ClaudeNew<CR>
+
   " Toggle the session panel.
   nnoremap <silent> <leader>cs :ClaudeSessions<CR>
 
   " Toggle the git diff tree.
   nnoremap <silent> <leader>cd :ClaudeDiff<CR>
+
+  " Pick the workspace to work in; NERDTree follows the choice.
+  nnoremap <silent> <leader>cw :ClaudeWorkspaces<CR>
 
   " Raise or dismiss the whole sidebar column. Normal mode only: <C-z> must
   " keep suspending Vim from a terminal buffer and from insert mode.

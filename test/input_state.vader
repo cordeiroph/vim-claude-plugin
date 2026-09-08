@@ -16,6 +16,13 @@ Before:
   let g:_saved_prompt = get(g:, 'claude_session_prompt_name', 1)
   let g:claude_cmd = 'sleep 30'
   let g:claude_session_prompt_name = 0
+  " submit() spawns a session, and a session persists itself. Without this the
+  " tests write into whatever store the user actually uses.
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_store_dir = tempname()
+  call mkdir(g:_store_dir, 'p')
+  let g:claude_session_store = g:_store_dir . '/sessions.json'
+  call claude#store#_reset()
 
 After:
   stopinsert
@@ -33,6 +40,9 @@ After:
   call claude#session#_reset()
   let g:claude_cmd                 = g:_saved_cmd
   let g:claude_session_prompt_name = g:_saved_prompt
+  let g:claude_session_store       = g:_saved_store
+  call claude#store#_reset()
+  call delete(g:_store_dir, 'rf')
   only
 
 " ── open ─────────────────────────────────────────────────────────────────────
@@ -99,3 +109,46 @@ Execute (open restores a previously saved draft into the buffer):
   Assert bufnr != -1, 'buffer should exist'
   let lines = getbufline(bufnr, 1, '$')
   AssertEqual ['line one', 'line two'], lines
+
+" ── keymaps ──────────────────────────────────────────────────────────────────
+
+Execute (CTRL-C saves the draft and hides the window):
+  call claude#input#open()
+  let bufnr = get(t:, 'claude_input_bufnr', -1)
+  stopinsert
+  call setbufline(bufnr, 1, ['half a thought', ''])
+
+  call win_gotoid(bufwinid(bufnr))
+  let m = maparg('<C-c>', 'n', 0, 1)
+  Assert !empty(m), 'CTRL-C should be mapped in the input window'
+  AssertEqual 1, m.buffer, 'the mapping must be local to the input buffer'
+  Assert m.rhs =~# 'input_split_save_and_close',
+        \ 'expected it to save the draft and close'
+
+  execute "normal \<C-c>"
+  AssertEqual -1, get(t:, 'claude_input_bufnr', -1), 'the state should reset'
+  Assert !bufexists(bufnr), 'the buffer should be wiped'
+  AssertEqual ['half a thought'], get(t:, 'claude_input_saved', []),
+        \ 'the draft should have been kept, trailing blank line trimmed'
+
+Execute (<Esc> is left alone in normal mode):
+  call claude#input#open()
+  stopinsert
+  call win_gotoid(bufwinid(get(t:, 'claude_input_bufnr', -1)))
+  AssertEqual '', maparg('<Esc>', 'n'),
+        \ '<Esc> must just leave insert mode, not close the window'
+
+Execute (<Esc> still dismisses the completion popup in insert mode):
+  call claude#input#open()
+  stopinsert
+  call win_gotoid(bufwinid(get(t:, 'claude_input_bufnr', -1)))
+  Assert maparg('<Esc>', 'i') =~# 'pumvisible',
+        \ 'the insert-mode popup escape hatch must survive'
+
+Execute (CTRL-C from insert mode leaves 'completeopt' as it found it):
+  let before = &completeopt
+  call claude#input#open()
+  call feedkeys("ihello\<C-c>", 'x')
+  AssertEqual before, &completeopt,
+        \ "InsertLeave must fire, or 'completeopt' stays where InsertEnter put it"
+  Assert !exists('b:_copt'), 'the saved value should have been consumed'

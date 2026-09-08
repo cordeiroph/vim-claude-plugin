@@ -163,3 +163,79 @@ Execute (a double-click activates the row, as it does in NERDTree):
   Assert !empty(m), 'double-click must be mapped: Vim does not derive it from <CR>'
   AssertEqual 1, m.buffer, 'the mapping must be local to the panel'
   Assert m.rhs =~# 'activate', 'expected it to run the same action as <CR>'
+
+" ── hidden sessions ──────────────────────────────────────────────────────────
+
+Execute (I lists the sessions nobody named, and hides them again):
+  " Finished sessions: a live one is never hidden, whatever it is called.
+  call claude#session#_inject({'id': 'named', 'name': 'panel design',
+        \ 'status': 'closed', 'project': '/w/beta', 'worktree': '/w/beta',
+        \ 'branch': 'main'})
+  call claude#session#_inject({'id': 'anon', 'name': '', 'named': 0,
+        \ 'status': 'closed', 'project': '/w/beta', 'worktree': '/w/beta',
+        \ 'branch': 'main'})
+  call claude#panel#open()
+  " The place view, where nothing is folded away to start with.
+  call claude#panel#_grouping('place')
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+
+  let lines = join(claude#panel#_lines(), "\n")
+  Assert lines =~# 'panel design', 'the named session should be listed'
+  Assert lines !~# 'unnamed',      'the unnamed one should not be'
+
+  normal I
+  let lines = join(claude#panel#_lines(), "\n")
+  Assert lines =~# 'unnamed anon', 'I should reveal it, labelled by its id'
+
+  normal I
+  Assert join(claude#panel#_lines(), "\n") !~# 'unnamed',
+        \ 'I again should put it away'
+
+Execute (lowercase i still opens a session in a split):
+  let id = claude#session#new('splitter')
+  let bufnr = claude#session#get(id).bufnr
+  call win_execute(bufwinid(bufnr), 'hide')
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  let m = maparg('i', 'n', 0, 1)
+  Assert m.rhs =~# "open('split')", 'i must still split, not toggle hidden'
+  Assert !claude#session#show_hidden(), 'i must not have toggled anything'
+
+Execute (the help block names the I key):
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  normal ?
+  Assert join(claude#panel#_lines(), "\n") =~# 'I show hidden',
+        \ 'the inline help should offer the toggle'
+  normal ?
+
+" ── starting a session ───────────────────────────────────────────────────────
+
+Execute (n asks nothing at all):
+  " No feedkeys(): a prompt here would hang the suite, which is the point.
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  normal n
+  let live = claude#session#live()
+  AssertEqual 1, len(live), 'n should have started a session'
+  AssertEqual '', live[0].name, 'and not asked what to call it'
+  AssertEqual 0,  live[0].named
+
+Execute (N is the one that asks):
+  " What it asks, and what each answer does, is test/session_workspace.vader.
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  let m = maparg('N', 'n', 0, 1)
+  Assert m.rhs =~# 'new_asking', 'N should run the prompting path'
+  Assert maparg('n', 'n', 0, 1).rhs =~# 'new()',
+        \ 'and n the one that asks nothing'
+
+Execute (the new session is the one the panel then opens):
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  normal n
+  let id = claude#session#live()[0].id
+  Assert claude#session#get(id).last_focus > 0,
+        \ 'a session you just started is the one you were last in'
+  Assert !claude#sidebar#is_sidebar(bufwinid(claude#session#get(id).bufnr)),
+        \ 'and it opens in the main area, not inside the sidebar column'

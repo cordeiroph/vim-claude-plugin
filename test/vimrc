@@ -5,6 +5,12 @@ filetype plugin on
 " working directory.
 set noswapfile
 
+" Vader reports every test as a message, and a suite this size overflows the
+" message area. Without this the run stops at a "-- More --" prompt that
+" nothing can answer when the output is piped, and `make test` fails with the
+" tests themselves all green.
+set nomore
+
 " Load vader and the plugin under test.
 set rtp+=~/.vim/plugged/vader.vim
 execute 'set rtp+=' . fnamemodify(expand('<sfile>'), ':p:h:h')

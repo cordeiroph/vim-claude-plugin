@@ -1,12 +1,13 @@
 " ── JSON stores ──────────────────────────────────────────────────────────────
 "
-" Persists small dictionaries to JSON so they survive a Vim restart. Two of
+" Persists small dictionaries to JSON so they survive a Vim restart. Three of
 " them exist: session naming and grouping metadata (see
-" autoload/claude/session.vim), and per-branch diff bases (see
-" autoload/claude/difftree.vim). Runtime state — buffer numbers, jobs, status
-" — is never written here.
+" autoload/claude/session.vim), per-branch diff bases (see
+" autoload/claude/difftree.vim), and the git worktrees a session can be given
+" to work in (see autoload/claude/workspace.vim). Runtime state — buffer
+" numbers, jobs, status — is never written here.
 "
-" The *_at() functions take a path and a payload key so both stores share one
+" The *_at() functions take a path and a payload key so the stores share one
 " implementation of the awkward parts: atomic write, corruption recovery,
 " schema-version refusal and graceful degradation when the file cannot be
 " written. claude#store#load()/save() are the session-store wrappers.
@@ -50,6 +51,16 @@ function! claude#store#difftree_path() abort
   return s:plugin_root . '/data/difftree.json'
 endfunction
 
+" Path of the workspace store, following the same rule again
+" (g:claude_workspace_store, else the plugin's data directory).
+function! claude#store#workspace_path() abort
+  let l:override = get(g:, 'claude_workspace_store', '')
+  if !empty(l:override)
+    return expand(l:override)
+  endif
+  return s:plugin_root . '/data/workspaces.json'
+endfunction
+
 " Echo {msg} as a warning the first time {kind} is seen in this Vim session.
 function! s:warn_once(kind, msg) abort
   if has_key(s:warned, a:kind)
@@ -69,8 +80,8 @@ endfunction
 " Read a store from disk. Always returns a usable dict — a missing file, a
 " corrupt file or a future schema never raises.
 "
-" {key} is the payload key ("sessions", "bases"); {what} names the store in
-" warnings.
+" {key} is the payload key ("sessions", "bases", "workspaces"); {what} names
+" the store in warnings.
 function! claude#store#load_at(path, key, what) abort
   let s:read_only = v:false
 

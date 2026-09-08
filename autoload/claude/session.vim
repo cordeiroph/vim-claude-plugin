@@ -9,6 +9,11 @@
 "   id           session id / transcript filename stem
 "   name         user-assigned label (also passed to the CLI as --name)
 "   bufnr        terminal buffer, or -1 when the session is not live here
+"   named        1 when the user typed the name; 0 when they left the prompt
+"                blank and Claude names the conversation itself
+"   snippet      first thing that was asked of the session, from its
+"                transcript — what an unnamed session is labelled with
+"   workspace    id of the workspace (git worktree) the session runs in, or ''
 "   cwd          working directory the session was started in
 "   project      main repository root (worktrees of one repo share this)
 "   worktree     worktree root
@@ -26,6 +31,11 @@
 
 let s:sessions = {}
 
+" Finished sessions nobody named, and finished sessions nobody has touched for
+" days, are hidden the way NERDTree hides dotfiles: still in the registry, just
+" not listed until the panel's I key asks for them. See is_buried().
+let s:show_hidden = 0
+
 " Directory -> {project, worktree, branch}. Git is never run twice for the
 " same directory in one Vim session, and never on a panel redraw.
 let s:group_cache = {}
@@ -40,6 +50,24 @@ endfunction
 
 function! s:closed_limit() abort
   return get(g:, 'claude_panel_closed_limit', 10)
+endfunction
+
+" Days after which a finished session is buried. 0 buries none of them.
+function! s:stale_days() abort
+  return get(g:, 'claude_panel_stale_days', 2)
+endfunction
+
+" What the bottom of a Claude terminal looks like while it is working, and
+" while it is waiting for an answer. Both are patterns because they track
+" another program's output, which is not ours to promise: a pattern that stops
+" matching costs the state, never a wrong answer.
+function! s:working_pat() abort
+  return get(g:, 'claude_panel_working_pat', 'esc to interrupt')
+endfunction
+
+function! s:waiting_pat() abort
+  return get(g:, 'claude_panel_waiting_pat',
+        \ '\%(^\|\n\)\s*❯\=\s*1\.\s\|Do you want\|(y/n)')
 endfunction
 
 function! s:warn_once(kind, msg) abort
@@ -215,18 +243,39 @@ function! s:scan_transcript(path) abort
   return l:rec
 endfunction
 
-" Newest-first transcript paths for the current project, capped at the
-" configured limit.
-function! s:transcript_paths() abort
-  let l:dir = claude#session#project_dir(getcwd())
-  if !isdirectory(l:dir)
-    return []
+" Transcript directories worth scanning: the one Vim is in, plus every
+" workspace of this repository. Claude files a transcript under the directory
+" the session ran in, so a workspace session's conversations live under its
+" own worktree and are invisible from the main checkout otherwise.
+function! s:project_dirs() abort
+  let l:seen = {}
+  let l:here = claude#session#project_dir(getcwd())
+  if isdirectory(l:here)
+    let l:seen[l:here] = 1
   endif
+  for l:ws in claude#workspace#list()
+    let l:dir = claude#session#project_dir(l:ws.path)
+    if isdirectory(l:dir)
+      let l:seen[l:dir] = 1
+    endif
+  endfor
+  return keys(l:seen)
+endfunction
+
+" Newest-first transcript paths for the current project, capped at the
+" configured limit. The cap is across the project, not per directory.
+function! s:transcript_paths() abort
   let l:limit = s:closed_limit()
   if l:limit <= 0
     return []
   endif
-  let l:paths = glob(l:dir . '/*.jsonl', 0, 1)
+  let l:paths = []
+  for l:dir in s:project_dirs()
+    call extend(l:paths, glob(l:dir . '/*.jsonl', 0, 1))
+  endfor
+  if empty(l:paths)
+    return []
+  endif
   call sort(l:paths, {a, b -> getftime(b) - getftime(a)})
   return l:paths[0 : l:limit - 1]
 endfunction
@@ -261,7 +310,35 @@ function! claude#session#by_bufnr(bufnr) abort
   return {}
 endfunction
 
+" What the bottom of the terminal says the session is doing.
+"
+" Claude prints its own state down there: a spinner footer while it works, a
+" numbered list while it waits for an answer. s:term_tail() already captures
+" those rows on every poll, so reading them costs one regex over a string the
+" poll has in hand.
+"
+" '' means "cannot tell" — the caller falls back to the idle timer, which is
+" what every build before this one used on its own. Working is tested first:
+" the spinner is only on screen while Claude is not waiting for anything.
+function! s:classify(tail) abort
+  if empty(a:tail)
+    return ''
+  endif
+  if a:tail =~# s:working_pat()
+    return 'active'
+  endif
+  if a:tail =~# s:waiting_pat()
+    return 'waiting'
+  endif
+  return ''
+endfunction
+
 " §5.1 — the status rules.
+"
+"   closed   no job behind it
+"   waiting  the terminal is showing a question
+"   active   the terminal is working, or produced output just now
+"   idle     running, and none of the above
 function! claude#session#status(id) abort
   if !has_key(s:sessions, a:id)
     return 'closed'
@@ -278,6 +355,12 @@ function! claude#session#status(id) abort
   let l:job = term_getjob(l:rec.bufnr)
   if l:job is v:null || job_status(l:job) !=# 'run'
     return 'closed'
+  endif
+  " The tail is whatever poll() last saw. Reading it again here would double
+  " the terminal reads for no new information.
+  let l:said = s:classify(get(l:rec, 'term_tail', ''))
+  if !empty(l:said)
+    return l:said
   endif
   return (localtime() - l:rec.last_active) < s:idle_secs() ? 'active' : 'idle'
 endfunction
@@ -301,6 +384,28 @@ function! s:term_tail(bufnr) abort
   return join(l:acc, "\n")
 endfunction
 
+" Give an unnamed session something to be called.
+"
+" A live session has no transcript when it is spawned, so there is nothing to
+" label it with until Claude writes the first message. The file is re-read only
+" when it has changed since the last look, and not at all once a snippet has
+" been found or a name has been typed.
+function! s:adopt_snippet(rec) abort
+  if !empty(get(a:rec, 'snippet', '')) || !empty(get(a:rec, 'name', ''))
+    return
+  endif
+  let l:path = claude#session#transcript_path(a:rec.id)
+  if empty(l:path) || !filereadable(l:path)
+    return
+  endif
+  let l:ftime = getftime(l:path)
+  if l:ftime == get(a:rec, 'scan_ftime', 0)
+    return
+  endif
+  let a:rec.scan_ftime = l:ftime
+  let a:rec.snippet    = s:scan_transcript(l:path).snippet
+endfunction
+
 " Refresh live status. Returns 1 when any session changed state, so the panel
 " knows whether a repaint is needed.
 function! claude#session#poll() abort
@@ -319,6 +424,7 @@ function! claude#session#poll() abort
       endif
     endif
 
+    call s:adopt_snippet(l:rec)
     let l:rec.status = claude#session#status(l:rec.id)
 
     " Reap: the job is gone, so drop the terminal buffer but keep the record
@@ -361,38 +467,63 @@ function! claude#session#refresh() abort
     if !empty(l:scan.branch)
       let l:group.branch = l:scan.branch
     endif
-    let l:name = get(l:saved, 'name', '')
-    if empty(l:name)
-      " Never named in Vim: fall back to the timestamp + first-message
-      " labelling :ClaudeResume has always used.
-      let l:name = strftime('%Y-%m-%d %H:%M', l:scan.created)
-      if !empty(l:scan.snippet)
-        let l:name .= ' — ' . l:scan.snippet
-      endif
-    endif
-    let s:sessions[l:id] = s:make_record(l:id, l:name, -1, l:cwd, l:group,
-          \ l:scan.created, 'disk')
+    " A session Claude started on its own was never named here. It keeps an
+    " empty name and is labelled from its first message instead — a name
+    " nobody typed is not a name, and a timestamp is not a label.
+    let l:named = s:was_named(l:saved)
+    let l:name  = l:named ? get(l:saved, 'name', '') : ''
+    let l:rec   = s:make_record(l:id, l:name, -1, l:cwd, l:group,
+          \ l:scan.created, 'disk', l:named,
+          \ get(l:saved, 'workspace', ''))
+    let l:rec.snippet    = l:scan.snippet
+    let l:rec.scan_ftime = getftime(l:path)
+    let s:sessions[l:id] = l:rec
   endfor
 
   " Named sessions that never got a transcript (started but never messaged)
-  " exist only in the store. Bring back the ones belonging to this directory
-  " so a name given yesterday is still on the panel today; opening one claims
-  " its id for a fresh conversation.
-  let l:cwd = getcwd()
+  " exist only in the store. Bring back the ones belonging to this project so
+  " a name given yesterday is still on the panel today; opening one claims its
+  " id for a fresh conversation.
   for [l:id, l:entry] in items(l:store.sessions)
-    if has_key(s:sessions, l:id) || get(l:entry, 'cwd', '') !=# l:cwd
+    if has_key(s:sessions, l:id) || !s:belongs_here(l:entry)
       continue
     endif
+    let l:cwd = get(l:entry, 'cwd', '')
     let s:sessions[l:id] = s:make_record(l:id, get(l:entry, 'name', l:id), -1,
           \ l:cwd, claude#session#group_of(l:cwd),
-          \ get(l:entry, 'created', localtime()), 'disk')
+          \ get(l:entry, 'created', localtime()), 'disk',
+          \ s:was_named(l:entry), get(l:entry, 'workspace', ''))
   endfor
 endfunction
 
-function! s:make_record(id, name, bufnr, cwd, group, created, origin) abort
+" Whether a stored entry belongs to the project Vim is in.
+"
+" The directory alone is not enough: a session given a workspace ran in its own
+" worktree, so matching cwd would lose it the moment Vim starts anywhere else
+" in the repository — which is every time you open it in the main checkout.
+" The project root is what every worktree of one repository shares.
+function! s:belongs_here(entry) abort
+  if get(a:entry, 'cwd', '') ==# getcwd()
+    return 1
+  endif
+  let l:project = get(a:entry, 'project', '')
+  if empty(l:project) || l:project ==# '(no project)'
+    " Written before the project was recorded, or outside a repository: the
+    " directory is all there is to go on.
+    return 0
+  endif
+  return l:project ==# claude#session#group_of(getcwd()).project
+endfunction
+
+function! s:make_record(id, name, bufnr, cwd, group, created, origin,
+      \ named, workspace) abort
   return {
         \ 'id':          a:id,
         \ 'name':        a:name,
+        \ 'named':       a:named,
+        \ 'snippet':     '',
+        \ 'scan_ftime':  0,
+        \ 'workspace':   a:workspace,
         \ 'bufnr':       a:bufnr,
         \ 'cwd':         a:cwd,
         \ 'project':     a:group.project,
@@ -409,15 +540,68 @@ function! s:make_record(id, name, bufnr, cwd, group, created, origin) abort
         \ }
 endfunction
 
-" Every known session, newest and liveliest first.
-function! claude#session#list() abort
+" Whether unnamed sessions are being listed.
+function! claude#session#show_hidden() abort
+  return s:show_hidden
+endfunction
+
+" Flip that, the way NERDTree's I flips dotfiles. Returns the new state.
+function! claude#session#toggle_hidden() abort
+  let s:show_hidden = !s:show_hidden
+  return s:show_hidden
+endfunction
+
+" Whether a record belongs to the tail nobody wants to look at: a session that
+" has finished, and that either nobody named or nobody has touched for days.
+"
+" A live session is never buried, whatever it is called. One that is waiting
+" for an answer is the last thing to hide, and since it is labelled from its
+" first message it is readable without a name.
+function! claude#session#is_buried(rec) abort
+  if get(a:rec, 'status', 'closed') !=# 'closed'
+    return 0
+  endif
+  if !get(a:rec, 'named', 1)
+    return 1
+  endif
+  let l:days = s:stale_days()
+  if l:days <= 0
+    return 0
+  endif
+  let l:seen = get(a:rec, 'last_focus', 0) > 0
+        \ ? a:rec.last_focus : get(a:rec, 'created', 0)
+  return (localtime() - l:seen) > l:days * 86400
+endfunction
+
+" Every known session, newest and liveliest first — the whole registry, with
+" nothing hidden. For callers that are not the panel and do their own
+" filtering: the resume picker and the diff tree's branch list.
+function! claude#session#all() abort
   call claude#session#poll()
   let l:out = values(s:sessions)
+  call sort(l:out, function('s:cmp_records'))
+  return l:out
+endfunction
+
+" The same list, with the buried tail left out unless it has been asked for.
+function! claude#session#list() abort
+  let l:out = claude#session#all()
+  if !s:show_hidden
+    let l:out = filter(copy(l:out), {_, r -> !claude#session#is_buried(r)})
+  endif
   if !get(g:, 'claude_panel_show_closed', 1)
     let l:out = filter(copy(l:out), {_, r -> r.status !=# 'closed'})
   endif
-  call sort(l:out, function('s:cmp_records'))
   return l:out
+endfunction
+
+" How many records the hide rule is keeping out of the list right now.
+function! claude#session#buried_count() abort
+  if s:show_hidden
+    return 0
+  endif
+  return len(filter(values(s:sessions),
+        \ {_, r -> claude#session#is_buried(r)}))
 endfunction
 
 " Live sessions before closed ones; within each, most recently touched first.
@@ -437,12 +621,65 @@ function! s:cmp_records(a, b) abort
   return a:a.name ==# a:b.name ? 0 : (a:a.name < a:b.name ? -1 : 1)
 endfunction
 
-" Sessions folded into Project > Worktree > Branch. The panel's only data
+" The state groups, in the order the panel draws them: what a session is doing
+" rather than where it lives. The state view's only data source, as tree() is
+" the place view's.
+"
+" Done is listed even when it is empty, as long as the registry holds a
+" finished session — including one the hide rule is keeping out of the list, so
+" that the tail is never invisible.
+let s:GROUPS = [
+      \ ['waiting', 'Needs you', 'st:waiting'],
+      \ ['active',  'Working',   'st:working'],
+      \ ['idle',    'Idle',      'st:idle'],
+      \ ['closed',  'Done',      'st:done'],
+      \ ]
+
+" a:1 — 1 to include the buried tail, which is what the panel's filter does:
+" a row asked for by name is not a row to hide.
+function! claude#session#groups(...) abort
+  let l:all = a:0 > 0 && a:1
+  let l:by  = {}
+  for [l:status, l:label, l:key] in s:GROUPS
+    let l:by[l:status] = []
+  endfor
+
+  for l:rec in (l:all ? claude#session#all() : claude#session#list())
+    let l:status = has_key(l:by, l:rec.status) ? l:rec.status : 'idle'
+    call add(l:by[l:status], l:rec)
+  endfor
+
+  let l:buried = l:all ? 0 : claude#session#buried_count()
+  let l:out    = []
+  for [l:status, l:label, l:key] in s:GROUPS
+    let l:count = len(l:by[l:status])
+    if l:status ==# 'closed'
+      if l:count == 0 && l:buried == 0
+        continue
+      endif
+    elseif l:count == 0
+      continue
+    endif
+    call add(l:out, {
+          \ 'key':      l:key,
+          \ 'label':    l:label,
+          \ 'status':   l:status,
+          \ 'sessions': l:by[l:status],
+          \ 'buried':   l:status ==# 'closed' ? l:buried : 0,
+          \ })
+  endfor
+  return l:out
+endfunction
+
+" Sessions folded into Project > Worktree > Branch. The place view's data
 " source; it does no grouping of its own.
-function! claude#session#tree() abort
+"
+" a:1 — 1 to include the buried tail, as for groups().
+function! claude#session#tree(...) abort
+  let l:all   = a:0 > 0 && a:1
   let l:tree  = []
   let l:pidx  = {}
-  for l:rec in claude#session#list()
+  for l:rec in (l:all ? claude#session#all() : claude#session#list())
     if !has_key(l:pidx, l:rec.project)
       let l:pidx[l:rec.project] = len(l:tree)
       call add(l:tree, {
@@ -537,64 +774,183 @@ function! s:build_argv(id, name, resume) abort
   return l:argv
 endfunction
 
-" Start {argv} in the current window, returning its buffer number.
-function! s:term_start(argv) abort
-  return term_start(a:argv, {'curwin': 1})
+" Start {argv} in the current window, returning its buffer number. {cwd} is
+" the directory the job runs in — a workspace's worktree, or '' for wherever
+" Vim already is.
+function! s:term_start(argv, cwd) abort
+  if empty(a:cwd) || !isdirectory(a:cwd) || a:cwd ==# getcwd()
+    return term_start(a:argv, {'curwin': 1})
+  endif
+  try
+    return term_start(a:argv, {'curwin': 1, 'cwd': a:cwd})
+  catch /E475\|E118\|E731/
+    " Vim before 8.0.1685 has no cwd option for term_start(); the job
+    " inherits the window's directory instead.
+    execute 'lcd ' . fnameescape(a:cwd)
+    return term_start(a:argv, {'curwin': 1})
+  endtry
+endfunction
+
+" Where a session should be spawned: its workspace when it still has one,
+" else the directory it was started in.
+function! s:spawn_dir(rec) abort
+  let l:id = get(a:rec, 'workspace', '')
+  if empty(l:id)
+    return a:rec.cwd
+  endif
+  let l:ws = claude#workspace#get(l:id)
+  if empty(l:ws)
+    call s:warn_once('workspace-gone-' . l:id,
+          \ 'workspace ' . l:id . ' is gone; opening in ' . a:rec.cwd)
+    return a:rec.cwd
+  endif
+  return l:ws.path
 endfunction
 
 " ── naming ───────────────────────────────────────────────────────────────────
+
+" Prompt for the branch to give the session a workspace on. Returns
+" [1, branch] — an empty branch meaning "no workspace" — or [0, ''] when the
+" user pressed CTRL-C.
+"
+" Completion is the diff tree's, so the same local and remote branches are
+" offered here as by :ClaudeDiffBase. A name that matches nothing is still
+" accepted: claude#workspace#create() branches it off HEAD.
+function! s:prompt_branch() abort
+  try
+    let l:answer = input('Branch (blank for no workspace): ', '',
+          \ 'customlist,claude#difftree#complete_branch')
+  catch /^Vim:Interrupt$/
+    return [0, '']
+  endtry
+  redraw
+  return [1, trim(l:answer)]
+endfunction
 
 " Prompt for a session name. Returns [1, name] or [0, ''] when cancelled.
 "
 " Only CTRL-C cancels. In a terminal Vim <Esc> is indistinguishable from an
 " empty line — inputdialog()'s cancelreturn is honoured by the GUI only — so
-" an empty answer falls back to a timestamp name rather than silently
-" throwing the session away.
+" an empty answer is taken at face value: the session goes unnamed and Claude
+" names the conversation itself.
 function! s:prompt_name() abort
-  if !get(g:, 'claude_session_prompt_name', 1)
-    return [1, s:default_name()]
-  endif
   try
     let l:answer = input('Session name: ')
   catch /^Vim:Interrupt$/
     return [0, '']
   endtry
   redraw
-  return [1, empty(l:answer) ? s:default_name() : l:answer]
+  return [1, trim(l:answer)]
 endfunction
 
-function! s:default_name() abort
-  return 'claude ' . strftime('%Y-%m-%d %H:%M')
+" Names earlier versions minted for a session whose name prompt was left
+" empty: 'claude ' plus the time. Nobody chose one, so they are not names.
+let s:AUTO_NAME = '^claude \d\{4}-\d\{2}-\d\{2} \d\{2}:\d\{2}$'
+
+" Whether a stored entry was named by the user.
+"
+" An auto-generated timestamp is never a name, whatever the record claims:
+" those were minted when the prompt was skipped or left blank, which is the
+" same answer that leaves a session nameless today. Otherwise the flag decides,
+" and entries written before it existed fall back to having a name at all.
+function! s:was_named(entry) abort
+  let l:name = get(a:entry, 'name', '')
+  if l:name =~# s:AUTO_NAME
+    return 0
+  endif
+  if has_key(a:entry, 'named')
+    return a:entry.named
+  endif
+  return !empty(l:name)
+endfunction
+
+" What the panel and the pickers show for a record.
+"
+" Only 11 of the 130 sessions on this machine carry a name a human typed, so a
+" name is the exception and not the identity. What was asked of a session
+" first is a better label than its id, and it is already read from the
+" transcript to place the record.
+function! claude#session#label(rec) abort
+  if !empty(get(a:rec, 'name', ''))
+    return a:rec.name
+  endif
+  if !empty(get(a:rec, 'snippet', ''))
+    return a:rec.snippet
+  endif
+  return '(unnamed ' . strpart(a:rec.id, 0, 8) . ')'
 endfunction
 
 function! s:persist(rec) abort
   call claude#store#put(a:rec.id, {
-        \ 'name':     a:rec.name,
-        \ 'cwd':      a:rec.cwd,
-        \ 'project':  a:rec.project,
-        \ 'worktree': a:rec.worktree,
-        \ 'branch':   a:rec.branch,
-        \ 'created':  a:rec.created,
+        \ 'name':      a:rec.name,
+        \ 'named':     a:rec.named,
+        \ 'workspace': a:rec.workspace,
+        \ 'cwd':       a:rec.cwd,
+        \ 'project':   a:rec.project,
+        \ 'worktree':  a:rec.worktree,
+        \ 'branch':    a:rec.branch,
+        \ 'created':   a:rec.created,
         \ })
 endfunction
 
 " ── lifecycle ────────────────────────────────────────────────────────────────
 
 " Start a new session. Returns the session id, or '' when the user cancelled
-" the name prompt or the terminal could not be opened.
+" a prompt or the terminal could not be opened.
 "
-" a:1 name         — prompts when omitted or empty
+" a:1 name         — skips both prompts when given
 " a:2 placement    — Ex command that creates the window to spawn into.
 "                    Defaults to the configured Claude split; pass '' to take
 "                    over the current window (the panel does this, having
 "                    already positioned itself).
 function! claude#session#new(...) abort
-  let l:name = a:0 > 0 ? a:1 : ''
-  if empty(l:name)
+  let l:opts = {'name': a:0 > 0 ? a:1 : ''}
+  if a:0 > 1
+    let l:opts.placement = a:2
+  endif
+  " With the prompts turned off there is nothing to name the session after, so
+  " it is left nameless and Claude names the conversation itself — the same
+  " answer as leaving the prompt blank.
+  let l:opts.prompt = empty(l:opts.name)
+        \ && get(g:, 'claude_session_prompt_name', 1)
+  return claude#session#spawn(l:opts)
+endfunction
+
+" The one way a session is started. Every key, command and picker goes through
+" here; claude#session#new() is the shape this had before the panel needed to
+" create a session without asking anything.
+"
+" opts:
+"   prompt     1 asks for a branch and then a name before anything is created
+"   name       session name; '' leaves it unnamed and it labels itself from
+"              its first message instead
+"   branch     branch to give the session a workspace on; '' for none
+"   workspace  id of an existing workspace to run in — what the panel's n key
+"              passes. Ignored when a branch is given, which creates one
+"   placement  Ex command creating the window to spawn into; '' takes over the
+"              current window. Absent means the configured Claude split
+"
+" With prompting on, the two answers decide where the session lives:
+"
+"   branch + name    a workspace called <name> on <branch>
+"   branch           a workspace named after the branch, uniquified
+"   name             no workspace; the selected one, or the current directory
+"   neither          the same, and the session goes unnamed
+function! claude#session#spawn(opts) abort
+  let l:name   = get(a:opts, 'name', '')
+  let l:named  = !empty(l:name)
+  let l:branch = get(a:opts, 'branch', '')
+
+  if get(a:opts, 'prompt', 0)
+    let [l:ok, l:branch] = s:prompt_branch()
+    if !l:ok
+      return ''
+    endif
     let [l:ok, l:name] = s:prompt_name()
     if !l:ok
       return ''
     endif
+    let l:named = !empty(l:name)
   endif
 
   if !has('terminal')
@@ -602,17 +958,36 @@ function! claude#session#new(...) abort
     return ''
   endif
 
-  let l:id    = claude#session#uuid()
-  let l:cwd   = getcwd()
-  let l:group = claude#session#group_of(l:cwd)
-  let l:known = s:known_transcripts()
+  " A workspace record with an empty id is the main checkout: somewhere to run,
+  " but not a workspace to belong to.
+  let l:ws = {}
+  if !empty(l:branch)
+    let l:ws = claude#workspace#create(l:branch, l:name)
+  elseif !empty(get(a:opts, 'workspace', ''))
+    " Asked for by id: an existing workspace, so nothing is created and the
+    " session is not named after it — it was not the user's answer to a
+    " question, it was where the cursor happened to be.
+    let l:ws = claude#workspace#get(a:opts.workspace)
+  endif
+  if !empty(l:ws) && !empty(l:branch) && !l:named
+    " No name was typed, so the workspace's — the branch's, uniquified —
+    " becomes the session's too.
+    let l:name  = l:ws.name
+    let l:named = 1
+  endif
 
-  let l:place = a:0 > 1 ? a:2 : claude#split_cmd()
+  let l:id    = claude#session#uuid()
+  let l:cwd   = empty(l:ws) ? claude#workspace#cwd() : l:ws.path
+  let l:group = claude#session#group_of(l:cwd)
+  let l:known = s:known_transcripts(l:cwd)
+
+  let l:place = has_key(a:opts, 'placement')
+        \ ? a:opts.placement : claude#split_cmd()
   if !empty(l:place)
     execute l:place
   endif
   try
-    let l:bufnr = s:term_start(s:build_argv(l:id, l:name, 0))
+    let l:bufnr = s:term_start(s:build_argv(l:id, l:name, 0), l:cwd)
   catch
     if !empty(l:place)
       close
@@ -622,7 +997,7 @@ function! claude#session#new(...) abort
   endtry
 
   let l:rec = s:make_record(l:id, l:name, l:bufnr, l:cwd, l:group,
-        \ localtime(), 'live')
+        \ localtime(), 'live', l:named, empty(l:ws) ? '' : l:ws.id)
   let s:sessions[l:id] = l:rec
 
   call claude#apply_buf_options(l:id)
@@ -661,14 +1036,15 @@ function! claude#session#resume(id, ...) abort
   endif
 
   let l:resume = claude#session#has_transcript(a:id)
-  let l:known  = l:resume ? {} : s:known_transcripts()
+  let l:dir    = s:spawn_dir(l:rec)
+  let l:known  = l:resume ? {} : s:known_transcripts(l:dir)
 
   let l:place = a:0 > 0 ? a:1 : claude#split_cmd()
   if !empty(l:place)
     execute l:place
   endif
   try
-    let l:bufnr = s:term_start(s:build_argv(a:id, l:rec.name, l:resume))
+    let l:bufnr = s:term_start(s:build_argv(a:id, l:rec.name, l:resume), l:dir)
   catch
     if !empty(l:place)
       close
@@ -697,8 +1073,12 @@ function! claude#session#resume(id, ...) abort
   return a:id
 endfunction
 
-function! s:known_transcripts() abort
-  let l:dir = claude#session#project_dir(getcwd())
+" Transcript ids already in {cwd}'s directory. Taken before a session is
+" spawned so the one it goes on to write can be told apart; it must be read
+" from the directory that session will actually run in, which for a workspace
+" session is not the one Vim is in.
+function! s:known_transcripts(cwd) abort
+  let l:dir = claude#session#project_dir(a:cwd)
   if !isdirectory(l:dir)
     return {}
   endif
@@ -742,7 +1122,9 @@ function! claude#session#rename(id, name) abort
   if !has_key(s:sessions, a:id) || empty(a:name)
     return
   endif
-  let s:sessions[a:id].name = a:name
+  let s:sessions[a:id].name  = a:name
+  " Naming a session is what un-hides it.
+  let s:sessions[a:id].named = 1
   call s:persist(s:sessions[a:id])
   call claude#panel#refresh()
 endfunction
@@ -844,7 +1226,8 @@ endfunction
 
 " ── target resolution (§3.4) ─────────────────────────────────────────────────
 
-" Live sessions, most recently focused first.
+" Live sessions, most recently focused first. Unnamed ones count: they are
+" hidden from the panel's list, not from the session count or the pickers.
 function! claude#session#live() abort
   call claude#session#poll()
   let l:live = filter(values(s:sessions), {_, r -> r.status !=# 'closed'})
@@ -892,8 +1275,8 @@ function! claude#session#pick(prompt, Fn) abort
   let l:ids  = map(copy(l:live), {_, r -> r.id})
   call add(l:ids, '')                  " trailing entry: new session
   let l:items = map(copy(l:live),
-        \ {_, r -> claude#panel#icon(r.status) . ' ' . r.name
-        \          . ' — ' . r.branch})
+        \ {_, r -> claude#panel#icon(r.status) . ' '
+        \          . claude#session#label(r) . ' — ' . r.branch})
   call add(l:items, '+ New session…')
 
   if s:use_popup()
@@ -940,12 +1323,18 @@ function! claude#session#_reset() abort
   let s:sessions    = {}
   let s:group_cache = {}
   let s:warned      = {}
+  let s:show_hidden = 0
   unlet! s:flags_ok
 endfunction
 
 " The argument vector that would be handed to the CLI. Test seam.
 function! claude#session#_argv(id, name, resume) abort
   return s:build_argv(a:id, a:name, a:resume)
+endfunction
+
+" What the bottom of a terminal would be read as. Test seam.
+function! claude#session#_classify(tail) abort
+  return s:classify(a:tail)
 endfunction
 
 " Insert a fabricated record, so panel rendering and grouping can be tested
@@ -963,11 +1352,15 @@ function! claude#session#_inject(rec) abort
         \ get(a:rec, 'cwd', '/tmp'),
         \ l:group,
         \ get(a:rec, 'created', localtime()),
-        \ get(a:rec, 'origin', 'disk'))
+        \ get(a:rec, 'origin', 'disk'),
+        \ get(a:rec, 'named', 1),
+        \ get(a:rec, 'workspace', ''))
   if has_key(a:rec, 'status')
     let l:full.status = a:rec.status
     let l:full.pinned = 1
   endif
+  let l:full.snippet    = get(a:rec, 'snippet', '')
+  let l:full.term_tail  = get(a:rec, 'term_tail', '')
   let l:full.last_focus = get(a:rec, 'last_focus', l:full.last_focus)
   let s:sessions[l:full.id] = l:full
   return l:full.id

@@ -270,7 +270,9 @@ function! s:build_sources() abort
   " transcripts, and the diff tree must not depend on the session panel having
   " been opened first.
   call claude#session#refresh()
-  for l:rec in claude#session#list()
+  " all(), not list(): a branch is diffable whether or not the session that
+  " worked on it is old enough for the panel to have buried it.
+  for l:rec in claude#session#all()
     let l:branch = get(l:rec, 'branch', '')
     " Placeholders like (detached) or (no branch) are not diffable.
     if empty(l:branch) || l:branch[0] ==# '('

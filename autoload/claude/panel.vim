@@ -1,9 +1,17 @@
 " ── agent session panel ──────────────────────────────────────────────────────
 "
-" A NERDTree-style side panel listing every Claude session grouped
-" Project > Worktree > Branch. The panel owns presentation only: it never
-" starts, stops or inspects a process directly — autoload/claude/session.vim
-" is the single source of truth, reached through claude#session#tree().
+" A NERDTree-style side panel listing every Claude session. It has two views,
+" swapped with g:
+"
+"   state   what each session is doing — Needs you, Working, Idle, Done.
+"           The default, because with several agents running the question is
+"           almost always "which one is waiting for me?"
+"   place   Project > Worktree > Branch, for when the question really is
+"           "what is happening in that worktree?"
+"
+" The panel owns presentation only: it never starts, stops or inspects a
+" process directly — autoload/claude/session.vim is the single source of
+" truth, reached through claude#session#groups() and claude#session#tree().
 "
 " Hiding the panel only closes its window. Sessions keep running.
 
@@ -11,8 +19,16 @@ let s:bufnr      = -1
 let s:timer      = -1
 let s:prev_winid = -1
 let s:show_help  = 0
-let s:collapsed  = {}     " group key -> 1 while that node is folded shut
 let s:rendered   = []     " session ids in the order last drawn
+let s:grouping   = 'state'
+let s:filter     = ''     " while set, only matching sessions are drawn
+let s:done_all   = 0      " 1 once the Done group has been asked to show all
+
+" Group key -> 1 while that node is folded shut. The two views use different
+" key prefixes — 'st:' here, 'p:' / 'w:' / 'b:' in the tree — so switching
+" views with g preserves both sets of folds. Done starts shut: it is the tail,
+" and the tail is what nobody wants to scroll past.
+let s:collapsed = {'st:done': 1}
 
 " This panel is the top sidebar; autoload/claude/sidebar.vim keeps the column
 " ordered and owns everything the panels share.
@@ -29,10 +45,19 @@ call claude#sidebar#register({
 " Status glyph for the panel and the picker.
 function! claude#panel#icon(status) abort
   let l:default = claude#sidebar#ascii()
-        \ ? {'active': '[A]', 'idle': '[I]', 'closed': '[C]'}
-        \ : {'active': '●',   'idle': '○',   'closed': '✗'}
+        \ ? {'waiting': '[?]', 'active': '[A]',
+        \    'idle':    '[I]', 'closed': '[C]'}
+        \ : {'waiting': '✻',   'active': '●',
+        \    'idle':    '○',   'closed': '✗'}
   let l:icons = extend(l:default, get(g:, 'claude_panel_icons', {}))
   return get(l:icons, a:status, '?')
+endfunction
+
+" How many rows the Done group draws before it stops. Separate from
+" g:claude_panel_closed_limit, which caps how many transcripts are read from
+" disk: how much is scanned and how much is drawn are different questions.
+function! s:done_rows() abort
+  return get(g:, 'claude_panel_done_rows', 10)
 endfunction
 
 function! s:marker(key) abort
@@ -157,6 +182,7 @@ let s:highlights = [
       \ ['ClaudeSessionBranch',     '',                 'Type'],
       \ ['ClaudeSessionMarker',     'NERDTreeClosable', 'Directory'],
       \ ['ClaudeSessionName',       'NERDTreeFile',     'Normal'],
+      \ ['ClaudeSessionWaiting',    '',                 'WarningMsg'],
       \ ['ClaudeSessionActive',     'NERDTreeFlags',    'Number'],
       \ ['ClaudeSessionIdle',       '',                 'Comment'],
       \ ['ClaudeSessionClosed',     '',                 'Comment'],
@@ -185,9 +211,10 @@ function! s:setup_syntax() abort
   " Session rows: the glyph carries the status, the name is coloured like a
   " NERDTree file — except for a closed session, which is dimmed whole.
   for [l:status, l:group, l:name] in [
-        \ ['active', 'ClaudeSessionActive', 'ClaudeSessionName'],
-        \ ['idle',   'ClaudeSessionIdle',   'ClaudeSessionName'],
-        \ ['closed', 'ClaudeSessionClosed', 'ClaudeSessionNameClosed'],
+        \ ['waiting', 'ClaudeSessionWaiting', 'ClaudeSessionName'],
+        \ ['active',  'ClaudeSessionActive',  'ClaudeSessionName'],
+        \ ['idle',    'ClaudeSessionIdle',    'ClaudeSessionName'],
+        \ ['closed',  'ClaudeSessionClosed',  'ClaudeSessionNameClosed'],
         \ ]
     " The glyph is user-configurable and may contain regex metacharacters
     " (the ASCII set is literally "[A]"), so escape it into a plain match.
@@ -203,6 +230,8 @@ function! s:setup_syntax() abort
   " indented by a single space.
   syntax match ClaudeSessionHelp /^? help$/
   syntax match ClaudeSessionHelp /^ \S.*$/
+  " '… 8 more' and '… 12 hidden — I to show': notes, not rows.
+  syntax match ClaudeSessionHelp /^\s*[…\.]\{1,3} .*$/
 endfunction
 
 function! s:setup_highlight() abort
@@ -228,34 +257,265 @@ function! s:node(kind, key, id, indent, label, status) abort
         \ 'indent': a:indent,
         \ 'label':  a:label,
         \ 'status': a:status,
+        \ 'suffix': '',
         \ }
 endfunction
 
 function! s:session_line(node) abort
-  return a:node.indent . claude#panel#icon(a:node.status) . ' ' . a:node.label
+  return s:row(a:node.indent, claude#panel#icon(a:node.status),
+        \ a:node.label, a:node.suffix)
 endfunction
 
-" Same-named sessions inside one branch group get a display-only suffix; the
+" A session row: '<indent><glyph> <label>' with {suffix} pushed against the
+" right edge, and the label fitted into whatever is left between them. The
+" suffix is dropped rather than allowed to squeeze the label to nothing.
+function! s:row(indent, glyph, label, suffix) abort
+  let l:width = s:width()
+  let l:left  = a:indent . a:glyph . ' '
+  let l:room  = l:width - strchars(l:left) - strchars(a:suffix) - 1
+  if empty(a:suffix) || l:room < 4
+    return l:left . claude#sidebar#fit(l:width, l:left, a:label)
+  endif
+  let l:label = claude#sidebar#fit(l:room + 1, '', a:label)
+  let l:pad   = l:width - strchars(l:left) - strchars(l:label)
+        \       - strchars(a:suffix)
+  return l:left . l:label . repeat(' ', l:pad) . a:suffix
+endfunction
+
+" 5m / 3h / 2d since anything happened to a session. A live session is measured
+" by its last output, a finished one by when it was last opened — a disk record
+" has its last_active set to whenever Vim read it, which is no age at all.
+function! s:age(rec) abort
+  if get(a:rec, 'bufnr', -1) != -1
+    let l:seen = get(a:rec, 'last_active', 0)
+  else
+    let l:seen = get(a:rec, 'last_focus', 0) > 0
+          \ ? a:rec.last_focus : get(a:rec, 'created', 0)
+  endif
+  if l:seen <= 0
+    return ''
+  endif
+  let l:secs = max([0, localtime() - l:seen])
+  if l:secs < 3600
+    return (l:secs / 60) . 'm'
+  elseif l:secs < 86400
+    return (l:secs / 3600) . 'h'
+  endif
+  return (l:secs / 86400) . 'd'
+endfunction
+
+" Where a session lives, in six columns. Its workspace when it has one, else
+" the basename of its worktree.
+function! s:where(rec) abort
+  let l:where = get(a:rec, 'workspace', '')
+  if empty(l:where)
+    let l:where = fnamemodify(get(a:rec, 'worktree', ''), ':t')
+  endif
+  return strcharpart(l:where, 0, 6)
+endfunction
+
+" The right-hand column of a session row. In the state view nothing else says
+" where the session lives, so the row must; in the place view the parent rows
+" have already said it three times.
+function! s:suffix(rec) abort
+  let l:age = s:age(a:rec)
+  if s:grouping !=# 'state'
+    return l:age
+  endif
+  let l:where = s:where(a:rec)
+  if empty(l:where)
+    return l:age
+  endif
+  return empty(l:age) ? l:where : l:where . ' · ' . l:age
+endfunction
+
+" Whether a record survives the active filter. Matching is over everything the
+" row could be recognised by, not only what it happens to be showing.
+function! s:matches(rec) abort
+  if empty(s:filter)
+    return 1
+  endif
+  let l:hay = join([claude#session#label(a:rec), s:where(a:rec),
+        \ get(a:rec, 'branch', ''), get(a:rec, 'workspace', '')], ' ')
+  return l:hay =~? '\V' . escape(s:filter, '\')
+endfunction
+
+function! s:keep(sessions) abort
+  return empty(s:filter) ? a:sessions
+        \ : filter(copy(a:sessions), {_, r -> s:matches(r)})
+endfunction
+
+" Same-named sessions inside one group get a display-only suffix; the
 " stored name is left alone.
 function! s:disambiguate(sessions) abort
   let l:seen   = {}
   let l:labels = []
   for l:rec in a:sessions
-    let l:n = get(l:seen, l:rec.name, 0) + 1
-    let l:seen[l:rec.name] = l:n
-    call add(l:labels, l:n == 1 ? l:rec.name : l:rec.name . ' (' . l:n . ')')
+    let l:name = claude#session#label(l:rec)
+    let l:n    = get(l:seen, l:name, 0) + 1
+    let l:seen[l:name] = l:n
+    call add(l:labels, l:n == 1 ? l:name : l:name . ' (' . l:n . ')')
   endfor
   return l:labels
+endfunction
+
+" Add a session row to the buffer under construction.
+function! s:add_session(lines, nodes, rec, indent, label) abort
+  let l:node = s:node('session', '', a:rec.id, a:indent, a:label, a:rec.status)
+  let l:node.suffix = s:suffix(a:rec)
+  call add(a:lines, s:session_line(l:node))
+  call add(a:nodes, l:node)
+endfunction
+
+" A group or tree row: '<indent><marker> <label>'.
+function! s:add_group(lines, nodes, kind, key, indent, label) abort
+  call add(a:lines, a:indent . s:marker(a:key) . ' '
+        \ . s:fit(a:indent, a:label))
+  call add(a:nodes, s:node(a:kind, a:key, '', a:indent, a:label, ''))
+endfunction
+
+" An unselectable note, indented under the group it belongs to.
+function! s:add_note(lines, nodes, indent, text) abort
+  call add(a:lines, a:indent . claude#sidebar#fit(s:width(), a:indent, a:text))
+  call add(a:nodes, s:node('note', '', '', a:indent, a:text, ''))
+endfunction
+
+" ── the state view ───────────────────────────────────────────────────────────
+
+function! s:build_states(lines, nodes) abort
+  " A filter reaches the buried tail: rows asked for by name are not rows to
+  " hide, so the hide rule stands down while one is active.
+  let l:groups = claude#session#groups(!empty(s:filter))
+  let l:drawn  = 0
+
+  for l:group in l:groups
+    let l:sessions = s:keep(l:group.sessions)
+    if empty(l:sessions) && l:group.buried == 0
+      continue
+    endif
+    let l:drawn += len(l:sessions)
+
+    call s:add_group(a:lines, a:nodes, 'group', l:group.key, '',
+          \ l:group.label . ' (' . len(l:sessions) . ')')
+    " A fold that hides a match makes the filter a lie, so an active filter
+    " opens every group it matched in.
+    if has_key(s:collapsed, l:group.key) && empty(s:filter)
+      continue
+    endif
+
+    let l:cap = l:group.status ==# 'closed' && !s:done_all
+          \ ? s:done_rows() : len(l:sessions)
+    let l:shown  = l:cap < len(l:sessions) ? l:sessions[0 : l:cap - 1]
+          \                                : l:sessions
+    let l:labels = s:disambiguate(l:shown)
+    let l:i = 0
+    for l:rec in l:shown
+      call s:add_session(a:lines, a:nodes, l:rec, '  ', l:labels[l:i])
+      let l:i += 1
+    endfor
+
+    let l:rest = len(l:sessions) - len(l:shown)
+    if l:rest > 0
+      call add(a:lines, '  ' . s:fit('  ', '… ' . l:rest . ' more'))
+      call add(a:nodes,
+            \ s:node('more', '', '', '  ', '… ' . l:rest . ' more', ''))
+    endif
+    " The hide rule is suspended while filtering: rows asked for by name are
+    " not buried, so there is nothing to report.
+    if l:group.buried > 0 && empty(s:filter)
+      call s:add_note(a:lines, a:nodes, '  ',
+            \ '… ' . l:group.buried . ' hidden — I to show')
+    endif
+  endfor
+
+  if empty(l:groups) || (!empty(s:filter) && l:drawn == 0)
+    call s:add_note(a:lines, a:nodes, '  ',
+          \ empty(s:filter) ? '(no sessions)' : '(nothing matches)')
+  endif
+endfunction
+
+" ── the place view ───────────────────────────────────────────────────────────
+
+function! s:build_tree(lines, nodes) abort
+  let l:tree  = claude#session#tree(!empty(s:filter))
+  let l:drawn = 0
+
+  for l:proj in l:tree
+    " A project whose every session was filtered out is not drawn at all.
+    let l:count = 0
+    for l:wt in l:proj.worktrees
+      for l:br in l:wt.branches
+        let l:count += len(s:keep(l:br.sessions))
+      endfor
+    endfor
+    if l:count == 0 && !empty(s:filter)
+      continue
+    endif
+    let l:drawn += l:count
+
+    call s:add_group(a:lines, a:nodes, 'project', l:proj.key, '', l:proj.label)
+    if has_key(s:collapsed, l:proj.key) && empty(s:filter)
+      continue
+    endif
+
+    for l:wt in l:proj.worktrees
+      let l:node = s:node('worktree', l:wt.key, '', '  ', l:wt.path, '')
+      call add(a:lines, '  ' . s:marker(l:wt.key) . ' '
+            \ . s:fit('  ', s:home_relative(l:wt.label)))
+      call add(a:nodes, l:node)
+      if has_key(s:collapsed, l:wt.key) && empty(s:filter)
+        continue
+      endif
+
+      for l:br in l:wt.branches
+        let l:sessions = s:keep(l:br.sessions)
+        if empty(l:sessions) && !empty(s:filter)
+          continue
+        endif
+        call s:add_group(a:lines, a:nodes, 'branch', l:br.key, '    ',
+              \ l:br.label)
+        if has_key(s:collapsed, l:br.key) && empty(s:filter)
+          continue
+        endif
+
+        let l:labels = s:disambiguate(l:sessions)
+        let l:i = 0
+        for l:rec in l:sessions
+          call s:add_session(a:lines, a:nodes, l:rec, '      ', l:labels[l:i])
+          let l:i += 1
+        endfor
+      endfor
+    endfor
+  endfor
+
+  if empty(l:tree) || (!empty(s:filter) && l:drawn == 0)
+    call s:add_note(a:lines, a:nodes, '  ',
+          \ empty(s:filter) ? '(no sessions)' : '(nothing matches)')
+  endif
+endfunction
+
+" ── the whole buffer ─────────────────────────────────────────────────────────
+
+" The right-hand side of the title line: what the panel most wants to say.
+function! s:header_count() abort
+  if !empty(s:filter)
+    return '/' . s:filter
+  endif
+  let l:live    = claude#session#live()
+  let l:waiting = len(filter(copy(l:live), {_, r -> r.status ==# 'waiting'}))
+  if l:waiting > 0
+    return l:waiting . ' waiting'
+  endif
+  return '(' . len(l:live) . ')'
 endfunction
 
 function! s:build() abort
   let l:lines = []
   let l:nodes = []
-  let l:live  = len(claude#session#live())
 
   let l:title = 'Claude Sessions'
-  let l:count = '(' . l:live . ')'
-  let l:pad   = max([1, s:width() - strchars(l:title) - strchars(l:count) - 1])
+  let l:count = s:header_count()
+  let l:pad   = max([1, s:width() - strchars(l:title) - strchars(l:count)])
   call add(l:lines, l:title . repeat(' ', l:pad) . l:count)
   call add(l:nodes, s:node('header', '', '', '', l:title, ''))
 
@@ -263,8 +523,12 @@ function! s:build() abort
     for l:h in [
           \ '',
           \ ' <CR>/o open   i split   s vsplit',
-          \ ' t tab     n new    r rename',
+          \ ' t tab     n new    N new here',
+          \ ' g ' . (s:grouping ==# 'state' ? 'by place' : 'by state')
+          \   . '  / filter  r rename',
           \ ' d end     D purge  R refresh',
+          \ ' I ' . (claude#session#show_hidden() ? 'hide' : 'show')
+          \   . ' hidden',
           \ ' <Space> fold   q hide   ? help',
           \ ]
       call add(l:lines, l:h)
@@ -275,48 +539,11 @@ function! s:build() abort
   call add(l:lines, '')
   call add(l:nodes, s:node('blank', '', '', '', '', ''))
 
-  let l:tree = claude#session#tree()
-  if empty(l:tree)
-    call add(l:lines, '  (no sessions)')
-    call add(l:nodes, s:node('empty', '', '', '', '', ''))
+  if s:grouping ==# 'state'
+    call s:build_states(l:lines, l:nodes)
+  else
+    call s:build_tree(l:lines, l:nodes)
   endif
-
-  for l:proj in l:tree
-    let l:n = s:node('project', l:proj.key, '', '', l:proj.label, '')
-    call add(l:lines, s:marker(l:proj.key) . ' ' . s:fit('', l:proj.label))
-    call add(l:nodes, l:n)
-    if has_key(s:collapsed, l:proj.key)
-      continue
-    endif
-
-    for l:wt in l:proj.worktrees
-      let l:label = s:home_relative(l:wt.label)
-      call add(l:lines, '  ' . s:marker(l:wt.key) . ' ' . s:fit('  ', l:label))
-      call add(l:nodes, s:node('worktree', l:wt.key, '', '  ', l:wt.path, ''))
-      if has_key(s:collapsed, l:wt.key)
-        continue
-      endif
-
-      for l:br in l:wt.branches
-        call add(l:lines,
-              \ '    ' . s:marker(l:br.key) . ' ' . s:fit('    ', l:br.label))
-        call add(l:nodes, s:node('branch', l:br.key, '', '    ', l:br.label, ''))
-        if has_key(s:collapsed, l:br.key)
-          continue
-        endif
-
-        let l:labels = s:disambiguate(l:br.sessions)
-        let l:i = 0
-        for l:rec in l:br.sessions
-          let l:node = s:node('session', '', l:rec.id, '      ',
-                \ s:fit('      ', l:labels[l:i]), l:rec.status)
-          call add(l:lines, s:session_line(l:node))
-          call add(l:nodes, l:node)
-          let l:i += 1
-        endfor
-      endfor
-    endfor
-  endfor
 
   call add(l:lines, '')
   call add(l:nodes, s:node('blank', '', '', '', '', ''))
@@ -393,6 +620,12 @@ endfunction
 " Repaint the status column in place. Falls back to a full rebuild when the
 " set of sessions itself changed, since the tree shape may differ.
 function! s:repaint() abort
+  if s:grouping ==# 'state'
+    " The status *is* the row's position here: a session that starts waiting
+    " moves to another group. There is no column to repaint in place.
+    call s:render()
+    return
+  endif
   let l:nodes = getbufvar(s:bufnr, 'claude_panel_nodes', [])
   let l:ids   = map(filter(copy(claude#session#list()),
         \ {_, r -> 1}), {_, r -> r.id})
@@ -431,10 +664,15 @@ function! s:setup_keys() abort
   nnoremap <buffer> <silent> s       :call <SID>open('vsplit')<CR>
   nnoremap <buffer> <silent> t       :call <SID>open('tab')<CR>
   nnoremap <buffer> <silent> n       :call <SID>new()<CR>
+  nnoremap <buffer> <silent> N       :call <SID>new_asking()<CR>
+  nnoremap <buffer> <silent> g       :call <SID>swap_grouping()<CR>
+  nnoremap <buffer> <silent> /       :call <SID>prompt_filter()<CR>
   nnoremap <buffer> <silent> r       :call <SID>rename()<CR>
   nnoremap <buffer> <silent> d       :call <SID>end_session()<CR>
   nnoremap <buffer> <silent> D       :call <SID>purge()<CR>
   nnoremap <buffer> <silent> R       :call <SID>full_refresh()<CR>
+  " NERDTree's key for "show the hidden ones". Lowercase i keeps splitting.
+  nnoremap <buffer> <silent> I       :call <SID>toggle_hidden()<CR>
   nnoremap <buffer> <silent> za      :call <SID>fold()<CR>
   nnoremap <buffer> <silent> <Space> :call <SID>fold()<CR>
   nnoremap <buffer> <silent> q       :call claude#panel#close()<CR>
@@ -457,6 +695,9 @@ function! s:activate() abort
   endif
   if l:node.kind ==# 'session'
     call claude#panel#open_session(l:node.id, 'here')
+  elseif l:node.kind ==# 'more'
+    let s:done_all = 1
+    call s:render()
   elseif !empty(l:node.key)
     call s:fold()
   endif
@@ -488,12 +729,76 @@ function! s:help() abort
   call s:render()
 endfunction
 
+" Show or hide the finished sessions the panel buries — the ones nobody named
+" and the ones nobody has touched for days. They stay in the registry either
+" way.
+function! s:toggle_hidden() abort
+  call claude#session#toggle_hidden()
+  call s:render()
+endfunction
+
 function! s:full_refresh() abort
   call claude#session#refresh()
   call s:render()
 endfunction
 
+" Swap the top level between what sessions are doing and where they live.
+function! s:swap_grouping() abort
+  let s:grouping = s:grouping ==# 'state' ? 'place' : 'state'
+  call s:render()
+endfunction
+
+function! s:prompt_filter() abort
+  try
+    let l:answer = input('Filter: ', s:filter)
+  catch /^Vim:Interrupt$/
+    redraw
+    return
+  endtry
+  redraw
+  let s:filter = trim(l:answer)
+  call s:render()
+endfunction
+
+" The workspace a new session should run in, given where the cursor is.
+" '' means "wherever a session with no workspace would run": the selected
+" workspace, else Vim's directory.
+function! s:workspace_under_cursor() abort
+  let l:node = s:current_node()
+  if !empty(l:node)
+    if l:node.kind ==# 'session'
+      let l:id = get(claude#session#get(l:node.id), 'workspace', '')
+      if !empty(l:id)
+        return l:id
+      endif
+    elseif l:node.kind ==# 'worktree'
+      " The place view names a directory, not a workspace id.
+      for l:ws in claude#workspace#list()
+        if l:ws.path ==# l:node.label
+          return l:ws.id
+        endif
+      endfor
+    endif
+  endif
+  " Nothing under the cursor to go on: the workspace <leader>cw selected, and
+  " otherwise wherever a session with no workspace would have run anyway.
+  return get(claude#workspace#current(), 'id', '')
+endfunction
+
+" n — a session here, now. No prompts: the row under the cursor already says
+" which workspace "here" is, and an unnamed session labels itself from its
+" first message.
 function! s:new() abort
+  let l:ws = s:workspace_under_cursor()
+  call s:enter_main()
+  let l:id = claude#session#spawn({'workspace': l:ws, 'prompt': 0})
+  if !empty(l:id)
+    call claude#session#touch_focus(l:id)
+  endif
+endfunction
+
+" N — the deliberate one: which branch, and what to call it.
+function! s:new_asking() abort
   call s:enter_main()
   let l:id = claude#session#new()
   if !empty(l:id)
@@ -507,7 +812,7 @@ function! s:rename() abort
     return
   endif
   let l:rec = claude#session#get(l:node.id)
-  let l:new = input('Rename to: ', l:rec.name)
+  let l:new = input('Rename to: ', get(l:rec, 'name', ''))
   redraw
   if !empty(l:new)
     call claude#session#rename(l:node.id, l:new)
@@ -520,7 +825,8 @@ function! s:end_session() abort
     return
   endif
   let l:rec = claude#session#get(l:node.id)
-  if confirm('End session "' . l:rec.name . '"?', "&Yes\n&No", 2) == 1
+  if confirm('End session "' . claude#session#label(l:rec) . '"?',
+        \ "&Yes\n&No", 2) == 1
     call claude#session#delete(l:node.id)
   endif
 endfunction
@@ -531,8 +837,8 @@ function! s:purge() abort
     return
   endif
   let l:rec = claude#session#get(l:node.id)
-  if confirm('Purge "' . l:rec.name . '" and delete its transcript?',
-        \ "&Yes\n&No", 2) != 1
+  if confirm('Purge "' . claude#session#label(l:rec)
+        \ . '" and delete its transcript?', "&Yes\n&No", 2) != 1
     return
   endif
   if confirm('This cannot be undone. Really delete the transcript?',
@@ -595,6 +901,26 @@ endfunction
 
 " ── test seam ────────────────────────────────────────────────────────────────
 
+" Which view the panel is drawing — 'state' or 'place'. Passing a name swaps
+" to it and redraws, which is what the g key does.
+function! claude#panel#_grouping(...) abort
+  if a:0 > 0 && a:1 !=# s:grouping
+    let s:grouping = a:1
+    call s:render()
+  endif
+  return s:grouping
+endfunction
+
+" The active filter, and a way to set one without the prompt. Test seam; the
+" user types one at the / key.
+function! claude#panel#_filter(...) abort
+  if a:0 > 0
+    let s:filter = a:1
+    call s:render()
+  endif
+  return s:filter
+endfunction
+
 function! claude#panel#_lines() abort
   if s:bufnr == -1 || !bufexists(s:bufnr)
     return []
@@ -610,7 +936,10 @@ function! claude#panel#_reset() abort
   let s:bufnr      = -1
   let s:prev_winid = -1
   let s:show_help  = 0
-  let s:collapsed  = {}
+  let s:collapsed  = {'st:done': 1}
   let s:rendered   = []
+  let s:grouping   = 'state'
+  let s:filter     = ''
+  let s:done_all   = 0
   call claude#sidebar#_reset()
 endfunction

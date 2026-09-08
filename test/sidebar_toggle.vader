@@ -20,6 +20,7 @@ Before:
   let g:claude_session_store = g:_store_dir . '/sessions.json'
   let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
   let g:claude_difftree_store = g:_store_dir . '/bases.json'
+  let g:_saved_limit = get(g:, 'claude_panel_closed_limit', 10)
   let g:claude_panel_closed_limit = 0
   let g:claude_panel_nerdtree_stack = 1
   let g:claude_panel_height = 15
@@ -80,6 +81,7 @@ After:
   call claude#panel#_reset()
   call claude#difftree#_reset()
   call claude#sidebar#_reset()
+  let g:claude_panel_closed_limit = g:_saved_limit
   let g:claude_session_store = g:_saved_store
   let g:claude_difftree_store = g:_saved_dtstore
   call claude#store#_reset()

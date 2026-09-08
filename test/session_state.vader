@@ -1,0 +1,123 @@
+" Tests for the waiting signal: what the bottom of a Claude terminal is read
+" as, and how that reaches claude#session#status().
+"
+" The classifier is the whole reason the panel can group by state rather than
+" by place, so it is tested on captured text first and against a real terminal
+" second.
+
+Before:
+  call claude#session#_reset()
+  call claude#store#_reset()
+  let g:_saved_cmd   = get(g:, 'claude_cmd', 'claude')
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_saved_idle  = get(g:, 'claude_panel_idle_secs', 30)
+  let g:claude_cmd   = 'sleep 30'
+  let g:_dir = tempname()
+  call mkdir(g:_dir, 'p')
+  let g:claude_session_store = g:_dir . '/sessions.json'
+
+After:
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#session#_reset()
+  call claude#store#_reset()
+  let g:claude_cmd            = g:_saved_cmd
+  let g:claude_session_store  = g:_saved_store
+  let g:claude_panel_idle_secs = g:_saved_idle
+  silent! unlet g:claude_panel_waiting_pat
+  silent! unlet g:claude_panel_working_pat
+  call delete(g:_dir, 'rf')
+
+" ── reading the terminal ─────────────────────────────────────────────────────
+
+Execute (the spinner footer means working):
+  AssertEqual 'active', claude#session#_classify(
+        \ "✽ Frobnicating… (12s · esc to interrupt)")
+
+Execute (a numbered choice means the session is waiting for you):
+  AssertEqual 'waiting', claude#session#_classify(
+        \ join(['Do you want to make this edit to panel.vim?',
+        \       '❯ 1. Yes',
+        \       '  2. No, and tell Claude what to do differently'], "\n"))
+
+Execute (a numbered list without the pointer is still a question):
+  AssertEqual 'waiting', claude#session#_classify(
+        \ "Pick one:\n 1. Keep going\n 2. Stop")
+
+Execute (a yes/no prompt is a question too):
+  AssertEqual 'waiting', claude#session#_classify('Overwrite it? (y/n)')
+
+Execute (an empty prompt box says nothing either way):
+  AssertEqual '', claude#session#_classify("╭──────────╮\n│ >        │\n╰──────────╯")
+
+Execute (nothing on the screen is not an answer):
+  AssertEqual '', claude#session#_classify('')
+
+Execute (working wins over a question left further up the screen):
+  " The spinner is only drawn while Claude is not waiting for anything, so a
+  " stale numbered list above it must not outrank it.
+  AssertEqual 'active', claude#session#_classify(
+        \ "❯ 1. Yes\n✽ Working… (esc to interrupt)")
+
+Execute (both patterns are configurable):
+  let g:claude_panel_working_pat = 'BUSY'
+  let g:claude_panel_waiting_pat = 'ASKING'
+  AssertEqual 'active',  claude#session#_classify('now BUSY doing it')
+  AssertEqual 'waiting', claude#session#_classify('now ASKING you')
+  AssertEqual '',        claude#session#_classify('esc to interrupt'),
+        \ 'the default pattern is replaced, not added to'
+
+" ── how it reaches the status ────────────────────────────────────────────────
+
+Execute (a session whose terminal is asking a question is waiting):
+  " A stand-in for Claude: fill the screen, print a permission prompt at the
+  " bottom of it the way Claude does, then stay alive. The blank lines matter —
+  " s:term_tail() reads the bottom rows of the terminal, not the last thing
+  " written to it.
+  let script = g:_dir . '/asks.sh'
+  call writefile(['#!/bin/sh', 'i=0',
+        \ 'while [ $i -lt 60 ]; do echo; i=$((i+1)); done',
+        \ 'echo "Do you want to proceed?"',
+        \ 'echo "1. Yes"', 'exec sleep 30'], script)
+  call setfperm(script, 'rwxr-xr-x')
+  let g:claude_cmd = script
+
+  let id = claude#session#new('asker', 'new')
+  for _ in range(100)
+    call claude#session#poll()
+    if claude#session#status(id) ==# 'waiting'
+      break
+    endif
+    sleep 20m
+  endfor
+  AssertEqual 'waiting', claude#session#status(id)
+  AssertEqual 'waiting', claude#session#get(id).status,
+        \ 'the poll should have written it back to the record'
+
+Execute (a session printing nothing falls back to the idle timer):
+  let id = claude#session#new('quiet', 'new')
+  call claude#session#poll()
+  AssertEqual 'active', claude#session#status(id),
+        \ 'it produced output just now, whatever that output was'
+
+  let g:claude_panel_idle_secs = 0
+  AssertEqual 'idle', claude#session#status(id),
+        \ 'with no timer left and nothing on screen, it is idle'
+
+Execute (a fabricated record still carries its status verbatim):
+  call claude#session#_inject({'id': 'fake', 'name': 'pinned',
+        \ 'status': 'waiting', 'term_tail': 'esc to interrupt'})
+  AssertEqual 'waiting', claude#session#status('fake'),
+        \ 'there is no job behind it to read'
+
+Execute (waiting is a live status, and sorts with the live ones):
+  call claude#session#_inject({'id': 'w', 'name': 'asking',
+        \ 'status': 'waiting'})
+  call claude#session#_inject({'id': 'c', 'name': 'finished',
+        \ 'status': 'closed'})
+  AssertEqual 1, len(claude#session#live()),
+        \ 'a waiting session is running, so it is live'
+  AssertEqual ['w', 'c'], map(copy(claude#session#list()), {_, r -> r.id}),
+        \ 'live sessions sort before finished ones'

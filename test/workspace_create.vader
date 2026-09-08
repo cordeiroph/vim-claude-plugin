@@ -1,0 +1,225 @@
+" Tests for claude#workspace#create() — the git worktree behind a session.
+" Uses a real fixture repository; no terminal, no Claude process.
+
+Before:
+  call claude#workspace#_reset()
+  call claude#store#_reset()
+  let g:_saved_cwd   = getcwd()
+  let g:_saved_store = get(g:, 'claude_workspace_store', '')
+  let g:_saved_dir   = get(g:, 'claude_workspace_dir', '')
+
+  " The repository is a subdirectory of the temp root, so worktrees placed
+  " beside it are cleaned up with everything else.
+  let g:_root = tempname()
+  call mkdir(g:_root, 'p')
+  let g:_root = resolve(g:_root)
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo, 'p')
+  let g:_git  = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_git . 'init -q -b main')
+  call system(g:_git . 'config user.email t@t')
+  call system(g:_git . 'config user.name test')
+  call writefile(['hello'], g:_repo . '/file.txt')
+  call system(g:_git . 'add -A')
+  call system(g:_git . 'commit -qm first')
+  call system(g:_git . 'branch feature')
+
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  let g:claude_workspace_dir   = ''
+  execute 'cd ' . fnameescape(g:_repo)
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  let g:claude_workspace_store = g:_saved_store
+  let g:claude_workspace_dir   = g:_saved_dir
+  call claude#workspace#_reset()
+  call claude#store#_reset()
+  call delete(g:_root, 'rf')
+
+" ── the repository ───────────────────────────────────────────────────────────
+
+Execute (the project root is the main checkout):
+  AssertEqual g:_repo, claude#workspace#project_root()
+
+" ── creating ─────────────────────────────────────────────────────────────────
+
+Execute (an existing branch is checked out into a worktree beside the repo):
+  let ws = claude#workspace#create('feature', '')
+  Assert !empty(ws), 'a workspace should have been created'
+  AssertEqual 'feature',  ws.name
+  AssertEqual 'feature',  ws.branch
+  AssertEqual g:_repo,    ws.project
+  AssertEqual g:_root . '/repo-feature', ws.path
+  Assert isdirectory(ws.path), 'the worktree directory should exist'
+  Assert filereadable(ws.path . '/file.txt'),
+        \ 'the worktree should hold the branch content'
+
+Execute (an unknown branch is created off HEAD):
+  let ws = claude#workspace#create('brand-new', '')
+  Assert !empty(ws), 'a workspace should have been created'
+  AssertEqual 'brand-new', ws.branch
+  let head = systemlist('git -C ' . shellescape(ws.path)
+        \ . ' rev-parse --abbrev-ref HEAD')
+  AssertEqual 'brand-new', head[0]
+  Assert !empty(systemlist(g:_git
+        \ . 'show-ref --verify refs/heads/brand-new')),
+        \ 'the branch should now exist in the repository'
+
+" ── a branch that already has a checkout ─────────────────────────────────────
+"
+" A branch lives in one worktree only, so asking for one that is already
+" checked out means "work there", not "fail".
+
+Execute (the branch of an existing workspace hands back that workspace):
+  let first = claude#workspace#create('feature', '')
+  let again = claude#workspace#create('feature', 'a different name')
+  AssertEqual first.id,   again.id, 'the same workspace should come back'
+  AssertEqual first.path, again.path
+  AssertEqual 1, len(claude#workspace#list()),
+        \ 'no second record should have been written'
+
+Execute (the branch of the main checkout resolves to it, as a non-workspace):
+  let ws = claude#workspace#create('main', '')
+  AssertEqual '',      ws.id, 'an empty id means it is not a workspace'
+  AssertEqual g:_repo, ws.path
+  AssertEqual 'main',  ws.branch
+  AssertEqual [], claude#workspace#list(), 'and nothing was persisted'
+  Assert !isdirectory(g:_root . '/repo-main'),
+        \ 'no worktree should have been created'
+
+Execute (a worktree made outside the plugin is adopted):
+  let outside = g:_root . '/made-by-hand'
+  call system(g:_git . 'worktree add -q ' . shellescape(outside) . ' feature')
+  Assert isdirectory(outside), 'precondition: the worktree exists'
+  AssertEqual [], claude#workspace#list(), 'and is unknown to the plugin'
+
+  let ws = claude#workspace#create('feature', '')
+  AssertEqual 'feature', ws.name, 'adopted under the branch name'
+  AssertEqual outside,   ws.path, 'pointing at the worktree that exists'
+  AssertEqual ['feature'], map(copy(claude#workspace#list()), {_, w -> w.name}),
+        \ 'and it is listed from now on'
+
+Execute (a blank branch creates nothing):
+  AssertEqual {}, claude#workspace#create('', 'anything')
+  AssertEqual [], claude#workspace#list()
+
+Execute (an explicit name is used for the directory, not the branch):
+  let ws = claude#workspace#create('feature', 'review')
+  AssertEqual 'review',  ws.name
+  AssertEqual 'feature', ws.branch
+  AssertEqual g:_root . '/repo-review', ws.path
+
+Execute (g:claude_workspace_dir decides where worktrees live):
+  let g:claude_workspace_dir = g:_root . '/trees'
+  let ws = claude#workspace#create('feature', '')
+  AssertEqual g:_root . '/trees/feature', ws.path
+  Assert isdirectory(ws.path), 'the parent directory should be created'
+
+Execute (a directory already in the way is refused):
+  call mkdir(g:_root . '/repo-feature', 'p')
+  AssertEqual {}, claude#workspace#create('feature', '')
+  AssertEqual [], claude#workspace#list()
+
+Execute (a branch name with slashes becomes one directory, not a tree):
+  call system(g:_git . 'branch topic/deep')
+  let ws = claude#workspace#create('topic/deep', '')
+  AssertEqual 'topic-deep', ws.name
+  AssertEqual 'topic/deep', ws.branch
+  AssertEqual g:_root . '/repo-topic-deep', ws.path
+  Assert isdirectory(ws.path), 'the worktree directory should exist' 
+
+" ── remote branches ──────────────────────────────────────────────────────────
+
+Execute (a branch that only exists on a remote gets a local one that tracks it):
+  " A bare clone stands in for the remote; the fixture fetches from it.
+  let remote = g:_root . '/remote.git'
+  call system('git clone -q --bare ' . shellescape(g:_repo) . ' '
+        \ . shellescape(remote))
+  call system(g:_git . 'remote add origin ' . shellescape(remote))
+  call system(g:_git . 'fetch -q origin')
+  call system(g:_git . 'branch -D feature')
+
+  let ws = claude#workspace#create('feature', '')
+  AssertEqual 'feature', ws.branch
+  let upstream = systemlist('git -C ' . shellescape(ws.path)
+        \ . ' rev-parse --abbrev-ref --symbolic-full-name @{u}')
+  AssertEqual 'origin/feature', upstream[0]
+
+Execute (the remote-tracking name may be typed in full):
+  let remote = g:_root . '/remote.git'
+  call system('git clone -q --bare ' . shellescape(g:_repo) . ' '
+        \ . shellescape(remote))
+  call system(g:_git . 'remote add origin ' . shellescape(remote))
+  call system(g:_git . 'fetch -q origin')
+  call system(g:_git . 'branch -D feature')
+
+  let ws = claude#workspace#create('origin/feature', '')
+  AssertEqual 'feature', ws.branch, 'the local branch drops the remote'
+  AssertEqual 'feature', ws.name,
+        \ 'the workspace is named after the branch it holds' 
+
+Execute (origin/x with a local x already there checks out the local branch):
+  let remote = g:_root . '/remote.git'
+  call system('git clone -q --bare ' . shellescape(g:_repo) . ' '
+        \ . shellescape(remote))
+  call system(g:_git . 'remote add origin ' . shellescape(remote))
+  call system(g:_git . 'fetch -q origin')
+
+  let ws = claude#workspace#create('origin/feature', '')
+  AssertEqual 'feature', ws.branch,
+        \ 'the existing local branch is used, not a second one'
+  let head = systemlist('git -C ' . shellescape(ws.path)
+        \ . ' rev-parse --abbrev-ref HEAD')
+  AssertEqual 'feature', head[0]
+
+" ── listing ──────────────────────────────────────────────────────────────────
+
+Execute (created workspaces are listed for this repository):
+  call claude#workspace#create('feature', '')
+  call claude#workspace#create('brand-new', '')
+  let names = map(copy(claude#workspace#list()), {_, w -> w.name})
+  call sort(names)
+  AssertEqual ['brand-new', 'feature'], names
+
+Execute (a worktree removed behind our back is pruned from the list):
+  let ws = claude#workspace#create('feature', '')
+  call system('git -C ' . shellescape(g:_repo) . ' worktree remove '
+        \ . shellescape(ws.path))
+  Assert !isdirectory(ws.path), 'the worktree should be gone'
+  AssertEqual [], claude#workspace#list()
+  AssertEqual {}, claude#workspace#get('feature')
+
+" ── the selected workspace ───────────────────────────────────────────────────
+
+Execute (nothing is selected until it is chosen):
+  AssertEqual {},        claude#workspace#current()
+  AssertEqual getcwd(),  claude#workspace#cwd()
+
+Execute (selecting a workspace makes it the directory new sessions use):
+  let ws = claude#workspace#create('feature', '')
+  Assert claude#workspace#set_current('feature'), 'selection should take'
+  AssertEqual 'feature', claude#workspace#current().name
+  AssertEqual ws.path,   claude#workspace#cwd()
+
+Execute (selecting an unknown workspace changes nothing):
+  Assert !claude#workspace#set_current('nope')
+  AssertEqual {}, claude#workspace#current()
+
+Execute (selecting one works without NERDTree installed):
+  call claude#workspace#create('feature', '')
+  call claude#workspace#select('feature')
+  AssertEqual 'feature', claude#workspace#current().name,
+        \ 'the selection stands; only the re-rooting needs NERDTree'
+
+Execute (selecting an unknown workspace leaves the selection alone):
+  call claude#workspace#create('feature', '')
+  call claude#workspace#select('feature')
+  call claude#workspace#select('nope')
+  AssertEqual 'feature', claude#workspace#current().name
+
+Execute (the empty id selects the main checkout again):
+  call claude#workspace#create('feature', '')
+  call claude#workspace#set_current('feature')
+  Assert claude#workspace#set_current('')
+  AssertEqual {},       claude#workspace#current()
+  AssertEqual getcwd(), claude#workspace#cwd()
