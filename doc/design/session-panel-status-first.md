@@ -163,7 +163,7 @@ composes a session line.
 | `i` `s` `t` | Open in a split / vsplit / tab | Unchanged |
 | **`g`** | **Swap the top level: state ⇄ workspace** | **New** |
 | **`/`** | **Filter every group by label** | **New** |
-| **`n`** | **New session here, no prompts** | **Changed** (§5.1) |
+| **`n`** | **New session here, asking only its name** | **Changed** (§5.1) |
 | **`N`** | **New session: branch, then name** | **New** (§5.2) |
 | `r` | Rename the session under the cursor | Unchanged |
 | `d` / `D` | End / purge the session | Unchanged |
@@ -270,7 +270,7 @@ configuration precisely so that this is a settings change and not a redesign.
 In a state-grouped tree the cursor is no longer over a workspace, so `n` has
 lost the context `s:new()` (`panel.vim:791`) never used anyway.
 
-### 5.1 `n` — here, now, no questions
+### 5.1 `n` — here, and what to call it
 
 | Cursor is on | Session is created in |
 |--------------|-----------------------|
@@ -278,12 +278,15 @@ lost the context `s:new()` (`panel.vim:791`) never used anyway.
 | A workspace or project row (`g` view) | That workspace |
 | A state group header, the title, or a blank | `claude#workspace#current()` (`workspace.vim:431`), else the root workspace |
 
-No prompts. The session is unnamed, so §6.1 labels it from its first message as
-soon as there is one. If the chosen workspace's directory has gone missing, the
-existing warning path in `s:spawn_dir()` (`session.vim:796`) applies and the
-root workspace is used.
+One question, not two. The row under the cursor has already answered *where*,
+so the only thing worth asking is what to call it — and a blank answer is still
+an answer: the session goes unnamed and §6.1 labels it from its first message.
+`g:claude_session_prompt_name = 0` skips the question, as it skips both of `N`'s.
+If the chosen workspace's directory has gone missing, the existing warning path
+in `s:spawn_dir()` (`session.vim:796`) applies and the root workspace is used.
 
-This is the common case and it now costs one keystroke.
+This is the common case, and it now costs one keystroke and one answer instead
+of two.
 
 ### 5.2 `N` — the full flow
 
@@ -302,10 +305,11 @@ abandons everything.
 
 `claude#session#new()` (`:906`) is today the only way in, and its two
 positional arguments (`name`, `placement`) cannot express "in this workspace,
-without asking". One new entry point owns the work:
+asking only for a name". One new entry point owns the work:
 
 ```vim
-" opts: workspace (id), name, branch, placement, prompt (0/1)
+" opts: workspace (id), name, branch, placement,
+"       prompt (branch then name), ask_name (name only)
 function! claude#session#spawn(opts) abort
 ```
 
@@ -524,7 +528,7 @@ changed are listed as such.
 | New: `test/session_label.vader` | Name > snippet > id; the snippet read from a transcript; the timestamp fallback gone; a stored name still winning; an auto `claude <date>` name dropped in favour of the first message; two identical snippets disambiguated |
 | `test/session_hidden.vader` | **Changed**: the `I` assertions move from "unnamed anywhere" to "buried in Done" — an unnamed *live* session is now listed, and `all()` still sees what `list()` hides. A new section covers the staleness rule, including `stale_days = 0` |
 | `test/panel_render.vader` | **Changed**: the four place-shaped tests ask for the place view first; the duplicate-label test reads rows rather than a bare line, since rows now carry a suffix |
-| `test/panel_keys.vader` | **Changed**: `I` is tested on finished sessions, and the help text now reads `I show hidden`. New: `n` starting a session without asking anything, `N` mapped to the prompting path, and the new session being the one you land in |
+| `test/panel_keys.vader` | **Changed**: `I` is tested on finished sessions, and the help text now reads `I show hidden`. New: `n` asking for a name and nothing else, a blank answer leaving it unnamed, `g:claude_session_prompt_name = 0` skipping the question, `N` mapped to the prompting path, and the new session being the one you land in |
 | `test/session_workspace.vader` | **Changed**: an unnamed live session is listed and only buried once it ends; the transcript case asserts `snippet` rather than a name. New: `n` inheriting the workspace of the row under the cursor, and falling back to the selected workspace with no row to read |
 | `test/session_registry.vader`, the rest | Unchanged, re-run as regression guards |
 

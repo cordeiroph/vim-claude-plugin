@@ -253,9 +253,10 @@ g:claude_session_store~
                                                   *g:claude_session_prompt_name*
 g:claude_session_prompt_name~
   When 1 (default), starting a session asks for a branch and then a name
-  (see |claude-workspaces|). Set to 0 to skip both: the session gets no
-  workspace and no name, Claude names the conversation itself, and the row
-  stays hidden until `I` reveals it (see |claude-unnamed|).
+  (see |claude-workspaces|); the panel's `n` asks for the name only. Set to 0
+  to skip every prompt: the session gets no workspace and no name, Claude
+  names the conversation itself, and the row is buried once it finishes (see
+  |claude-unnamed|).
 
   Default: 1
 
@@ -608,7 +609,7 @@ Keys inside the panel~
   s            Open the session in a vertical split
   t            Open the session in a new tab
   n            Start a session where the row under the cursor lives, asking
-               nothing at all
+               only what to call it
   N            Start a session, asking for a branch and then a name
                (|claude-workspaces|)
   g            Swap the top level: state <-> place

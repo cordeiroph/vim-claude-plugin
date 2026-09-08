@@ -291,7 +291,10 @@ Execute (a name passed as an argument still names the session):
   AssertEqual 1, len(claude#session#list())
 
 Execute (n starts a session in the workspace of the row under the cursor):
+  " n asks for a name; this is about where it lands, so the prompt is off.
+  let g:claude_session_prompt_name = 0
   call feedkeys("feature-branch\<CR>\<CR>", 't')
+  let g:claude_session_prompt_name = 1
   let first = claude#session#new('', '')
   let ws    = claude#session#get(first).workspace
   Assert !empty(ws), 'the fixture session should have a workspace'
@@ -300,7 +303,9 @@ Execute (n starts a session in the workspace of the row under the cursor):
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   call cursor(1, 1)
   call search(claude#session#label(claude#session#get(first)), 'W')
+  let g:claude_session_prompt_name = 0
   normal n
+  let g:claude_session_prompt_name = 1
 
   let ids = []
   for rec in claude#session#live()
@@ -319,7 +324,9 @@ Execute (n away from any session falls back to the selected workspace):
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   call cursor(1, 1)
+  let g:claude_session_prompt_name = 0
   normal n
+  let g:claude_session_prompt_name = 1
   let live = claude#session#live()
   AssertEqual 1, len(live)
   AssertEqual ws.id, live[0].workspace,

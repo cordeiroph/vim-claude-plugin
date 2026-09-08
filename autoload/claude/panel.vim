@@ -523,7 +523,7 @@ function! s:build() abort
     for l:h in [
           \ '',
           \ ' <CR>/o open   i split   s vsplit',
-          \ ' t tab     n new    N new here',
+          \ ' t tab     n new here  N new…',
           \ ' g ' . (s:grouping ==# 'state' ? 'by place' : 'by state')
           \   . '  / filter  r rename',
           \ ' d end     D purge  R refresh',
@@ -785,13 +785,17 @@ function! s:workspace_under_cursor() abort
   return get(claude#workspace#current(), 'id', '')
 endfunction
 
-" n — a session here, now. No prompts: the row under the cursor already says
-" which workspace "here" is, and an unnamed session labels itself from its
-" first message.
+" n — a session here. One question, not two: the row under the cursor already
+" says which workspace "here" is, so only the name is worth asking for. Leaving
+" it blank is still an answer — the session labels itself from its first
+" message — and g:claude_session_prompt_name = 0 skips the question entirely.
 function! s:new() abort
   let l:ws = s:workspace_under_cursor()
   call s:enter_main()
-  let l:id = claude#session#spawn({'workspace': l:ws, 'prompt': 0})
+  let l:id = claude#session#spawn({
+        \ 'workspace': l:ws,
+        \ 'ask_name':  get(g:, 'claude_session_prompt_name', 1),
+        \ })
   if !empty(l:id)
     call claude#session#touch_focus(l:id)
   endif

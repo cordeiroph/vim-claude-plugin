@@ -922,6 +922,8 @@ endfunction
 "
 " opts:
 "   prompt     1 asks for a branch and then a name before anything is created
+"   ask_name   1 asks for a name only — the panel's n key, which reads the
+"              workspace off the row under the cursor rather than asking
 "   name       session name; '' leaves it unnamed and it labels itself from
 "              its first message instead
 "   branch     branch to give the session a workspace on; '' for none
@@ -946,6 +948,8 @@ function! claude#session#spawn(opts) abort
     if !l:ok
       return ''
     endif
+  endif
+  if get(a:opts, 'prompt', 0) || get(a:opts, 'ask_name', 0)
     let [l:ok, l:name] = s:prompt_name()
     if !l:ok
       return ''

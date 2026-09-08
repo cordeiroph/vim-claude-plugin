@@ -211,15 +211,41 @@ Execute (the help block names the I key):
 
 " ── starting a session ───────────────────────────────────────────────────────
 
-Execute (n asks nothing at all):
-  " No feedkeys(): a prompt here would hang the suite, which is the point.
+" An input() prompt reached through a mapping cannot be answered with
+" feedkeys(), so what n asks is tested on the path it calls.
+Execute (n asks for a name, and nothing else):
+  call feedkeys("a quick one\<CR>", 't')
+  let id = claude#session#spawn({'ask_name': 1, 'placement': 'new'})
+  let rec = claude#session#get(id)
+  AssertEqual 'a quick one', rec.name
+  AssertEqual 1,  rec.named
+  AssertEqual '', rec.workspace, 'no branch was asked for'
+
+Execute (a blank name is still an answer):
+  call feedkeys("\<CR>", 't')
+  let id = claude#session#spawn({'ask_name': 1, 'placement': 'new'})
+  AssertEqual '', claude#session#get(id).name,
+        \ 'it labels itself from its first message instead'
+  AssertEqual 0,  claude#session#get(id).named
+
+Execute (n is the key that runs it):
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
-  normal n
-  let live = claude#session#live()
-  AssertEqual 1, len(live), 'n should have started a session'
-  AssertEqual '', live[0].name, 'and not asked what to call it'
-  AssertEqual 0,  live[0].named
+  Assert maparg('n', 'n', 0, 1).rhs =~# 'new()', 'n starts a session'
+
+Execute (with the prompts turned off n asks nothing at all):
+  let saved = g:claude_session_prompt_name
+  let g:claude_session_prompt_name = 0
+  try
+    " No feedkeys(): a prompt here would hang the suite, which is the point.
+    call claude#panel#open()
+    call win_gotoid(bufwinid(claude#panel#bufnr()))
+    normal n
+    AssertEqual 1, len(claude#session#live())
+    AssertEqual '', claude#session#live()[0].name
+  finally
+    let g:claude_session_prompt_name = saved
+  endtry
 
 Execute (N is the one that asks):
   " What it asks, and what each answer does, is test/session_workspace.vader.
@@ -231,9 +257,12 @@ Execute (N is the one that asks):
         \ 'and n the one that asks nothing'
 
 Execute (the new session is the one the panel then opens):
+  let saved = g:claude_session_prompt_name
+  let g:claude_session_prompt_name = 0
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   normal n
+  let g:claude_session_prompt_name = saved
   let id = claude#session#live()[0].id
   Assert claude#session#get(id).last_focus > 0,
         \ 'a session you just started is the one you were last in'

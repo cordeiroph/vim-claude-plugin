@@ -184,7 +184,7 @@ The panel uses NERDTree's palette — group nodes coloured like directories, ses
 | `i` | Open in a horizontal split |
 | `s` | Open in a vertical split |
 | `t` | Open in a new tab |
-| `n` | Start a session where the row under the cursor lives, asking nothing |
+| `n` | Start a session where the row under the cursor lives, asking only its name |
 | `N` | Start a session, asking for a branch and then a name |
 | `g` | Swap the top level: state ⇄ place |
 | `/` | Filter every group |
@@ -316,7 +316,7 @@ Session name:
 | blank | given | No workspace — the session runs in the selected workspace, or where you are |
 | blank | blank | The same, and the session is left unnamed |
 
-The panel's `N` runs exactly these two prompts. Its `n` skips them: the new session runs wherever the row under the cursor lives, unnamed, and labels itself from its first message.
+The panel's `N` runs exactly these two prompts. Its `n` runs only the second: the new session lands wherever the row under the cursor lives, so the only thing left to ask is what to call it. Leave that blank and the session labels itself from its first message; `g:claude_session_prompt_name = 0` skips it too.
 
 A branch that matches nothing becomes a new branch off `HEAD`; one that exists only on a remote gets a local tracking branch. Names are unique per repository, so a second workspace called `feature-branch` becomes `feature-branch-1`, then `feature-branch-2`, and slashes become dashes (`feature/deep` → `feature-deep`).
 
