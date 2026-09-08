@@ -30,7 +30,8 @@ call claude#sidebar#register({
       \ 'name':     'difftree',
       \ 'priority': 20,
       \ 'Winid':    function('claude#difftree#winid'),
-      \ 'Height':   {-> get(g:, 'claude_difftree_height', 15)},
+      \ 'Height':   {-> claude#sidebar#height_pct('claude_difftree_height_pct',
+      \                 'claude_difftree_height', 15)},
       \ })
 
 " ── git ──────────────────────────────────────────────────────────────────────
@@ -1230,7 +1231,17 @@ function! claude#difftree#open_file(rec, mode) abort
     echohl None
     return
   endif
-  call claude#sidebar#make_window(a:mode, s:prev_winid)
+  " <CR> reuses the window the user was last working in, the way NERDTree
+  " does, rather than going through claude#sidebar#make_window(): that
+  " function's 'here' opens an anchored split, which is what a Claude
+  " terminal wants and what a file does not. The splitting modes still go
+  " through it.
+  if a:mode ==# 'here'
+    let l:target = claude#sidebar#last_main_winid()
+    call claude#sidebar#enter_main(l:target > 0 ? l:target : s:prev_winid)
+  else
+    call claude#sidebar#make_window(a:mode, s:prev_winid)
+  endif
   execute 'edit ' . fnameescape(l:full)
 endfunction
 

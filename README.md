@@ -25,6 +25,7 @@ Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into 
 |---------|---------|--------|
 | `<leader>co` | `:ClaudeOpen` | Focus a session, starting one if none is running |
 | `<leader>cs` | `:ClaudeSessions` | Toggle the session panel |
+| `<C-z>` | `:ClaudeSidebars` | Raise or dismiss the whole sidebar column |
 | `<leader>ct` | `:ClaudeToggle` | Show/hide a Claude window |
 | `<leader>cx` | `:ClaudeClose` | End a session |
 | `<leader>cf` | `:ClaudeFocus` | Move cursor to a Claude window (enters insert mode) |
@@ -69,7 +70,16 @@ let g:claude_cmd = 'claude'
 
 " Share one column with NERDTree (panel on top); 0 keeps separate columns
 let g:claude_panel_nerdtree_stack = 1
+
+" Sidebar column heights, as a percentage of the screen. NERDTree takes the
+" rest. Set a percentage to 0 to size that sidebar in lines instead.
+let g:claude_panel_height_pct = 25
+let g:claude_difftree_height_pct = 40
 let g:claude_panel_height = 15
+let g:claude_difftree_height = 15
+
+" Key that raises or dismisses the whole sidebar column; '' leaves it unmapped
+let g:claude_sidebar_toggle_key = '<C-z>'
 
 " Session panel: width, edge, and how often status is polled while it is open
 let g:claude_panel_width = 35
@@ -151,7 +161,9 @@ The panel and NERDTree would otherwise form two columns and swallow most of the 
 +----------------+---------------------------+
 ```
 
-It works whichever opens first, and closing either one hands the column to the other. The panel starts at `g:claude_panel_height` lines and NERDTree takes the rest; resize either by hand and it stays put, since the size is applied only when the two first come together. While stacked the column is NERDTree's width, since NERDTree resets its own width on every redraw. Set `g:claude_panel_nerdtree_stack = 0` to opt out.
+It works whichever opens first, and closing either one hands the column to the other. The column is sized by percentage of the screen — the session panel takes `g:claude_panel_height_pct` (25), the diff tree `g:claude_difftree_height_pct` (40), and the bottom-most sidebar (NERDTree, when it is installed) absorbs the remaining 35%; zero either percentage to go back to a height in lines. Resize any of them by hand and it stays put, since the sizes are applied only when the sidebars first come together.
+
+`<C-z>` (`:ClaudeSidebars`) raises all three at once and dismisses them again once they are all showing. It is mapped in normal mode only, so `<C-z>` still suspends Vim from a terminal buffer and from insert mode; rebind or disable it with `g:claude_sidebar_toggle_key`. While stacked the column is NERDTree's width, since NERDTree resets its own width on every redraw. Set `g:claude_panel_nerdtree_stack = 0` to opt out.
 
 ### Git diff tree
 

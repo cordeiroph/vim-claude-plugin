@@ -18,6 +18,7 @@ Before:
   let g:claude_panel_closed_limit = 0
   let g:claude_panel_nerdtree_stack = 1
   let g:claude_panel_height = 15
+  let g:claude_panel_height_pct = 0
   call claude#store#_reset()
 
   " A stand-in for NERDTree's window.

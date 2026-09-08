@@ -88,6 +88,14 @@ if !exists('g:claude_panel_height')
   let g:claude_panel_height = 15
 endif
 
+" g:claude_panel_height_pct — the same height as a percentage of the screen,
+" which is what the panel uses by default so the column keeps its proportions
+" on any terminal. Set it to 0 to size the panel in lines with
+" |g:claude_panel_height| instead.
+if !exists('g:claude_panel_height_pct')
+  let g:claude_panel_height_pct = 25
+endif
+
 " g:claude_panel_nerdtree_stack — 1 (default) stacks the panel above NERDTree
 " in one column when both are open. 0 leaves them as separate columns.
 if !exists('g:claude_panel_nerdtree_stack')
@@ -124,6 +132,13 @@ if !exists('g:claude_difftree_height')
   let g:claude_difftree_height = 15
 endif
 
+" g:claude_difftree_height_pct — that height as a percentage of the screen,
+" used in preference to the line count. 0 falls back to
+" |g:claude_difftree_height|.
+if !exists('g:claude_difftree_height_pct')
+  let g:claude_difftree_height_pct = 40
+endif
+
 " g:claude_difftree_width — width when the diff tree is the only sidebar.
 if !exists('g:claude_difftree_width')
   let g:claude_difftree_width = 35
@@ -151,6 +166,17 @@ if !exists('g:claude_difftree_collapse_dirs')
   let g:claude_difftree_collapse_dirs = 1
 endif
 
+" ── sidebar column configuration ─────────────────────────────────────────────
+
+" g:claude_sidebar_toggle_key — key that raises or dismisses the whole sidebar
+" column (|:ClaudeSidebars|). An empty string leaves the key unmapped.
+"
+" The default shadows Vim's built-in CTRL-Z suspend in normal mode. Suspend
+" still works from a terminal buffer, from insert mode, and as :suspend.
+if !exists('g:claude_sidebar_toggle_key')
+  let g:claude_sidebar_toggle_key = '<C-z>'
+endif
+
 " ── commands ─────────────────────────────────────────────────────────────────
 
 command! ClaudeOpen    call claude#open()
@@ -169,6 +195,9 @@ command! -nargs=? ClaudeNew           call claude#new(<q-args>)
 command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
 
 " Git diff tree.
+" The whole sidebar column: sessions, diff tree and NERDTree together.
+command! ClaudeSidebars call claude#sidebar#toggle_all()
+
 command! ClaudeDiff        call claude#difftree#toggle()
 command! ClaudeDiffOpen    call claude#difftree#open()
 command! ClaudeDiffClose   call claude#difftree#close()
@@ -239,6 +268,13 @@ if !exists('g:claude_no_default_mappings')
 
   " Toggle the git diff tree.
   nnoremap <silent> <leader>cd :ClaudeDiff<CR>
+
+  " Raise or dismiss the whole sidebar column. Normal mode only: <C-z> must
+  " keep suspending Vim from a terminal buffer and from insert mode.
+  if !empty(g:claude_sidebar_toggle_key)
+    execute 'nnoremap <silent> ' . g:claude_sidebar_toggle_key
+          \ . ' :ClaudeSidebars<CR>'
+  endif
 
   " Explain: normal mode sends the whole file; visual mode sends the selection.
   nnoremap <silent> <leader>ce :call claude#explain('n')<CR>

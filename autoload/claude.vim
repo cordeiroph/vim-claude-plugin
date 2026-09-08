@@ -233,6 +233,9 @@ endfunction
 " WinEnter hook: remember which session was most recently focused, so the
 " picker can offer the likeliest target first.
 function! claude#_win_enter() abort
+  " Remember the last ordinary window, so a file opened from a sidebar lands
+  " where the user was actually working.
+  call claude#sidebar#note_focus()
   let l:id = get(b:, 'claude_session_id', '')
   if !empty(l:id)
     call claude#session#touch_focus(l:id)

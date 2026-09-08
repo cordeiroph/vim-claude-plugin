@@ -62,6 +62,22 @@ function! claude#sidebar#bufnrs() abort
   return map(claude#sidebar#winids(), {_, id -> winbufnr(win_id2win(id))})
 endfunction
 
+" ── heights ──────────────────────────────────────────────────────────────────
+
+" Resolve one sidebar's height in lines.
+"
+" A percentage of the screen wins whenever it is a positive number, so the
+" column keeps its proportions on any terminal. Setting the percentage to 0
+" hands the decision back to the absolute line count, which is what configs
+" written before percentages existed still set.
+function! claude#sidebar#height_pct(pct_var, lines_var, lines_default) abort
+  let l:pct = get(g:, a:pct_var, 0)
+  if type(l:pct) == type(0) && l:pct > 0
+    return max([1, &lines * l:pct / 100])
+  endif
+  return get(g:, a:lines_var, a:lines_default)
+endfunction
+
 " ── NERDTree ─────────────────────────────────────────────────────────────────
 
 " Window id of NERDTree in the current tab, or -1.
@@ -209,6 +225,61 @@ function! claude#sidebar#stack() abort
   call s:apply_heights(l:wins)
 endfunction
 
+" ── the whole column at once ─────────────────────────────────────────────────
+
+" NERDTree is optional: without it installed the two Claude sidebars simply
+" share the column between them.
+function! s:nerdtree_available() abort
+  return exists(':NERDTree') == 2
+endfunction
+
+function! s:nerdtree_open() abort
+  return claude#sidebar#nerdtree_winid() > 0
+endfunction
+
+" Every sidebar that could be open, is.
+function! s:all_open() abort
+  if !claude#panel#is_open() || !claude#difftree#is_open()
+    return v:false
+  endif
+  return !s:nerdtree_available() || s:nerdtree_open()
+endfunction
+
+" Raise or dismiss the entire sidebar column with one key.
+"
+" Opening is the common case, so anything already up is left alone and only
+" the missing sidebars are added; the column is closed outright only once all
+" three are showing, which makes the key a true toggle without ever tearing
+" down a panel the user had just opened on its own.
+function! claude#sidebar#toggle_all() abort
+  let l:cur = win_getid()
+  try
+    if s:all_open()
+      call claude#panel#close()
+      call claude#difftree#close()
+      if s:nerdtree_open()
+        silent! NERDTreeClose
+      endif
+      return
+    endif
+    if !claude#panel#is_open()
+      call claude#panel#open()
+    endif
+    if !claude#difftree#is_open()
+      call claude#difftree#open()
+    endif
+    if s:nerdtree_available() && !s:nerdtree_open()
+      silent! NERDTree
+    endif
+    call claude#sidebar#stack()
+  finally
+    " Opening a sidebar focuses it; the key must leave the cursor where it was.
+    if win_id2win(l:cur) > 0 && win_getid() != l:cur
+      call win_gotoid(l:cur)
+    endif
+  endtry
+endfunction
+
 " Repair hook for a NERDTree opened on its own (:NERDTree, <C-n>, a session
 " file, anything the plugin does not drive itself).
 "
@@ -308,6 +379,36 @@ function! claude#sidebar#is_sidebar(winid) abort
     endif
   endfor
   return v:false
+endfunction
+
+" ── the last window worked in ────────────────────────────────────────────────
+"
+" Where a file opened from a sidebar should land. NERDTree keeps the same
+" note, and for the same reason: remembering only where focus was when the
+" sidebar opened goes stale the moment the user moves between windows, and
+" the file then lands in whichever ordinary window happens to come first in
+" window order.
+"
+" Sidebars are skipped rather than recorded, so entering the diff tree, the
+" session panel or NERDTree never overwrites the target.
+
+let s:last_main = -1
+
+function! claude#sidebar#note_focus() abort
+  let l:id = win_getid()
+  if !claude#sidebar#is_sidebar(l:id)
+    let s:last_main = l:id
+  endif
+endfunction
+
+" The remembered window while it is still alive and still ordinary, else -1.
+" A window id is unique across tabs, so the aliveness check also keeps a
+" window in another tab from being offered here.
+function! claude#sidebar#last_main_winid() abort
+  if s:last_main <= 0 || win_id2win(s:last_main) <= 0
+    return -1
+  endif
+  return claude#sidebar#is_sidebar(s:last_main) ? -1 : s:last_main
 endfunction
 
 " Leave the sidebars for the main area. Returns 2 when a fresh window had to
@@ -440,4 +541,5 @@ endfunction
 
 function! claude#sidebar#_reset() abort
   let s:stacked_ids = []
+  let s:last_main   = -1
 endfunction

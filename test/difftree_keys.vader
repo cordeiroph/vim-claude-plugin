@@ -96,6 +96,54 @@ Execute (<CR> opens the file under the cursor):
         \ 'the file must not open into a sidebar'
   Assert claude#difftree#is_open(), 'the panel must survive'
 
+Execute (<CR> reuses the main window instead of splitting):
+  let main = win_getid()
+  call claude#difftree#open()
+  let before = winnr('$')
+  call GotoFile('main.go')
+  execute "normal \<CR>"
+  AssertEqual before, winnr('$'), '<CR> must not create a window'
+  AssertEqual main, win_getid(),
+        \ 'the file replaces the window the tree was opened from'
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+
+" Regression: s:prev_winid records only where focus was when the tree opened,
+" so moving between windows first used to send the file to whichever ordinary
+" window came first in window order.
+Execute (<CR> opens into the window focused most recently):
+  call claude#difftree#open()
+  call claude#sidebar#enter_main(-1)
+  let first = win_getid()
+  vsplit
+  let second = win_getid()
+  Assert first != second, 'precondition: two ordinary windows'
+  call GotoFile('main.go')
+  execute "normal \<CR>"
+  AssertEqual second, win_getid(),
+        \ 'the last window worked in is the one the file lands in'
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+
+Execute (<CR> still makes a window when nothing but sidebars are open):
+  call claude#difftree#open()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  only
+  AssertEqual 1, winnr('$'), 'precondition: the tree is the only window'
+  call GotoFile('main.go')
+  execute "normal \<CR>"
+  AssertEqual 2, winnr('$'), 'a window has to be created to open into'
+  AssertEqual resolve(g:_repo . '/src/main.go'), resolve(expand('%:p'))
+  Assert !claude#sidebar#is_sidebar(win_getid()),
+        \ 'the file must not open into the tree'
+  Assert claude#difftree#is_open(), 'the panel must survive'
+
+Execute (entering a sidebar does not become the open target):
+  call claude#difftree#open()
+  call claude#sidebar#enter_main(-1)
+  let main = win_getid()
+  call win_gotoid(bufwinid(claude#difftree#bufnr()))
+  AssertEqual main, claude#sidebar#last_main_winid(),
+        \ 'a sidebar must never overwrite the remembered window'
+
 Execute (i opens the file in a horizontal split):
   call claude#difftree#open()
   call GotoFile('main.go')

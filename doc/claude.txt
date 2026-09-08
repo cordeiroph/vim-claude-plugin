@@ -140,6 +140,30 @@ g:claude_panel_height~
   See also: |claude-nerdtree|
 
 ------------------------------------------------------------------------------
+                                                     *g:claude_panel_height_pct*
+g:claude_panel_height_pct~
+  The same height as a percentage of the screen (|'lines'|), which is what the
+  panel uses by default so the column keeps its proportions on any terminal.
+
+  Set to 0 to size the panel in lines with |g:claude_panel_height| instead.
+
+  Default: 25
+  See also: |claude-sidebars|
+
+------------------------------------------------------------------------------
+                                                  *g:claude_difftree_height_pct*
+                                                      *g:claude_difftree_height*
+g:claude_difftree_height_pct~
+g:claude_difftree_height~
+  The diff tree's height in the shared sidebar column: as a percentage of the
+  screen, or — when the percentage is 0 — in lines.
+
+  Like the panel's, this is a starting size rather than an enforced one.
+
+  Defaults: 40 (percent), 15 (lines)
+  See also: |claude-sidebars|
+
+------------------------------------------------------------------------------
                                                  *g:claude_panel_nerdtree_stack*
 g:claude_panel_nerdtree_stack~
   When 1 (default), the panel and NERDTree share a single column with the
@@ -215,6 +239,18 @@ g:claude_models~
           \ ]
 <
 ------------------------------------------------------------------------------
+                                                   *g:claude_sidebar_toggle_key*
+g:claude_sidebar_toggle_key~
+  The key mapped to |:ClaudeSidebars|, which raises or dismisses the whole
+  sidebar column. Set to an empty string to leave the key unmapped.
+
+  The default shadows Vim's built-in |CTRL-Z| suspend in normal mode. Suspend
+  still works from a terminal buffer, from insert mode, and as |:suspend|.
+
+  Default: '<C-z>'
+  See also: |claude-sidebars|
+
+------------------------------------------------------------------------------
                                                   *g:claude_no_default_mappings*
 g:claude_no_default_mappings~
   Set to 1 before the plugin loads to suppress all default key mappings.
@@ -257,6 +293,14 @@ g:claude_no_default_mappings~
 :ClaudeSessionsClose
   Open or hide the session panel explicitly. Hiding the panel never stops a
   session.
+
+------------------------------------------------------------------------------
+                                                              *:ClaudeSidebars*
+:ClaudeSidebars
+  Raise the whole sidebar column at once — the session panel, the git diff
+  tree and NERDTree, stacked in that order — or dismiss all three when they
+  are already showing. Mapped to |g:claude_sidebar_toggle_key| (<C-z> by
+  default). See |claude-sidebars|.
 
 ------------------------------------------------------------------------------
                                                                 *:ClaudeToggle*
@@ -339,6 +383,10 @@ Default mappings (disabled when |g:claude_no_default_mappings| is set):
   <leader>cx    Close Claude (|:ClaudeClose|)
   <leader>cf    Focus Claude window (|:ClaudeFocus|)
   <leader>cs    Toggle the session panel (|:ClaudeSessions|)
+  <C-z>         Raise or dismiss the whole sidebar column (|:ClaudeSidebars|).
+                Normal mode only, so |CTRL-Z| still suspends Vim from a
+                terminal buffer and from insert mode. Rebind or disable it
+                with |g:claude_sidebar_toggle_key|.
   <leader>ce    Explain current file (normal mode) or selection (visual mode)
   <leader>ci    Toggle input window (|:ClaudeInput|)
   <leader>cm    Switch model (|:ClaudeModel|)
@@ -574,9 +622,19 @@ This happens whichever of the two is opened first, and either can be closed
 without disturbing the other — closing NERDTree gives the whole column back to
 the panel, and hiding the panel leaves NERDTree with it.
 
-The panel starts at |g:claude_panel_height| lines and NERDTree takes the rest.
-Resize either window by hand and it stays as you left it — the size is applied
-only when the two first come together. NERDTree may still reset the column's
+                                                             *claude-sidebars*
+The column is sized by percentage of the screen: the session panel takes
+|g:claude_panel_height_pct| (25 by default), the diff tree
+|g:claude_difftree_height_pct| (40), and whichever sidebar sits at the bottom
+— NERDTree when it is installed — absorbs the remaining 35%. Zero either
+percentage to go back to a height in lines (|g:claude_panel_height|,
+|g:claude_difftree_height|).
+
+Resize any of the windows by hand and it stays as you left it — the sizes are
+applied only when the sidebars first come together.
+
+|:ClaudeSidebars|, mapped to <C-z> by default, raises all three at once and
+dismisses them again once they are all showing. NERDTree may still reset the column's
 *width* on its own, which it does independently of this plugin. While stacked the column is
 NERDTree's width (`g:NERDTreeWinSize`), not |g:claude_panel_width|: NERDTree
 resets its own width whenever it redraws, so the panel does not fight it.

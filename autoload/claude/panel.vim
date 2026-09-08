@@ -20,7 +20,8 @@ call claude#sidebar#register({
       \ 'name':     'sessions',
       \ 'priority': 10,
       \ 'Winid':    function('claude#panel#winid'),
-      \ 'Height':   {-> get(g:, 'claude_panel_height', 15)},
+      \ 'Height':   {-> claude#sidebar#height_pct(
+      \                 'claude_panel_height_pct', 'claude_panel_height', 15)},
       \ })
 
 " ── glyphs ───────────────────────────────────────────────────────────────────
