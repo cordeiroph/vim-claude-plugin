@@ -217,10 +217,10 @@ endif
 " g:claude_sidebar_toggle_key — key that raises or dismisses the whole sidebar
 " column (|:ClaudeSidebars|). An empty string leaves the key unmapped.
 "
-" The default shadows Vim's built-in CTRL-Z suspend in normal mode. Suspend
-" still works from a terminal buffer, from insert mode, and as :suspend.
+" The default shadows Vim's built-in CTRL-A increment-number command in
+" normal mode.
 if !exists('g:claude_sidebar_toggle_key')
-  let g:claude_sidebar_toggle_key = '<C-z>'
+  let g:claude_sidebar_toggle_key = '<C-a>'
 endif
 
 " ── commands ─────────────────────────────────────────────────────────────────
@@ -325,8 +325,9 @@ if !exists('g:claude_no_default_mappings')
   " Pick the workspace to work in; NERDTree follows the choice.
   nnoremap <silent> <leader>cw :ClaudeWorkspaces<CR>
 
-  " Raise or dismiss the whole sidebar column. Normal mode only: <C-z> must
-  " keep suspending Vim from a terminal buffer and from insert mode.
+  " Raise or dismiss the whole sidebar column. Normal mode only: <C-a> must
+  " keep incrementing a number under the cursor elsewhere (insert mode,
+  " visual mode, etc).
   if !empty(g:claude_sidebar_toggle_key)
     execute 'nnoremap <silent> ' . g:claude_sidebar_toggle_key
           \ . ' :ClaudeSidebars<CR>'

@@ -316,10 +316,10 @@ g:claude_sidebar_toggle_key~
   The key mapped to |:ClaudeSidebars|, which raises or dismisses the whole
   sidebar column. Set to an empty string to leave the key unmapped.
 
-  The default shadows Vim's built-in |CTRL-Z| suspend in normal mode. Suspend
-  still works from a terminal buffer, from insert mode, and as |:suspend|.
+  The default shadows Vim's built-in |CTRL-A| increment-number command in
+  normal mode.
 
-  Default: '<C-z>'
+  Default: '<C-a>'
   See also: |claude-sidebars|
 
 ------------------------------------------------------------------------------
@@ -380,7 +380,7 @@ g:claude_no_default_mappings~
 :ClaudeSidebars
   Raise the whole sidebar column at once — the session panel, the git diff
   tree and NERDTree, stacked in that order — or dismiss all three when they
-  are already showing. Mapped to |g:claude_sidebar_toggle_key| (<C-z> by
+  are already showing. Mapped to |g:claude_sidebar_toggle_key| (<C-a> by
   default). See |claude-sidebars|.
 
 ------------------------------------------------------------------------------
@@ -466,10 +466,11 @@ Default mappings (disabled when |g:claude_no_default_mappings| is set):
   <leader>cf    Focus Claude window (|:ClaudeFocus|)
   <leader>cs    Toggle the session panel (|:ClaudeSessions|)
   <leader>cw    Choose the workspace to work in (|:ClaudeWorkspaces|)
-  <C-z>         Raise or dismiss the whole sidebar column (|:ClaudeSidebars|).
-                Normal mode only, so |CTRL-Z| still suspends Vim from a
-                terminal buffer and from insert mode. Rebind or disable it
-                with |g:claude_sidebar_toggle_key|.
+  <C-a>         Raise or dismiss the whole sidebar column (|:ClaudeSidebars|).
+                Normal mode only, so |CTRL-A| still increments a number under
+                the cursor from a terminal buffer, from insert mode, and in
+                visual mode. Rebind or disable it with
+                |g:claude_sidebar_toggle_key|.
   <leader>ce    Explain current file (normal mode) or selection (visual mode)
   <leader>ci    Toggle input window (|:ClaudeInput|)
   <leader>cm    Switch model (|:ClaudeModel|)
@@ -776,7 +777,7 @@ percentage to go back to a height in lines (|g:claude_panel_height|,
 Resize any of the windows by hand and it stays as you left it — the sizes are
 applied only when the sidebars first come together.
 
-|:ClaudeSidebars|, mapped to <C-z> by default, raises all three at once and
+|:ClaudeSidebars|, mapped to <C-a> by default, raises all three at once and
 dismisses them again once they are all showing. NERDTree may still reset the column's
 *width* on its own, which it does independently of this plugin. While stacked the column is
 NERDTree's width (`g:NERDTreeWinSize`), not |g:claude_panel_width|: NERDTree

@@ -1,4 +1,4 @@
-" Tests for the one-key sidebar column: <C-z> (:ClaudeSidebars) raises the
+" Tests for the one-key sidebar column: <C-a> (:ClaudeSidebars) raises the
 " session panel, the diff tree and NERDTree together, and dismisses all three
 " once they are all showing.
 "
