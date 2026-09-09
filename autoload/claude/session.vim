@@ -200,9 +200,17 @@ endfunction
 
 " ── transcripts ──────────────────────────────────────────────────────────────
 
-" Claude stores a project's transcripts under a slugified copy of its cwd.
+" Claude stores a project's transcripts under a slugified copy of its cwd:
+" every character that is not a letter or digit becomes a '-', not just the
+" path separator — a cwd with a dot or underscore in it (a "pedro.cordeiro"
+" home directory, a "github.com" path segment, an "e2e_extraction" worktree)
+" was slugifying to a directory that does not exist, so has_transcript() and
+" is_foreign_active() always came back empty for such a project and every
+" resume fell through to --session-id instead of --resume — which the CLI
+" then refuses outright, since a transcript for that id already exists on
+" disk under the *correctly* slugified directory it never thought to check.
 function! claude#session#project_dir(cwd) abort
-  return expand('~/.claude/projects/') . substitute(a:cwd, '/', '-', 'g')
+  return expand('~/.claude/projects/') . substitute(a:cwd, '[^A-Za-z0-9]', '-', 'g')
 endfunction
 
 function! s:trim_snippet(text) abort

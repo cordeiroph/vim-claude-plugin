@@ -1,0 +1,31 @@
+" Tests for claude#session#project_dir() — the slugified cwd Claude's own
+" CLI uses under ~/.claude/projects/. Every character that isn't a letter
+" or digit becomes '-', not just '/': a cwd with a dot or underscore in it
+" (a "pedro.cordeiro" home directory, a "github.com" path segment, an
+" "e2e_extraction" worktree) must still slugify to the real directory the
+" CLI itself writes transcripts under, or has_transcript()/is_foreign_active()
+" silently see nothing and every resume wrongly falls through to
+" --session-id, which the CLI then refuses as "already in use".
+
+Execute (only the path separator is slugified in a plain path):
+  AssertEqual expand('~/.claude/projects/') . '-Users-me-project',
+        \ claude#session#project_dir('/Users/me/project')
+
+Execute (a dot in the cwd is slugified too):
+  AssertEqual expand('~/.claude/projects/') . '-Users-pedro-cordeiro-project',
+        \ claude#session#project_dir('/Users/pedro.cordeiro/project')
+
+Execute (an underscore in the cwd is slugified too):
+  AssertEqual expand('~/.claude/projects/') . '-Users-me-repo-e2e-extraction',
+        \ claude#session#project_dir('/Users/me/repo-e2e_extraction')
+
+Execute (a leading dot segment produces a doubled dash, matching the real CLI):
+  AssertEqual expand('~/.claude/projects/') . '-Users-me--vim-bundle-plugin',
+        \ claude#session#project_dir('/Users/me/.vim/bundle/plugin')
+
+Execute (a mixed path with dots, underscores and dashes matches the real CLI layout):
+  AssertEqual
+        \ expand('~/.claude/projects/')
+        \ . '-Users-pedro-cordeiro-go-src-github-com-DataDog-datadog-agent-e2e-extraction',
+        \ claude#session#project_dir(
+        \   '/Users/pedro.cordeiro/go/src/github.com/DataDog/datadog-agent-e2e_extraction')
