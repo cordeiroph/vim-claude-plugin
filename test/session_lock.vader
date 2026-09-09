@@ -1,0 +1,48 @@
+" Tests for the preflight lock check ahead of claude#session#resume() —
+" detecting a still-alive process the CLI's own registry says holds a
+" session open, the ghost usually left by a terminal that was force-closed
+" instead of letting Claude exit.
+
+Before:
+  call claude#session#_reset()
+  let g:_saved_dir = get(g:, 'claude_sessions_dir', '')
+  let g:_dir = tempname()
+  call mkdir(g:_dir, 'p')
+  let g:claude_sessions_dir = g:_dir
+
+  " A real, long-lived process stands in for a live CLI holder.
+  let g:_job = job_start(['sleep', '60'])
+  let g:_pid = job_info(g:_job).process
+
+After:
+  call job_stop(g:_job, 'kill')
+  let g:claude_sessions_dir = g:_saved_dir
+  call delete(g:_dir, 'rf')
+  call claude#session#_reset()
+
+Execute (a registry entry naming a live pid is found):
+  call writefile(['{"pid": ' . g:_pid . ', "sessionId": "abc123"}'],
+        \ g:_dir . '/' . g:_pid . '.json')
+  AssertEqual g:_pid, claude#session#_holder_pid('abc123')
+
+Execute (a registry entry for a different session is ignored):
+  call writefile(['{"pid": ' . g:_pid . ', "sessionId": "abc123"}'],
+        \ g:_dir . '/' . g:_pid . '.json')
+  AssertEqual 0, claude#session#_holder_pid('someone-else')
+
+Execute (a registry entry naming a pid that is no longer alive is ignored):
+  " A pid vacated the instant it is stopped is not guaranteed reusable, but
+  " is guaranteed to fail `kill -0` from here on, which is all this checks.
+  call job_stop(g:_job, 'kill')
+  let l:tries = 0
+  while job_status(g:_job) ==# 'run' && l:tries < 50
+    sleep 20m
+    let l:tries += 1
+  endwhile
+  call writefile(['{"pid": ' . g:_pid . ', "sessionId": "abc123"}'],
+        \ g:_dir . '/' . g:_pid . '.json')
+  AssertEqual 0, claude#session#_holder_pid('abc123')
+
+Execute (no registry directory at all is not an error):
+  call delete(g:_dir, 'rf')
+  AssertEqual 0, claude#session#_holder_pid('abc123')
