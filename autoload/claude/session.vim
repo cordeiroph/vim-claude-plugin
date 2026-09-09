@@ -1133,6 +1133,9 @@ function! claude#session#resume(id, ...) abort
   endif
   let l:dir    = s:spawn_dir(l:rec)
   let l:known  = l:resume ? {} : s:known_transcripts(l:dir)
+  " Taken even for a genuine resume, only used if it turns out to be one the
+  " CLI refuses — see s:retry_as_fork().
+  let l:before = l:resume ? s:known_transcripts(l:dir) : {}
 
   let l:place = a:0 > 0 ? a:1 : claude#split_cmd()
   if !empty(l:place)
@@ -1162,10 +1165,122 @@ function! claude#session#resume(id, ...) abort
     " Started fresh without --session-id: the CLI picked its own id, so watch
     " for the transcript and re-key the record onto it.
     call timer_start(500, {-> s:adopt_id(a:id, l:known, 10)})
+  elseif l:resume
+    " s:preflight_resume() already ruled out an orphaned process holding this
+    " id; whatever is left is a lock the CLI itself tracks in a way nothing
+    " local can see. Watch for that specific refusal and route around it.
+    call timer_start(400, {-> s:check_resumed(a:id, l:bufnr, l:dir, l:before, 8)})
   endif
 
   call claude#panel#refresh()
   return a:id
+endfunction
+
+" The CLI's own text for the refusal s:preflight_resume() cannot see coming
+" (no local process or registry entry ever names it — it is tracked some
+" other way inside the CLI). Matched case-insensitively against the whole
+" scrollback, not just the last line, since it is the only line printed
+" before the process exits.
+let s:ALREADY_IN_USE_PAT = 'already in use'
+
+" A resume whose job has already died with that refusal sitting in its
+" scrollback hit a lock s:preflight_resume() could not see or clear. Waits up
+" to {retries} * 300ms for the job to either keep running (success — nothing
+" to do) or die with that specific message before giving up and leaving
+" whatever is on screen alone.
+function! s:check_resumed(id, bufnr, dir, before, retries) abort
+  if !has_key(s:sessions, a:id) || !bufexists(a:bufnr)
+    return
+  endif
+  let l:job = term_getjob(a:bufnr)
+  if l:job isnot v:null && job_status(l:job) ==# 'run'
+    if a:retries > 0
+      call timer_start(300,
+            \ {-> s:check_resumed(a:id, a:bufnr, a:dir, a:before, a:retries - 1)})
+    endif
+    return
+  endif
+  if join(getbufline(a:bufnr, 1, '$'), "\n") !~? s:ALREADY_IN_USE_PAT
+    return
+  endif
+  call s:retry_as_fork(a:id, a:bufnr, a:dir, a:before)
+endfunction
+
+" Continue {old_id}'s conversation under a fresh id instead — --fork-session
+" copies its history forward rather than resuming the locked id directly, so
+" whatever s:check_resumed() caught never has a say. The dead terminal is
+" replaced in place so the session keeps its window; once the CLI's new
+" transcript appears the record is re-keyed onto it and the now-superseded
+" original (transcript and store entry both) is dropped, so it does not also
+" linger in the panel as an unrelated, unnamed "disk" session.
+function! s:retry_as_fork(old_id, bufnr, dir, before) abort
+  if !has_key(s:sessions, a:old_id)
+    return
+  endif
+  let l:rec = s:sessions[a:old_id]
+  call claude#session#stop_job(a:bufnr)
+  let l:win = bufwinid(a:bufnr)
+  if l:win != -1
+    call win_gotoid(l:win)
+  endif
+  silent! execute 'bwipeout! ' . a:bufnr
+
+  let l:argv = split(get(g:, 'claude_cmd', 'claude'))
+  call extend(l:argv, ['--resume', a:old_id, '--fork-session'])
+  if claude#session#supports_flags() && !empty(l:rec.name)
+    call extend(l:argv, ['--name', l:rec.name])
+  endif
+  try
+    let l:bufnr = s:term_start(l:argv, a:dir)
+  catch
+    echoerr 'claude.vim: failed to fork past a stuck resume: ' . v:exception
+    return
+  endtry
+
+  let l:rec.bufnr       = l:bufnr
+  let l:rec.status      = 'active'
+  let l:rec.origin      = 'live'
+  let l:rec.term_tail   = ''
+  let l:rec.last_active = localtime()
+  let l:rec.last_focus  = localtime()
+  call claude#apply_buf_options(a:old_id)
+  call claude#input#collect_data(a:old_id)
+  call claude#panel#refresh()
+
+  call timer_start(500, {-> s:adopt_forked_id(a:old_id, a:dir, a:before, 10)})
+endfunction
+
+" Once the fork's own transcript shows up, move the record onto its id and
+" erase the id it replaced — the store entry and the original transcript
+" file both, so a later refresh() does not adopt that file as a second,
+" nameless session. Gives up silently after {retries}: the record stays
+" under the old id, which is exactly what happened before this existed.
+function! s:adopt_forked_id(old_id, dir, before, retries) abort
+  if !has_key(s:sessions, a:old_id)
+    return
+  endif
+  let l:dir = claude#session#project_dir(a:dir)
+  for l:path in glob(l:dir . '/*.jsonl', 0, 1)
+    let l:id = fnamemodify(l:path, ':t:r')
+    if l:id ==# a:old_id || has_key(a:before, l:id) || has_key(s:sessions, l:id)
+      continue
+    endif
+    let l:rec = remove(s:sessions, a:old_id)
+    let l:rec.id = l:id
+    let s:sessions[l:id] = l:rec
+    if bufexists(l:rec.bufnr)
+      call setbufvar(l:rec.bufnr, 'claude_session_id', l:id)
+    endif
+    call s:persist(l:rec)
+    call claude#store#remove(a:old_id)
+    call delete(l:dir . '/' . a:old_id . '.jsonl')
+    call claude#panel#refresh()
+    return
+  endfor
+  if a:retries > 0
+    call timer_start(500,
+          \ {-> s:adopt_forked_id(a:old_id, a:dir, a:before, a:retries - 1)})
+  endif
 endfunction
 
 " Transcript ids already in {cwd}'s directory. Taken before a session is
