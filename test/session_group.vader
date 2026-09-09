@@ -70,6 +70,36 @@ Execute (a path that does not exist falls back instead of erroring):
   AssertEqual '(no project)', g.project
   AssertEqual '(no branch)',  g.branch
 
+" ── regrouping ───────────────────────────────────────────────────────────────
+"
+" A cwd queried too early (e.g. mid `git worktree add`) memoises a wrong
+" answer for the rest of the process. regroup() is the way back without a
+" restart: forget the cache, then fix up every loaded session's stored group.
+
+Execute (regroup fixes a session stuck with a stale group):
+  let cwd = resolve(g:_repo)
+  " Prime the cache while still on `main` — standing in for an answer
+  " memoised too early (e.g. mid `git worktree add`, before it settled).
+  call claude#session#group_of(cwd)
+  call system('git -C ' . shellescape(g:_repo) . ' checkout -q -b feature-late')
+  call claude#session#_inject({'id': 'stale', 'cwd': cwd,
+        \ 'project': cwd, 'worktree': cwd, 'branch': 'main'})
+
+  " Without a reset, group_of(cwd) would still answer 'main' from cache.
+  AssertEqual 'main', claude#session#group_of(cwd).branch
+
+  call claude#session#regroup()
+
+  let rec = claude#session#get('stale')
+  AssertEqual 'feature-late', rec.branch, 'the stale branch is corrected'
+
+Execute (regroup leaves an already-correct session untouched):
+  let cwd = resolve(g:_repo)
+  call claude#session#_inject({'id': 'fine', 'cwd': cwd,
+        \ 'project': cwd, 'worktree': cwd, 'branch': 'main'})
+  call claude#session#regroup()
+  AssertEqual 'main', claude#session#get('fine').branch
+
 " ── memoisation ──────────────────────────────────────────────────────────────
 
 Execute (repeated lookups return equal results and are cached):

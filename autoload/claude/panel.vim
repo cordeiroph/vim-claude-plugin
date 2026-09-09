@@ -741,6 +741,7 @@ function! s:toggle_hidden() abort
 endfunction
 
 function! s:full_refresh() abort
+  call claude#session#regroup()
   call claude#session#refresh()
   call s:render()
 endfunction

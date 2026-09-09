@@ -126,6 +126,30 @@ function! claude#session#group_of(cwd) abort
   return copy(s:group_cache[a:cwd])
 endfunction
 
+" Forget every memoised {project, worktree, branch} and re-derive them for
+" every loaded session, persisting the ones that changed.
+"
+" group_of() only ever asks git once per cwd for the life of the process, so
+" a directory queried too early (mid `git worktree add`, before its .git
+" link settles) stays wrong until now. Live sessions are worse off still:
+" refresh() never revisits a cwd already in s:sessions, so a bad group baked
+" in at spawn time is otherwise permanent until Vim restarts.
+function! claude#session#regroup() abort
+  let s:group_cache = {}
+  for l:rec in values(s:sessions)
+    let l:group = claude#session#group_of(l:rec.cwd)
+    if l:rec.project ==# l:group.project
+          \ && l:rec.worktree ==# l:group.worktree
+          \ && l:rec.branch ==# l:group.branch
+      continue
+    endif
+    let l:rec.project  = l:group.project
+    let l:rec.worktree = l:group.worktree
+    let l:rec.branch   = l:group.branch
+    call s:persist(l:rec)
+  endfor
+endfunction
+
 function! s:derive_group(cwd) abort
   let l:none = {
         \ 'project':  '(no project)',
@@ -1025,6 +1049,63 @@ function! claude#session#spawn(opts) abort
   return l:id
 endfunction
 
+" Where the CLI keeps its live registry, one JSON file per process it has
+" running (`~/.claude/sessions/<pid>.json`), each naming the sessionId that
+" process holds open. This is entirely a CLI concern — the plugin runs no
+" daemon of its own — but a terminal force-closed instead of let Claude exit
+" cleanly can leave one of these behind, and the CLI then refuses to resume
+" that session as "already in use" even though nothing is really using it.
+function! s:sessions_dir() abort
+  return get(g:, 'claude_sessions_dir', expand('~/.claude/sessions'))
+endfunction
+
+" pid of the CLI process still holding {id} open, or 0 when the registry
+" names none, or names one that is no longer actually alive.
+function! s:holder_pid(id) abort
+  let l:dir = s:sessions_dir()
+  if !isdirectory(l:dir)
+    return 0
+  endif
+  for l:path in glob(l:dir . '/*.json', 0, 1)
+    let l:pid = str2nr(fnamemodify(l:path, ':t:r'))
+    if l:pid <= 0 || l:pid == getpid()
+      continue
+    endif
+    let l:body = join(readfile(l:path), "\n")
+    if l:body !~# '"sessionId"\s*:\s*"' . a:id . '"'
+      continue
+    endif
+    call system('kill -0 ' . l:pid . ' 2>/dev/null')
+    if v:shell_error == 0
+      return l:pid
+    endif
+  endfor
+  return 0
+endfunction
+
+" Before resuming {id}: if the CLI's own registry still names a live process
+" holding it, that is almost always the ghost of a terminal that got closed
+" out from under Claude rather than a session genuinely in use elsewhere —
+" ask to kill it so the resume that follows does not just fail with "session
+" already in use". Returns 1 to proceed, 0 to abort the resume.
+function! s:preflight_resume(id) abort
+  let l:pid = s:holder_pid(a:id)
+  if l:pid == 0
+    return 1
+  endif
+  let l:msg = 'Session ' . strpart(a:id, 0, 8) . '... is still held by process '
+        \ . l:pid . " (likely a terminal that was closed\nwithout letting "
+        \ . "Claude exit). Kill it and resume here?"
+  if confirm(l:msg, "&Kill and resume\n&Cancel", 2) != 1
+    return 0
+  endif
+  call system('kill ' . l:pid)
+  " Give it a moment to actually release the lock before the CLI is asked
+  " to resume onto it.
+  sleep 300m
+  return 1
+endfunction
+
 " Reopen a closed session. Returns the id, or '' on failure.
 "
 " When the CLI has a transcript for this id the conversation is resumed. When
@@ -1047,6 +1128,9 @@ function! claude#session#resume(id, ...) abort
   endif
 
   let l:resume = claude#session#has_transcript(a:id)
+  if l:resume && !s:preflight_resume(a:id)
+    return ''
+  endif
   let l:dir    = s:spawn_dir(l:rec)
   let l:known  = l:resume ? {} : s:known_transcripts(l:dir)
 
@@ -1346,6 +1430,12 @@ endfunction
 " What the bottom of a terminal would be read as. Test seam.
 function! claude#session#_classify(tail) abort
   return s:classify(a:tail)
+endfunction
+
+" pid of the process the CLI's own registry says still holds {id} open, or 0.
+" Test seam — reads g:claude_sessions_dir rather than ~/.claude/sessions.
+function! claude#session#_holder_pid(id) abort
+  return s:holder_pid(a:id)
 endfunction
 
 " Insert a fabricated record, so panel rendering and grouping can be tested
