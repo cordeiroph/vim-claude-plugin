@@ -189,6 +189,36 @@ Execute (a worktree removed behind our back is pruned from the list):
   AssertEqual [], claude#workspace#list()
   AssertEqual {}, claude#workspace#get('feature')
 
+" ── removing ─────────────────────────────────────────────────────────────────
+
+Execute (a workspace is removed, its worktree and record both gone):
+  let ws = claude#workspace#create('feature', '')
+  Assert claude#workspace#remove(ws.id), 'removal should report success'
+  Assert !isdirectory(ws.path), 'the worktree directory should be gone'
+  AssertEqual [], claude#workspace#list()
+  AssertEqual {}, claude#workspace#get('feature')
+
+Execute (removing an unknown workspace does nothing and reports failure):
+  Assert !claude#workspace#remove('nope')
+
+Execute (a dirty worktree resists a plain removal but yields to force):
+  let ws = claude#workspace#create('feature', '')
+  call writefile(['dirty'], ws.path . '/file.txt')
+  Assert !claude#workspace#remove(ws.id),
+        \ 'git should refuse to remove a dirty worktree'
+  Assert isdirectory(ws.path), 'the worktree should still be there'
+  AssertEqual 1, len(claude#workspace#list()), 'and the record kept'
+
+  Assert claude#workspace#force_remove(ws.id), 'force should succeed'
+  Assert !isdirectory(ws.path)
+  AssertEqual [], claude#workspace#list()
+
+Execute (removing the current workspace clears the selection):
+  let ws = claude#workspace#create('feature', '')
+  call claude#workspace#set_current(ws.id)
+  call claude#workspace#remove(ws.id)
+  AssertEqual {}, claude#workspace#current()
+
 " ── the selected workspace ───────────────────────────────────────────────────
 
 Execute (nothing is selected until it is chosen):

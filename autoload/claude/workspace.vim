@@ -424,6 +424,47 @@ function! claude#workspace#create(branch, name) abort
   return l:rec
 endfunction
 
+" ── removing one ─────────────────────────────────────────────────────────────
+
+function! s:remove(id, force) abort
+  let l:rec = claude#workspace#get(a:id)
+  if empty(l:rec)
+    return 0
+  endif
+
+  let l:args = 'worktree remove ' . (a:force ? '--force ' : '')
+        \ . shellescape(l:rec.path)
+  let [l:ok, l:msg] = s:git_run(l:rec.project, l:args)
+  if !l:ok
+    call s:warn('git worktree remove failed: ' . l:msg)
+    return 0
+  endif
+
+  let l:data = s:load()
+  if has_key(l:data.workspaces, l:rec.project)
+        \ && has_key(l:data.workspaces[l:rec.project], l:rec.id)
+    call remove(l:data.workspaces[l:rec.project], l:rec.id)
+    call s:save(l:data)
+  endif
+
+  if s:current ==# l:rec.id
+    let s:current = ''
+  endif
+  return 1
+endfunction
+
+" Remove {id}'s worktree with `git worktree remove`. Fails, leaving the
+" record untouched, when the worktree has uncommitted changes or is locked.
+function! claude#workspace#remove(id) abort
+  return s:remove(a:id, 0)
+endfunction
+
+" Remove {id}'s worktree with `git worktree remove --force`, discarding any
+" uncommitted changes.
+function! claude#workspace#force_remove(id) abort
+  return s:remove(a:id, 1)
+endfunction
+
 " ── the selected workspace ───────────────────────────────────────────────────
 
 " The workspace new sessions run in when they are given no branch of their

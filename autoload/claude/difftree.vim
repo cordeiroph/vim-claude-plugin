@@ -882,6 +882,7 @@ function! s:build() abort
           \ ' t tab     R refresh  b base',
           \ ' / filter  <Esc> clear filter',
           \ ' <Space> fold   q hide   ? help',
+          \ ' d remove worktree  D force-remove worktree',
           \ ]
       call s:add(l:lines, l:nodes, l:h, s:node('help', '', '', l:h, ''))
     endfor
@@ -919,6 +920,7 @@ function! s:build() abort
     for l:br in l:tree
       let l:node = s:node('branch', l:br.key, '  ', l:br.label, l:br.worktree)
       let l:node.has_upstream = l:br.has_upstream
+      let l:node.has_worktree = l:br.has_worktree
       let l:node.branch       = l:br.branch
       call s:add(l:lines, l:nodes,
             \ '  ' . s:marker(l:br.key) . ' '
@@ -1078,6 +1080,8 @@ function! s:setup_keys() abort
   nnoremap <buffer> <silent> R       :call claude#difftree#refresh()<CR>
   nnoremap <buffer> <silent> b       :call <SID>prompt_base()<CR>
   nnoremap <buffer> <silent> B       :call <SID>prompt_default_base()<CR>
+  nnoremap <buffer> <silent> d       :call <SID>remove_worktree(0)<CR>
+  nnoremap <buffer> <silent> D       :call <SID>remove_worktree(1)<CR>
   nnoremap <buffer> <silent> /       :call <SID>prompt_filter()<CR>
   nnoremap <buffer> <silent> <Esc>   :call <SID>clear_filter()<CR>
   nnoremap <buffer> <silent> za      :call <SID>fold()<CR>
@@ -1152,6 +1156,51 @@ function! s:prompt_default_base() abort
   redraw
   if !empty(l:new)
     call claude#difftree#set_base(l:new)
+  endif
+endfunction
+
+" The workspace whose worktree lives at {path}, or {} when it is the main
+" checkout or not a plugin-managed workspace at all.
+function! s:workspace_for_path(path) abort
+  let l:want = resolve(a:path)
+  for l:rec in claude#workspace#list()
+    if resolve(l:rec.path) ==# l:want
+      return l:rec
+    endif
+  endfor
+  return {}
+endfunction
+
+" d/D: remove the worktree of the branch row under the cursor. Silently does
+" nothing off a branch row, the main checkout, or a branch with no worktree
+" of its own (nothing there to remove).
+function! s:remove_worktree(force) abort
+  let l:node = s:current()
+  if empty(l:node) || l:node.kind !=# 'branch' || !get(l:node, 'has_worktree', 0)
+    return
+  endif
+  if resolve(l:node.payload) ==# resolve(s:repo_root())
+    return
+  endif
+  let l:ws = s:workspace_for_path(l:node.payload)
+  if empty(l:ws)
+    return
+  endif
+
+  if a:force
+    let l:msg = 'Force-remove worktree "' . l:node.label
+          \ . '"? Uncommitted changes will be lost.'
+  else
+    let l:msg = 'Remove worktree "' . l:node.label . '"?'
+  endif
+  if confirm(l:msg, "&Yes\n&No", 2) != 1
+    return
+  endif
+
+  let l:ok = a:force ? claude#workspace#force_remove(l:ws.id)
+        \            : claude#workspace#remove(l:ws.id)
+  if l:ok
+    call claude#difftree#refresh()
   endif
 endfunction
 
