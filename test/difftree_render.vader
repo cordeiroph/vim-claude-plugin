@@ -127,7 +127,7 @@ Execute (each file carries the right nerdtree-git-plugin glyph):
   let modified  = claude#difftree#indicator('Modified')
   let untracked = claude#difftree#indicator('Untracked')
   " handler.go was added on the branch and is clean in the working tree.
-  Assert t =~# '\[' . staged . '\]   handler\.go',
+  Assert t =~# '\[' . staged . '\] handler\.go',
         \ 'expected a bracketed staged glyph: ' . t
   " main.go was added on the branch and then modified: both slots, separated.
   Assert t =~# '\[' . staged . '|' . modified . '\] main\.go',
@@ -137,28 +137,13 @@ Execute (each file carries the right nerdtree-git-plugin glyph):
   Assert t =~# '\[ |' . untracked . '\] untracked\.txt',
         \ 'expected an empty first slot: ' . t
 
-Execute (the indicator field is a fixed width, so names stay aligned):
-  " Files at different depths sit at different indents; what must hold is that
-  " every row spends exactly the same width on indicators, blank or not, so
-  " names line up within a directory. The indent cannot be recovered with a
-  " greedy /^ */ — that would swallow a blank first column — so it is taken
-  " from the node the row was built from.
+Execute (a single space separates the indicator field from the name):
+  " Whatever the field holds -- one glyph, two, or none -- exactly one space
+  " sits between its closing bracket and the name: no padding kept for
+  " alignment across rows.
   call claude#difftree#open()
-  let lines   = claude#difftree#_lines()
-  let nodes   = claude#difftree#_nodes()
-  let offsets = {}
-  for i in range(len(nodes))
-    if nodes[i].kind !=# 'file'
-      continue
-    endif
-    " Character-based, not byte-based: the glyphs are multi-byte UTF-8.
-    let rest = strcharpart(lines[i], strchars(nodes[i].indent))
-    let name = matchstr(rest, '\S\+$')
-    let offsets[strchars(rest) - strchars(name)] = 1
-  endfor
-  AssertEqual 1, len(keys(offsets)),
-        \ 'the field must be one width whatever it holds, got '
-        \ . string(keys(offsets))
+  let t = Text()
+  Assert t !~# '\]  ', 'expected a single space after the field: ' . t
 
 Execute (the glyphs come from nerdtree-git-plugin when it is installed):
   " An autoload function has to be defined by a file whose name matches its
@@ -187,7 +172,7 @@ Execute (ascii mode uses their ascii set, even with the plugin installed):
   AssertEqual '+', claude#difftree#indicator('Staged')
   AssertEqual '!', claude#difftree#indicator('Untracked')
   call claude#difftree#open()
-  Assert Text() =~# '\[+\]   handler\.go', Text()
+  Assert Text() =~# '\[+\] handler\.go', Text()
   let g:claude_panel_ascii = 0
   call UnstubPlugin()
 

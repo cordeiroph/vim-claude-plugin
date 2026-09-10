@@ -490,12 +490,7 @@ function! s:col_width() abort
   return l:w
 endfunction
 
-" Width of the whole bracketed field: "[x|y]".
-function! s:field_width() abort
-  return 2 * s:col_width() + 3
-endfunction
-
-" The bracketed indicator field for a row.
+" The bracketed indicator field for a row, or empty when nothing changed.
 "
 "   [+]     changed on the branch only
 "   [ |*]   changed in the working tree only
@@ -505,18 +500,15 @@ endfunction
 " The empty slot is kept when only the working tree changed, rather than
 " collapsing to "[*]": a lone glyph could not say which of the two columns it
 " came from, and the filename's colour depends on knowing whether there is
-" uncommitted work. Everything is padded to one width so names stay aligned.
+" uncommitted work.
 function! s:field(rec) abort
   let [l:c1, l:c2] = claude#difftree#marks(a:rec)
-  let l:w = s:col_width()
   if empty(l:c1) && empty(l:c2)
-    let l:text = ''
+    return ''
   elseif !empty(l:c2)
-    let l:text = '[' . (empty(l:c1) ? repeat(' ', l:w) : l:c1) . '|' . l:c2 . ']'
-  else
-    let l:text = '[' . l:c1 . ']'
+    return '[' . (empty(l:c1) ? repeat(' ', s:col_width()) : l:c1) . '|' . l:c2 . ']'
   endif
-  return l:text . repeat(' ', s:field_width() - strchars(l:text))
+  return '[' . l:c1 . ']'
 endfunction
 
 function! s:invalidate() abort
@@ -777,9 +769,6 @@ function! s:setup_syntax() abort
   let l:w = s:col_width()
   let l:any  = '[' . l:g . ' ]\{' . l:w . '}'
   let l:some = '[' . l:g . ']\{' . l:w . '}'
-  " "[x]" is shorter than the padded field, so a clean row has extra spaces
-  " between the closing bracket and the name.
-  let l:gap  = repeat(' ', s:field_width() - (l:w + 2) + 1)
 
   let l:groups = []
   for [l:key, l:group] in [
@@ -804,8 +793,8 @@ function! s:setup_syntax() abort
   " field is exactly what marks that case.
   execute 'syntax match ClaudeDiffField /^ \{2,}\[' . l:any . '|' . l:some
         \ . '\] / ' . l:contains . ' nextgroup=ClaudeDiffUncommitted'
-  execute 'syntax match ClaudeDiffField /^ \{2,}\[' . l:some . '\]' . l:gap
-        \ . '/ ' . l:contains . ' nextgroup=ClaudeDiffCommitted'
+  execute 'syntax match ClaudeDiffField /^ \{2,}\[' . l:some . '\] / '
+        \ . l:contains . ' nextgroup=ClaudeDiffCommitted'
   syntax match ClaudeDiffCommitted   /\S.*$/ contained
   syntax match ClaudeDiffUncommitted /\S.*$/ contained
 
@@ -845,8 +834,7 @@ function! s:emit_dir(dir, wtkey, prefix, indent, lines, nodes) abort
     let l:path = empty(a:prefix) ? l:sub.name : a:prefix . '/' . l:sub.name
     let l:key  = 'd:' . a:wtkey . '|' . l:path
     call s:add(a:lines, a:nodes,
-          \ a:indent . s:marker(l:key) . ' '
-          \ . claude#sidebar#fit(s:width(), a:indent, l:sub.name),
+          \ a:indent . s:marker(l:key) . ' ' . l:sub.name,
           \ s:node('dir', l:key, a:indent, l:sub.name, l:path))
     if s:is_open(l:key)
       call s:emit_dir(l:sub, a:wtkey, l:path, a:indent . '  ',
@@ -856,9 +844,7 @@ function! s:emit_dir(dir, wtkey, prefix, indent, lines, nodes) abort
   for l:rec in a:dir.files
     let l:name  = fnamemodify(l:rec.path, ':t')
     let l:field = s:field(l:rec) . ' '
-    call s:add(a:lines, a:nodes,
-          \ a:indent . l:field
-          \ . claude#sidebar#fit(s:width(), a:indent . l:field, l:name),
+    call s:add(a:lines, a:nodes, a:indent . l:field . l:name,
           \ s:node('file', '', a:indent, l:name, l:rec))
   endfor
 endfunction
@@ -923,8 +909,7 @@ function! s:build() abort
       let l:node.has_worktree = l:br.has_worktree
       let l:node.branch       = l:br.branch
       call s:add(l:lines, l:nodes,
-            \ '  ' . s:marker(l:br.key) . ' '
-            \ . claude#sidebar#fit(s:width(), '  ', l:br.label), l:node)
+            \ '  ' . s:marker(l:br.key) . ' ' . l:br.label, l:node)
       if s:is_open(l:br.key)
         call s:emit_dir(l:br.root, l:br.key, '', '    ', l:lines, l:nodes)
       endif
