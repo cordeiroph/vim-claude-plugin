@@ -94,14 +94,24 @@ Execute (the job itself is started in the worktree, not in Vim's directory):
   endfor
   AssertEqual g:_root . '/repo-feature-branch', printed
 
-Execute (a second session on the same name gets a suffixed workspace):
+Execute (a typed session name does not rename the workspace):
+  " The workspace directory is always <project>-<branch>: what the user types
+  " at the "Session name" prompt only labels the session.
+  call feedkeys("feature-branch\<CR>my session\<CR>", 't')
+  let id = claude#session#new('', '')
+  let rec = claude#session#get(id)
+  AssertEqual 'my session',     rec.name
+  AssertEqual 'feature-branch', rec.workspace
+  AssertEqual g:_root . '/repo-feature-branch', rec.cwd
+
+Execute (two sessions on different branches keep their own workspaces):
   call system(g:_git . 'branch second')
   call feedkeys("feature-branch\<CR>\<CR>", 't')
   call claude#session#new('', '')
-  call feedkeys("second\<CR>feature-branch\<CR>", 't')
+  call feedkeys("second\<CR>\<CR>", 't')
   let id = claude#session#new('', '')
-  AssertEqual 'feature-branch-1', claude#session#get(id).workspace
-  AssertEqual 'feature-branch',   claude#session#get(id).name
+  AssertEqual 'second', claude#session#get(id).workspace
+  AssertEqual 'second', claude#session#get(id).name
 
 Execute (both blank: no worktree, unnamed, hidden from the panel):
   call feedkeys("\<CR>\<CR>", 't')
@@ -192,8 +202,8 @@ Execute (a branch whose workspace exists runs the session in that workspace):
 Execute (a workspace session is still listed after Vim restarts in the repo):
   call feedkeys("feature-branch\<CR>diff tree work\<CR>", 't')
   let id = claude#session#new('', '')
-  " Both answers given, so the workspace is named after the name.
-  AssertEqual 'diff-tree-work', claude#session#get(id).workspace
+  " The workspace is named after the branch, whatever the session was called.
+  AssertEqual 'feature-branch', claude#session#get(id).workspace
 
   " Restart: drop every in-memory record, keep what is on disk.
   for b in claude#session#bufnrs()
@@ -207,8 +217,8 @@ Execute (a workspace session is still listed after Vim restarts in the repo):
   let recs = claude#session#list()
   AssertEqual 1, len(recs), 'the session should have come back'
   AssertEqual 'diff tree work', recs[0].name
-  AssertEqual 'diff-tree-work', recs[0].workspace
-  AssertEqual g:_root . '/repo-diff-tree-work', recs[0].cwd
+  AssertEqual 'feature-branch', recs[0].workspace
+  AssertEqual g:_root . '/repo-feature-branch', recs[0].cwd
 
 Execute (it comes back grouped under its own worktree and branch):
   call feedkeys("feature-branch\<CR>diff tree work\<CR>", 't')
@@ -224,7 +234,7 @@ Execute (it comes back grouped under its own worktree and branch):
   let tree = claude#session#tree()
   AssertEqual 1, len(tree)
   AssertEqual g:_repo, tree[0].path, 'one project node, the main checkout'
-  AssertEqual g:_root . '/repo-diff-tree-work', tree[0].worktrees[0].path
+  AssertEqual g:_root . '/repo-feature-branch', tree[0].worktrees[0].path
   AssertEqual 'feature-branch', tree[0].worktrees[0].branches[0].label
 
 Execute (a transcript written in the workspace is found from the main checkout):

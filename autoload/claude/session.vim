@@ -968,8 +968,9 @@ endfunction
 "
 " With prompting on, the two answers decide where the session lives:
 "
-"   branch + name    a workspace called <name> on <branch>
-"   branch           a workspace named after the branch, uniquified
+"   branch (+ name)  a workspace named after the branch, uniquified — the
+"                     typed name (if any) labels the session, never the
+"                     workspace's directory
 "   name             no workspace; the selected one, or the current directory
 "   neither          the same, and the session goes unnamed
 function! claude#session#spawn(opts) abort
@@ -1000,7 +1001,10 @@ function! claude#session#spawn(opts) abort
   " but not a workspace to belong to.
   let l:ws = {}
   if !empty(l:branch)
-    let l:ws = claude#workspace#create(l:branch, l:name)
+    " The typed name labels the session, not the workspace: its directory is
+    " always <project>-<branch>, so two sessions on the same branch still
+    " agree on where it lives regardless of what either called itself.
+    let l:ws = claude#workspace#create(l:branch, '')
   elseif !empty(get(a:opts, 'workspace', ''))
     " Asked for by id: an existing workspace, so nothing is created and the
     " session is not named after it — it was not the user's answer to a
