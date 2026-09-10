@@ -53,8 +53,8 @@ Execute (sessions nest Project > Worktree > Branch):
   call claude#panel#_grouping('place')
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# '▾ alpha',        'project node missing: ' . text
-  Assert text =~# '  ▾ /w/alpha\n', 'worktree node missing: ' . text
-  Assert text =~# '  ▾ /w/alpha-wt', 'second worktree missing: ' . text
+  Assert text =~# '  ▾ alpha\n', 'worktree node missing: ' . text
+  Assert text =~# '  ▾ alpha-wt', 'second worktree missing: ' . text
   Assert text =~# '    ▾ main',     'branch node missing: ' . text
   Assert text =~# '    ▾ feature',  'second branch missing: ' . text
   Assert text =~# '      ● panel design',   'active session missing'

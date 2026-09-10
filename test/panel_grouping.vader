@@ -40,7 +40,7 @@ Execute (g swaps the top level, and back again):
   AssertEqual 'place', claude#panel#_grouping()
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# '▾ alpha',      'now it is the place view: ' . text
-  Assert text =~# '  ▾ /w/alpha', 'with its worktree'
+  Assert text =~# '  ▾ alpha', 'with its worktree'
   Assert text =~# '    ▾ main',   'and its branch'
   Assert text !~# 'Working',      'and no state groups'
 

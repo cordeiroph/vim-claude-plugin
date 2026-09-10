@@ -369,9 +369,12 @@ function! s:add_session(lines, nodes, rec, indent, label) abort
 endfunction
 
 " A group or tree row: '<indent><marker> <label>'.
-function! s:add_group(lines, nodes, kind, key, indent, label) abort
-  call add(a:lines, a:indent . s:marker(a:key) . ' '
-        \ . s:fit(a:indent, a:label))
+"
+" a:1 — 1 keeps {label} whole even past the window's width: the place tree's
+" workspace and branch names are worth a scrollbar, not a truncated guess.
+function! s:add_group(lines, nodes, kind, key, indent, label, ...) abort
+  let l:text = a:0 > 0 && a:1 ? a:label : s:fit(a:indent, a:label)
+  call add(a:lines, a:indent . s:marker(a:key) . ' ' . l:text)
   call add(a:nodes, s:node(a:kind, a:key, '', a:indent, a:label, ''))
 endfunction
 
@@ -454,17 +457,20 @@ function! s:build_tree(lines, nodes) abort
     endif
     let l:drawn += l:count
 
-    call s:add_group(a:lines, a:nodes, 'project', l:proj.key, '', l:proj.label)
+    call s:add_group(a:lines, a:nodes, 'project', l:proj.key, '', l:proj.label,
+          \ 1)
     let a:nodes[-1].path = l:proj.path
     if has_key(s:collapsed, l:proj.key) && empty(s:filter)
       continue
     endif
 
     for l:wt in l:proj.worktrees
-      let l:node = s:node('worktree', l:wt.key, '', '  ', l:wt.path, '')
+      " The worktree's own name, not its full path: a workspace is worth
+      " knowing by name, and the path is one keystroke away on its row.
+      let l:node = s:node('worktree', l:wt.key, '', '  ',
+            \ fnamemodify(l:wt.path, ':t'), '')
       let l:node.path = l:wt.path
-      call add(a:lines, '  ' . s:marker(l:wt.key) . ' '
-            \ . s:fit('  ', s:home_relative(l:wt.label)))
+      call add(a:lines, '  ' . s:marker(l:wt.key) . ' ' . l:node.label)
       call add(a:nodes, l:node)
       if has_key(s:collapsed, l:wt.key) && empty(s:filter)
         continue
@@ -476,7 +482,7 @@ function! s:build_tree(lines, nodes) abort
           continue
         endif
         call s:add_group(a:lines, a:nodes, 'branch', l:br.key, '    ',
-              \ l:br.label)
+              \ l:br.label, 1)
         if has_key(s:collapsed, l:br.key) && empty(s:filter)
           continue
         endif
