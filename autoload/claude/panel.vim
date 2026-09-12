@@ -6,8 +6,11 @@
 "   state   what each session is doing — Needs you, Working, Idle, Done.
 "           The default, because with several agents running the question is
 "           almost always "which one is waiting for me?"
-"   place   Project > Worktree > Branch, for when the question really is
-"           "what is happening in that worktree?"
+"   place   Group > Branch, for when the question really is "what is
+"           happening in that checkout?" A workspace-backed session gets its
+"           own group (a workspace is one branch, always); a session run
+"           straight in the main checkout shares a group with the repo's
+"           other such sessions, split by branch.
 "
 " The panel owns presentation only: it never starts, stops or inspects a
 " process directly — autoload/claude/session.vim is the single source of
@@ -170,7 +173,7 @@ endfunction
 " depending on NERDTree being loaded at all.
 "
 "   header / project   NERDTreeCWD       Statement   (its root line)
-"   worktree / branch  NERDTreeDir       Directory   (its directories)
+"   branch             NERDTreeDir       Directory   (its directories)
 "   fold marker        NERDTreeClosable  Directory   (its arrows)
 "   session name       NERDTreeFile      Normal      (its files)
 "   active icon        NERDTreeFlags     Number      (its flags)
@@ -178,7 +181,6 @@ endfunction
 let s:highlights = [
       \ ['ClaudeSessionHeader',     'NERDTreeCWD',      'Statement'],
       \ ['ClaudeSessionProject',    'NERDTreeCWD',      'Statement'],
-      \ ['ClaudeSessionWorktree',   '',                 'Identifier'],
       \ ['ClaudeSessionBranch',     '',                 'Type'],
       \ ['ClaudeSessionMarker',     'NERDTreeClosable', 'Directory'],
       \ ['ClaudeSessionName',       'NERDTreeFile',     'Normal'],
@@ -202,9 +204,7 @@ function! s:setup_syntax() abort
   " Tree nodes, identified by their indent.
   execute 'syntax match ClaudeSessionProject  /^' . l:m
         \ . ' .*$/ contains=ClaudeSessionMarker'
-  execute 'syntax match ClaudeSessionWorktree /^  ' . l:m
-        \ . ' .*$/ contains=ClaudeSessionMarker'
-  execute 'syntax match ClaudeSessionBranch   /^    ' . l:m
+  execute 'syntax match ClaudeSessionBranch   /^  ' . l:m
         \ . ' .*$/ contains=ClaudeSessionMarker'
   execute 'syntax match ClaudeSessionMarker   /' . l:m . '/ contained'
 
@@ -445,12 +445,10 @@ function! s:build_tree(lines, nodes) abort
   let l:drawn = 0
 
   for l:proj in l:tree
-    " A project whose every session was filtered out is not drawn at all.
+    " A group whose every session was filtered out is not drawn at all.
     let l:count = 0
-    for l:wt in l:proj.worktrees
-      for l:br in l:wt.branches
-        let l:count += len(s:keep(l:br.sessions))
-      endfor
+    for l:br in l:proj.branches
+      let l:count += len(s:keep(l:br.sessions))
     endfor
     if l:count == 0 && !empty(s:filter)
       continue
@@ -464,35 +462,23 @@ function! s:build_tree(lines, nodes) abort
       continue
     endif
 
-    for l:wt in l:proj.worktrees
-      " The worktree's own name, not its full path: a workspace is worth
-      " knowing by name, and the path is one keystroke away on its row.
-      let l:node = s:node('worktree', l:wt.key, '', '  ',
-            \ fnamemodify(l:wt.path, ':t'), '')
-      let l:node.path = l:wt.path
-      call add(a:lines, '  ' . s:marker(l:wt.key) . ' ' . l:node.label)
-      call add(a:nodes, l:node)
-      if has_key(s:collapsed, l:wt.key) && empty(s:filter)
+    for l:br in l:proj.branches
+      let l:sessions = s:keep(l:br.sessions)
+      if empty(l:sessions) && !empty(s:filter)
+        continue
+      endif
+      call s:add_group(a:lines, a:nodes, 'branch', l:br.key, '  ',
+            \ l:br.label, 1)
+      let a:nodes[-1].path = l:br.path
+      if has_key(s:collapsed, l:br.key) && empty(s:filter)
         continue
       endif
 
-      for l:br in l:wt.branches
-        let l:sessions = s:keep(l:br.sessions)
-        if empty(l:sessions) && !empty(s:filter)
-          continue
-        endif
-        call s:add_group(a:lines, a:nodes, 'branch', l:br.key, '    ',
-              \ l:br.label, 1)
-        if has_key(s:collapsed, l:br.key) && empty(s:filter)
-          continue
-        endif
-
-        let l:labels = s:disambiguate(l:sessions)
-        let l:i = 0
-        for l:rec in l:sessions
-          call s:add_session(a:lines, a:nodes, l:rec, '      ', l:labels[l:i])
-          let l:i += 1
-        endfor
+      let l:labels = s:disambiguate(l:sessions)
+      let l:i = 0
+      for l:rec in l:sessions
+        call s:add_session(a:lines, a:nodes, l:rec, '    ', l:labels[l:i])
+        let l:i += 1
       endfor
     endfor
   endfor
@@ -775,8 +761,8 @@ endfunction
 " workspace would have run anyway".
 "
 " "Where the cursor is" means the whole subtree, not just the row it is on: a
-" branch row, a worktree row and every session row under them all answer with
-" the same worktree, because that is the checkout you are looking at.
+" project row, a branch row and every session row under them all answer with
+" the same directory, because that is the checkout you are looking at.
 function! s:place_under_cursor() abort
   let l:nodes = get(b:, 'claude_panel_nodes', [])
   let l:idx   = line('.') - 1

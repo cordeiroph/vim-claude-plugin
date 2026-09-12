@@ -40,8 +40,7 @@ Execute (g swaps the top level, and back again):
   AssertEqual 'place', claude#panel#_grouping()
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# '▾ alpha',      'now it is the place view: ' . text
-  Assert text =~# '  ▾ alpha', 'with its worktree'
-  Assert text =~# '    ▾ main',   'and its branch'
+  Assert text =~# '  ▾ main',   'and its branch'
   Assert text !~# 'Working',      'and no state groups'
 
   normal g
@@ -54,7 +53,7 @@ Execute (the same session is drawn in both, at different depths):
   normal g
   let place = filter(claude#panel#_lines(), {_, l -> l =~# 'panel rework'})[0]
   Assert state =~# '^  ●',     'two indents in the state view: ' . state
-  Assert place =~# '^      ●', 'six in the place view: ' . place
+  Assert place =~# '^    ●', 'four in the place view: ' . place
 
 Execute (the header follows you across):
   call claude#session#_inject({'name': 'asking', 'status': 'waiting'})

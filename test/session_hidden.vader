@@ -74,12 +74,12 @@ Execute (a branch group whose sessions are all hidden is not built):
 
   let tree = claude#session#tree()
   AssertEqual 1, len(tree)
-  let branches = map(copy(tree[0].worktrees[0].branches), {_, b -> b.label})
+  let branches = map(copy(tree[0].branches), {_, b -> b.label})
   AssertEqual ['main'], branches
 
   call claude#session#toggle_hidden()
   let tree = claude#session#tree()
-  let branches = sort(map(copy(tree[0].worktrees[0].branches),
+  let branches = sort(map(copy(tree[0].branches),
         \ {_, b -> b.label}))
   AssertEqual ['main', 'sidebar'], branches
 

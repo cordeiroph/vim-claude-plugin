@@ -2,7 +2,7 @@
 
 A Vim plugin that opens the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) in a terminal split, giving you persistent AI sessions alongside your code.
 
-Run as many sessions as you like, name them, and switch between them from a NERDTree-style side panel grouped by project, worktree and branch.
+Run as many sessions as you like, name them, and switch between them from a NERDTree-style side panel grouped by what they're doing or by workspace and branch.
 
 ## Requirements
 
@@ -149,21 +149,20 @@ Claude Sessions           2 waiting
 ▸ Done (10)
 ```
 
-**By place** — project, worktree, branch — for when the question really is what is happening in that worktree:
+**By place** — group, then branch — for when the question really is what is happening in that checkout. A session that ran in a plugin-managed workspace gets its own group, one per workspace; a session run straight in the main checkout shares a group with every other such session in the repo, split by branch:
 
 ```
 Claude Sessions           2 waiting
 
-▾ claude-pluing
-  ▾ ~/Workspace/vim/claude-pluing
-    ▾ main
-      ● panel design           1m
-      ○ doc rewrite            2h
-    ▾ feature/session-registry
-      ○ registry spike         4h
-  ▾ ~/Workspace/vim/wt-hotfix
-    ▾ hotfix/e947
-      ✗ E947 repro             2d
+▾ claude-plugin
+  ▾ main
+    ● panel design           1m
+    ○ doc rewrite            2h
+  ▾ feature/session-registry
+    ○ registry spike         4h
+▾ claude-plugin-hotfix-e947
+  ▾ hotfix/e947
+    ✗ E947 repro             2d
 ```
 
 Each view keeps its own folds, so swapping back and forth loses neither.
@@ -176,7 +175,7 @@ Waiting and working are read from the bottom rows of the session's terminal, whe
 
 `/` filters every group by label, workspace or branch. Groups left empty are dropped, folds that hid a match are opened, and the hidden tail is searched too — a row you asked for by name is not a row to hide.
 
-The panel uses NERDTree's palette — group nodes coloured like directories, session names like files — so the sidebar reads as one thing. Where NERDTree's highlight groups exist they are used directly, so restyling NERDTree restyles the panel. Override `ClaudeSessionProject`, `ClaudeSessionWorktree`, `ClaudeSessionBranch`, `ClaudeSessionName`, `ClaudeSessionActive` and friends to restyle just the panel; a link you set is never overwritten.
+The panel uses NERDTree's palette — group nodes coloured like directories, session names like files — so the sidebar reads as one thing. Where NERDTree's highlight groups exist they are used directly, so restyling NERDTree restyles the panel. Override `ClaudeSessionProject`, `ClaudeSessionBranch`, `ClaudeSessionName`, `ClaudeSessionActive` and friends to restyle just the panel; a link you set is never overwritten.
 
 | Key | Action |
 |-----|--------|
@@ -324,7 +323,7 @@ The worktree is created beside the main checkout as `<repo>-<name>`, or under `g
 
 A branch that already has a checkout is not an error — the session runs in that checkout. It joins the workspace if there is one, adopts the worktree as a workspace if you made it yourself, or just runs in the main checkout when that is where the branch lives. Nothing is created only when the directory is in the way; you are told, and the session runs where you already were. Removing a workspace is left to `git worktree remove`; a worktree that is gone drops out of the list on its own.
 
-`<leader>cw` (`:ClaudeWorkspaces`) lists the main checkout and every workspace, and re-roots NERDTree onto the one you pick, so the file tree shows that checkout and nothing else. Sessions started without a branch run there.
+`<leader>cw` (`:ClaudeWorkspaces`) lists the main checkout and every workspace, and re-roots NERDTree onto the one you pick, so the file tree shows that checkout and nothing else. Sessions started without a branch run there. It also runs `:tcd` to that workspace's directory, so the current tab's working directory — and anything that depends on it, like `:Git status` — follows the switch too; other tabs are left alone.
 
 ### Unnamed sessions, and the buried tail
 

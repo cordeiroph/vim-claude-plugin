@@ -580,6 +580,9 @@ function! s:reroot(dir) abort
     if win_id2win(l:cur) > 0 && win_getid() != l:cur
       call win_gotoid(l:cur)
     endif
+    " Re-root the tab too, so :Git and friends see this workspace's repo
+    " instead of whatever the tab happened to be in before.
+    execute 'tcd ' . fnameescape(a:dir)
   endtry
 endfunction
 

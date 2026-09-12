@@ -220,7 +220,7 @@ Execute (a workspace session is still listed after Vim restarts in the repo):
   AssertEqual 'feature-branch', recs[0].workspace
   AssertEqual g:_root . '/repo-feature-branch', recs[0].cwd
 
-Execute (it comes back grouped under its own worktree and branch):
+Execute (it comes back grouped under its own workspace):
   call feedkeys("feature-branch\<CR>diff tree work\<CR>", 't')
   call claude#session#new('', '')
   for b in claude#session#bufnrs()
@@ -233,9 +233,29 @@ Execute (it comes back grouped under its own worktree and branch):
 
   let tree = claude#session#tree()
   AssertEqual 1, len(tree)
-  AssertEqual g:_repo, tree[0].path, 'one project node, the main checkout'
-  AssertEqual g:_root . '/repo-feature-branch', tree[0].worktrees[0].path
-  AssertEqual 'feature-branch', tree[0].worktrees[0].branches[0].label
+  AssertEqual g:_root . '/repo-feature-branch', tree[0].path,
+        \ 'the workspace gets its own top-level group, not the main checkout'
+  AssertEqual 'feature-branch', tree[0].branches[0].label
+  AssertEqual g:_root . '/repo-feature-branch', tree[0].branches[0].path
+
+Execute (the branch row is named after the real branch, not the slugified workspace name):
+  call system(g:_git . 'branch pedro.cordeiro/macos-fleet-config')
+  call feedkeys("pedro.cordeiro/macos-fleet-config\<CR>\<CR>", 't')
+  call claude#session#new('', '')
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  call claude#session#_reset()
+  call claude#store#_reset()
+  call claude#session#refresh()
+
+  let tree = claude#session#tree()
+  AssertEqual 1, len(tree)
+  Assert tree[0].path =~# 'pedro.cordeiro-macos-fleet-config$',
+        \ 'the workspace directory is slugified: ' . tree[0].path
+  AssertEqual 'pedro.cordeiro/macos-fleet-config', tree[0].branches[0].label,
+        \ 'the branch row should show the real branch, slash and all'
 
 Execute (a transcript written in the workspace is found from the main checkout):
   let ws = claude#workspace#create('feature-branch', '')
@@ -376,9 +396,9 @@ Execute (n from a branch row lands in that branch's workspace):
   call claude#panel#_grouping('place')
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   call cursor(1, 1)
-  " The branch row, not the worktree row above it whose path also says it.
-  call search('^    ▾ other-branch$', 'W')
-  Assert getline('.') =~# '^    ▾ other-branch$',
+  " The branch row, not the group row above it whose path also says it.
+  call search('^  ▾ other-branch$', 'W')
+  Assert getline('.') =~# '^  ▾ other-branch$',
         \ 'expected the branch row: ' . getline('.')
   let before = LiveIds()
   normal n
@@ -389,7 +409,7 @@ Execute (n from a branch row lands in that branch's workspace):
         \ 'a branch row means the workspace it belongs to'
   AssertEqual b.path, new.cwd
 
-Execute (n from a worktree row lands there too):
+Execute (n from a workspace's group row lands there too):
   let g:claude_session_prompt_name = 0
   let ws = claude#workspace#create('feature-branch', '')
   call claude#session#spawn({'workspace': ws.id, 'placement': 'new'})
@@ -428,6 +448,10 @@ Execute (n on the project row lands in the main checkout):
   let ws = claude#workspace#create('feature-branch', '')
   call claude#workspace#select(ws.id)
   call claude#session#spawn({'workspace': ws.id, 'placement': 'new'})
+  " A workspace session alone gets its own top-level group; a plain one
+  " grounds the bare project row this test exercises.
+  call claude#session#_inject({'name': 'on main', 'status': 'idle',
+        \ 'project': g:_repo, 'worktree': g:_repo, 'branch': 'main'})
   call claude#panel#open()
   call claude#panel#_grouping('place')
   call win_gotoid(bufwinid(claude#panel#bufnr()))

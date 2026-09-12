@@ -703,49 +703,67 @@ function! claude#session#groups(...) abort
   return l:out
 endfunction
 
-" Sessions folded into Project > Worktree > Branch. The place view's data
-" source; it does no grouping of its own.
+" Sessions folded into Group > Branch. The place view's data source; it does
+" no grouping of its own.
+"
+" A session that ran in a plugin-managed workspace gets its own top-level
+" group — one workspace is one branch, so there is nothing a worktree tier
+" would add — labelled with the workspace's directory name (repo-workspace)
+" and a single branch-shaped child named after the branch actually checked
+" out there (the workspace's slugified directory name may differ, e.g. when
+" the branch has a '/' in it). A
+" session with no workspace (run straight in the main checkout) still shares
+" a group with every other such session in the repo, one child per branch
+" that checkout happened to be on when a session started there.
 "
 " a:1 — 1 to include the buried tail, as for groups().
 function! claude#session#tree(...) abort
   let l:all   = a:0 > 0 && a:1
   let l:tree  = []
-  let l:pidx  = {}
+  let l:gidx  = {}
   for l:rec in (l:all ? claude#session#all() : claude#session#list())
-    if !has_key(l:pidx, l:rec.project)
-      let l:pidx[l:rec.project] = len(l:tree)
-      call add(l:tree, {
-            \ 'label':     fnamemodify(l:rec.project, ':t'),
-            \ 'path':      l:rec.project,
-            \ 'key':       'p:' . l:rec.project,
-            \ 'worktrees': [],
-            \ 'index':     {},
-            \ })
+    if !empty(l:rec.workspace)
+      let l:ws    = claude#workspace#get(l:rec.workspace)
+      let l:path  = !empty(l:ws) ? l:ws.path   : l:rec.worktree
+      let l:sub   = !empty(l:ws) ? l:ws.branch : l:rec.branch
+      let l:gkey  = 'p:ws:' . l:rec.workspace
+      let l:subid = 'ws'
+      let l:bkey  = 'b:ws:' . l:rec.workspace
+      let l:bpath = l:path
+    else
+      let l:path  = l:rec.project
+      let l:sub   = l:rec.branch
+      let l:gkey  = 'p:' . l:rec.project
+      let l:subid = l:rec.branch
+      let l:bkey  = 'b:' . l:rec.project . '|' . l:rec.branch
+      " Usually the same as the project (the main checkout); a foreign
+      " worktree with no workspace of its own (e.g. a pre-workspace record)
+      " still points n at the directory the session actually runs in.
+      let l:bpath = l:rec.worktree
     endif
-    let l:proj = l:tree[l:pidx[l:rec.project]]
 
-    if !has_key(l:proj.index, l:rec.worktree)
-      let l:proj.index[l:rec.worktree] = len(l:proj.worktrees)
-      call add(l:proj.worktrees, {
-            \ 'label':    l:rec.worktree,
-            \ 'path':     l:rec.worktree,
-            \ 'key':      'w:' . l:rec.project . '|' . l:rec.worktree,
+    if !has_key(l:gidx, l:gkey)
+      let l:gidx[l:gkey] = len(l:tree)
+      call add(l:tree, {
+            \ 'label':    fnamemodify(l:path, ':t'),
+            \ 'path':     l:path,
+            \ 'key':      l:gkey,
             \ 'branches': [],
             \ 'index':    {},
             \ })
     endif
-    let l:wt = l:proj.worktrees[l:proj.index[l:rec.worktree]]
+    let l:group = l:tree[l:gidx[l:gkey]]
 
-    if !has_key(l:wt.index, l:rec.branch)
-      let l:wt.index[l:rec.branch] = len(l:wt.branches)
-      call add(l:wt.branches, {
-            \ 'label':    l:rec.branch,
-            \ 'key':      'b:' . l:rec.project . '|' . l:rec.worktree
-            \             . '|' . l:rec.branch,
+    if !has_key(l:group.index, l:subid)
+      let l:group.index[l:subid] = len(l:group.branches)
+      call add(l:group.branches, {
+            \ 'label':    l:sub,
+            \ 'path':     l:bpath,
+            \ 'key':      l:bkey,
             \ 'sessions': [],
             \ })
     endif
-    call add(l:wt.branches[l:wt.index[l:rec.branch]].sessions, l:rec)
+    call add(l:group.branches[l:group.index[l:subid]].sessions, l:rec)
   endfor
   return l:tree
 endfunction

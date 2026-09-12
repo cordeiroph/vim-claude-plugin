@@ -1,6 +1,6 @@
-" Tests for the panel's rendering: the Project > Worktree > Branch tree, the
-" status glyphs, duplicate-name disambiguation and folding. Records are
-" fabricated, so no Claude process is ever started.
+" Tests for the panel's rendering: the Group > Branch tree, the status
+" glyphs, duplicate-name disambiguation and folding. Records are fabricated,
+" so no Claude process is ever started.
 
 Before:
   call claude#session#_reset()
@@ -41,8 +41,10 @@ Execute (an empty registry renders the placeholder, not an empty buffer):
 
 " ── grouping ─────────────────────────────────────────────────────────────────
 
-Execute (sessions nest Project > Worktree > Branch):
-  " The place view: g swaps to it, and these are its rows.
+Execute (sessions with no workspace nest Project > Branch):
+  " The place view: g swaps to it, and these are its rows. Records with no
+  " 'workspace' share a project node and split by branch only — the worktree
+  " they happened to run in is not part of the grouping.
   call claude#session#_inject({'name': 'panel design', 'status': 'active',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
   call claude#session#_inject({'name': 'registry spike', 'status': 'idle',
@@ -53,13 +55,31 @@ Execute (sessions nest Project > Worktree > Branch):
   call claude#panel#_grouping('place')
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# '▾ alpha',        'project node missing: ' . text
-  Assert text =~# '  ▾ alpha\n', 'worktree node missing: ' . text
-  Assert text =~# '  ▾ alpha-wt', 'second worktree missing: ' . text
-  Assert text =~# '    ▾ main',     'branch node missing: ' . text
-  Assert text =~# '    ▾ feature',  'second branch missing: ' . text
-  Assert text =~# '      ● panel design',   'active session missing'
-  Assert text =~# '      ○ registry spike', 'idle session missing'
-  Assert text =~# '      ✗ E947 repro',     'closed session missing'
+  Assert text =~# '  ▾ main',     'branch node missing: ' . text
+  Assert text =~# '  ▾ feature',  'second branch missing: ' . text
+  Assert text =~# '  ▾ hotfix',   'third branch missing: ' . text
+  Assert text =~# '    ● panel design',   'active session missing'
+  Assert text =~# '    ○ registry spike', 'idle session missing'
+  Assert text =~# '    ✗ E947 repro',     'closed session missing'
+
+Execute (a workspace-backed session gets its own top-level group):
+  " No real workspace to look up from this (non-git) cwd, so the tree falls
+  " back to the record's own worktree/branch — exactly what a workspace
+  " record would have supplied.
+  call claude#session#_inject({'name': 'codereview', 'status': 'active',
+        \ 'project': '/w/datadog-agent',
+        \ 'worktree': '/w/datadog-agent-macos-fleet-config',
+        \ 'branch': 'pedro/macos-fleet-config',
+        \ 'workspace': 'macos-fleet-config'})
+  call claude#panel#open()
+  call claude#panel#_grouping('place')
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▾ datadog-agent-macos-fleet-config',
+        \ 'workspace group missing: ' . text
+  Assert text =~# '  ▾ pedro/macos-fleet-config', 'branch row missing: ' . text
+  Assert text =~# '    ● codereview', 'session missing: ' . text
+  Assert text !~# '▾ datadog-agent\n',
+        \ 'a workspace-backed session must not share the bare repo group'
 
 Execute (two worktrees of one repo share a single project node):
   call claude#session#_inject({'name': 'a', 'status': 'active',
@@ -163,16 +183,16 @@ Execute (folding a project hides its children and persists across redraws):
 Execute (the panel falls back to the groups NERDTree uses):
   " No precondition on NERDTreeDir existing: highlight groups are global and
   " leak between suites, and these three no longer depend on it anyway --
-  " worktree and branch have their own colours, and the name follows
-  " NERDTreeFile, which nothing has defined at this point.
+  " project, branch and the name follow their own colours or NERDTreeFile,
+  " which nothing has defined at this point.
   call claude#panel#open()
-  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Identifier'
+  Assert execute('highlight ClaudeSessionBranch') =~# 'links to Type'
   Assert execute('highlight ClaudeSessionName')     =~# 'links to Normal'
   Assert execute('highlight ClaudeSessionHeader')   =~# 'links to Statement'
 
 Execute (NERDTree's own groups are picked up once they exist):
-  " Session names follow NERDTreeFile; worktree and branch deliberately do not
-  " follow any NERDTree group, so this is exercised through the name.
+  " Session names follow NERDTreeFile; branch deliberately does not follow
+  " any NERDTree group, so this is exercised through the name.
   call claude#panel#open()
   Assert execute('highlight ClaudeSessionName') =~# 'links to Normal'
   " Stand in for NERDTree's syntax file being sourced.
@@ -182,20 +202,20 @@ Execute (NERDTree's own groups are picked up once they exist):
         \ 'the fallback should be upgraded to NERDTree''s group'
   highlight link NERDTreeFile NONE
 
-Execute (worktree and branch keep their own colours when NERDTree loads):
-  " They must not follow NERDTreeDir: three levels pointing at one group would
+Execute (project and branch keep their own colours when NERDTree loads):
+  " They must not follow NERDTreeDir: two levels pointing at one group would
   " collapse into a single colour the moment NERDTree's syntax file was read.
   call claude#panel#open()
   highlight default link NERDTreeDir Directory
   call claude#panel#_relink()
-  Assert execute('highlight ClaudeSessionWorktree') =~# 'links to Identifier'
+  Assert execute('highlight ClaudeSessionProject') =~# 'links to Statement'
   Assert execute('highlight ClaudeSessionBranch')   =~# 'links to Type'
   highlight link NERDTreeDir NONE
 
-Execute (worktree, branch and the session name are three different colours):
+Execute (project, branch and the session name are three different colours):
   call claude#panel#open()
   let seen = {}
-  for g in ['ClaudeSessionWorktree', 'ClaudeSessionBranch', 'ClaudeSessionName']
+  for g in ['ClaudeSessionProject', 'ClaudeSessionBranch', 'ClaudeSessionName']
     let seen[synIDattr(synIDtrans(hlID(g)), 'name')] = 1
   endfor
   AssertEqual 3, len(keys(seen)),
@@ -227,7 +247,7 @@ Execute (every panel element is highlighted):
     endfor
   endfor
   for g in ['ClaudeSessionHeader', 'ClaudeSessionProject',
-        \ 'ClaudeSessionWorktree', 'ClaudeSessionBranch',
+        \ 'ClaudeSessionBranch',
         \ 'ClaudeSessionMarker', 'ClaudeSessionActive',
         \ 'ClaudeSessionName', 'ClaudeSessionClosed',
         \ 'ClaudeSessionNameClosed', 'ClaudeSessionHelp']
