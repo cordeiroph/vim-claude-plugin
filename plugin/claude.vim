@@ -240,6 +240,12 @@ command!          ClaudeSessionsClose call claude#panel#close()
 command! -nargs=? ClaudeNew           call claude#new(<q-args>)
 command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
 
+" A session on another CLI. One command per agent, named after the agent
+" rather than the plugin — :PiNew now, :CodexNew when Codex lands. They are
+" written out rather than generated from the provider registry so that loading
+" this file still sources no autoload script.
+command! -nargs=? PiNew call claude#new(<q-args>, 'pi')
+
 " Workspaces: the git worktrees sessions run in.
 command! ClaudeWorkspaces call claude#workspace#pick()
 
@@ -315,6 +321,10 @@ if !exists('g:claude_no_default_mappings')
   " Start a session even when others are running. <leader>co focuses or picks
   " one instead, and only creates when nothing is live.
   nnoremap <silent> <leader>cn :ClaudeNew<CR>
+
+  " Start a Pi session, whatever the default agent is. Outside the <leader>c
+  " family, so it cannot collide with it.
+  nnoremap <silent> <leader>pn :PiNew<CR>
 
   " Toggle the session panel.
   nnoremap <silent> <leader>cs :ClaudeSessions<CR>
