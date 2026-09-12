@@ -96,3 +96,30 @@ Execute (an unwritable path degrades gracefully instead of erroring):
   silent let rc = claude#store#save({'version': 1, 'sessions': {}})
   AssertEqual 0, rc, 'save should report failure, not throw'
   AssertEqual {}, claude#store#load().sessions
+
+" ── which CLI a session was running ──────────────────────────────────────────
+"
+" The field was added when the plugin learned to drive more than one agent.
+" Every entry written before that is a Claude session, so a missing field is
+" not missing information — it is the answer.
+
+Execute (an entry written before providers existed reads as claude):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'abc': {'name': 'panel design', 'cwd': '/tmp'}}})
+  let entry = claude#store#load().sessions.abc
+  AssertEqual 'claude', claude#provider#of(entry)
+
+Execute (a stored provider round-trips):
+  call claude#store#put('abc', {'name': 'pi run', 'provider': 'pi'})
+  let entry = claude#store#load().sessions.abc
+  AssertEqual 'pi', entry.provider
+
+Execute (an entry naming a provider this build has never heard of reads as claude):
+  call claude#store#put('abc', {'name': 'from the future',
+        \ 'provider': 'not-a-cli'})
+  let entry = claude#store#load().sessions.abc
+  AssertEqual 'claude', claude#provider#of(entry)
+
+Execute (the schema version is unchanged by the new field):
+  call claude#store#put('abc', {'name': 'pi run', 'provider': 'pi'})
+  AssertEqual 1, claude#store#load().version
