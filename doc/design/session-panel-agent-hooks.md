@@ -111,8 +111,10 @@ separately:
 - *completion* — `Stop` when the turn ends, `StopFailure` when it ends on an
   API error, `SessionEnd` when the session terminates;
 - *background work* — `SubagentStart`/`SubagentStop` (carrying `agent_id`) and
-  `TaskCreated`/`TaskCompleted`. This is the part no terminal tail can supply,
-  and the reason the transport is worth having at all.
+  `TaskCreated`/`TaskCompleted`; and, for background shell tasks, a
+  `background_tasks` array on `Stop` rather than any event of their own (§
+  "Settling"). This is the part no terminal tail can supply, and the reason the
+  transport is worth having at all.
 
 **4. Settings and execution environment.** Project and user settings both
 apply, plus `.claude/settings.local.json` for a project-local, uncommitted
@@ -192,7 +194,7 @@ this hook got wrong (§8, phase 4).
 | `PermissionDenied`, `ElicitationResult` | `active` |
 | `Notification` `permission_prompt` \| `agent_needs_input` \| `elicitation_dialog` \| `elicitation_url_dialog` | `waiting` |
 | `Notification` `idle_prompt` | settles |
-| `Stop`, `StopFailure` | turn closed, then settles |
+| `Stop`, `StopFailure` | turn closed, `background_tasks` taken as the shell snapshot, then settles |
 | `SubagentStart`, `TaskCreated` | `active`, one more outstanding |
 | `SubagentStop`, `TaskCompleted` | one fewer outstanding, then settles |
 | `SessionEnd` | record deleted |
@@ -216,6 +218,17 @@ entry rather than pinning the session to Working forever. Entries older than 30
 minutes are pruned on the next event, which bounds the one payload detail the
 reference does not spell out: whether `TaskCompleted` names its task with the
 same field `TaskCreated` did.
+
+Background *shell* tasks — a `Bash` call run in the background — get none of
+those events. A live capture (§ "Still open") shows they are reported only as a
+`background_tasks` array on `Stop`, each entry carrying `id`, `type`, `status`,
+`description` and `command`. That is a snapshot rather than an edge, so the
+writer treats it as the whole truth about shell work: every `shell:`-prefixed
+entry is replaced by the ids currently `running`, and a task absent from the
+list has finished whatever an earlier snapshot said. The prefix keeps the
+replacement clear of the subagents tracked by id. No leak guard is needed —
+each snapshot corrects the last — and a task that finishes wakes the session as
+a fresh `UserPromptSubmit`, so the next `Stop` is what settles it to Idle.
 
 Each event is a separate process, so two can land out of order. The record
 carries `event_ms` alongside the seconds-resolution `updated_at` the panel
@@ -399,14 +412,17 @@ writer is built against those answers.
 back to terminal classification, which `test/session_state.vader` asserts
 directly.
 
-**Still open:** the mapping is validated against the documented contract and
-synthetic payloads, not against a capture from a live session. What a real
-session proves that synthetic events cannot: that `TaskCompleted` names its
-task with the same field `TaskCreated` used (a mismatch leaks one `pending`
-entry until the 30-minute prune, showing Working where Idle belonged), and that
-`PostToolBatch` fires for a lone tool call as well as a parallel batch (if it
-does not, `PreToolUse` alone carries the heartbeat until the turn ends, which
-costs nothing).
+**Still open:** a capture from a live session (2026-09-12, a background `Bash`
+call under Claude Code, logged by the writer's own `.debug-events` switch)
+settled part of this. `PostToolBatch` does fire for a lone tool call. Background
+shell tasks fire no `TaskCreated`/`TaskCompleted` at all — they appear only in
+`background_tasks` on `Stop`, which is what the shell snapshot above now reads;
+before that the session went Idle the moment the turn ended, with the task still
+running. The same capture shows `prompt_id` on every event but neither
+`agent_id` nor `task_id` on any, so whether `TaskCompleted` names its task with
+the same field `TaskCreated` used is still unproven — it needs a session that
+actually raises those two events, and until then the 30-minute prune is what
+bounds a mismatch.
 
 #### What the first draft got wrong
 

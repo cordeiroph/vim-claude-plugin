@@ -65,6 +65,12 @@ const NOTIFICATION_STATE = {
 const PENDING_OPEN = new Set(["SubagentStart", "TaskCreated"]);
 const PENDING_CLOSE = new Set(["SubagentStop", "TaskCompleted"]);
 
+// Background shell tasks are reported differently: TaskCreated/TaskCompleted
+// never fire for them, and Stop instead carries the whole list in
+// background_tasks. Their keys are prefixed so a snapshot can replace exactly
+// them without touching the subagents tracked by id.
+const SHELL_PREFIX = "shell:";
+
 const pendingKey = (event) => String(
   event.agent_id ?? event.task_id ?? event.tool_use_id ?? event.prompt_id ?? "anonymous",
 );
@@ -135,6 +141,22 @@ try {
   }
   if (PENDING_OPEN.has(name)) pending[pendingKey(event)] = eventMs;
   if (PENDING_CLOSE.has(name)) delete pending[pendingKey(event)];
+
+  // background_tasks is a complete snapshot of the session's shell tasks, not
+  // an edge, so it replaces every shell entry rather than adding to them: a
+  // task missing from it has finished, whatever an earlier snapshot said. That
+  // needs no leak guard -- the next snapshot corrects any entry, and a session
+  // that never reaches another Stop is one the TTL prune covers anyway.
+  if (Array.isArray(event.background_tasks)) {
+    for (const key of Object.keys(pending)) {
+      if (key.startsWith(SHELL_PREFIX)) delete pending[key];
+    }
+    for (const task of event.background_tasks) {
+      if (task?.status === "running" && task.id != null) {
+        pending[`${SHELL_PREFIX}${task.id}`] = eventMs;
+      }
+    }
+  }
 
   const turn = name === "UserPromptSubmit" ? true
     : (name === "Stop" || name === "StopFailure") ? false

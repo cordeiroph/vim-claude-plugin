@@ -60,7 +60,7 @@ as the prompt it describes is actually up.
 | `PermissionDenied`, `ElicitationResult` | `active` |
 | `Notification` `permission_prompt`, `agent_needs_input`, `elicitation_dialog`, `elicitation_url_dialog` | `waiting` |
 | `Notification` `idle_prompt` | settles: `active` if work is outstanding, else `idle` |
-| `Stop`, `StopFailure` | turn closed, then settles |
+| `Stop`, `StopFailure` | turn closed, `background_tasks` read as the shell snapshot, then settles |
 | `SubagentStart`, `TaskCreated` | `active`, one more outstanding |
 | `SubagentStop`, `TaskCompleted` | one fewer outstanding, then settles |
 | `SessionEnd` | the record is deleted |
@@ -77,6 +77,14 @@ work by id (`agent_id`, `task_id`, `tool_use_id`) and reports `active` until
 none is left. Ids are tracked rather than counted so a repeated or dropped
 event cannot corrupt a count, and an entry nothing closes within 30 minutes is
 dropped rather than pinning a session to Working forever.
+
+A background shell task — a `Bash` call run in the background — raises no
+`TaskCreated` or `TaskCompleted`. It shows up only in the `background_tasks`
+array Claude Code puts on `Stop`, so the writer reads that array as the
+complete list of shell work: the ids it reports `running` become the
+outstanding shell entries, and anything missing from it has finished. Without
+this, a session goes Idle the moment the turn ends even though the task is
+still running.
 
 `settings.example.json` registers `PreToolUse` and `PostToolBatch` but not
 `PostToolUse`: two handler processes per tool call rather than three, since

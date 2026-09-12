@@ -113,6 +113,55 @@ const tests = {
     assert.equal(await state(), "idle", "a leaked task cannot pin a session to Working");
   },
 
+  "a running background shell task outlives the turn": async () => {
+    await fire({ hook_event_name: "UserPromptSubmit" });
+    await fire({
+      hook_event_name: "Stop",
+      background_tasks: [{ id: "b1", type: "shell", status: "running" }],
+    });
+    assert.equal(await state(), "active", "the turn ended, the shell task did not");
+    await fire({ hook_event_name: "Notification", notification_type: "idle_prompt" });
+    assert.equal(await state(), "active", "and a quiet prompt does not make it idle");
+    await fire({ hook_event_name: "UserPromptSubmit" });
+    await fire({ hook_event_name: "Stop", background_tasks: [] });
+    assert.equal(await state(), "idle", "the next snapshot reports it finished");
+  },
+
+  "a shell snapshot is the whole truth about shell tasks": async () => {
+    await fire({
+      hook_event_name: "Stop",
+      background_tasks: [
+        { id: "b1", type: "shell", status: "running" },
+        { id: "b2", type: "shell", status: "running" },
+      ],
+    });
+    assert.equal(await state(), "active");
+    await fire({
+      hook_event_name: "Stop",
+      background_tasks: [
+        { id: "b2", type: "shell", status: "running" },
+        { id: "b3", type: "shell", status: "completed" },
+      ],
+    });
+    assert.deepEqual(Object.keys((await read()).pending), ["shell:b2"],
+      "one dropped from the list is done, and a finished one never counted");
+    await fire({ hook_event_name: "Stop", background_tasks: [] });
+    assert.equal(await state(), "idle");
+  },
+
+  "a shell snapshot leaves subagents alone": async () => {
+    await fire({ hook_event_name: "SubagentStart", agent_id: "a1" });
+    await fire({
+      hook_event_name: "Stop",
+      background_tasks: [{ id: "b1", type: "shell", status: "running" }],
+    });
+    assert.deepEqual(Object.keys((await read()).pending).sort(), ["a1", "shell:b1"]);
+    await fire({ hook_event_name: "Stop", background_tasks: [] });
+    assert.equal(await state(), "active", "the subagent is still outstanding");
+    await fire({ hook_event_name: "SubagentStop", agent_id: "a1" });
+    assert.equal(await state(), "idle");
+  },
+
   "a session ending takes its record with it": async () => {
     await fire({ hook_event_name: "UserPromptSubmit" });
     assert.equal(await gone(), false);
