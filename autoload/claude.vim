@@ -17,8 +17,12 @@ function! claude#open() abort
 endfunction
 
 " Start a new session regardless of what is already running.
+"
+" a:1 name     — '' asks for one (unless the prompts are turned off)
+" a:2 provider — which CLI to run; '' or absent means g:claude_provider
 function! claude#new(...) abort
-  call claude#session#new(a:0 > 0 ? a:1 : '')
+  call claude#session#new(a:0 > 0 ? a:1 : '', v:null,
+        \ a:0 > 1 ? a:2 : '')
 endfunction
 
 " Toggle the Claude window: hide it if visible, show it if hidden, open a new
@@ -343,17 +347,41 @@ endfunction
 
 " ── model selection ──────────────────────────────────────────────────────────
 
-" Present a numbered list of models from g:claude_models and send /model for
-" the chosen one to the resolved session.
+" Switch the model a session is running on.
+"
+" The session is resolved first, because which models there are to choose from
+" and how the choice is delivered are both its provider's answer: Claude and Pi
+" both take `/model <id>`, another CLI may take nothing at all.
 function! claude#select_model() abort
-  let l:models = get(g:, 'claude_models', [
-        \ 'claude-opus-4-7',
-        \ 'claude-sonnet-4-6',
-        \ 'claude-haiku-4-5-20251001',
-        \ ])
+  call claude#session#target('Switch model in which session',
+        \ function('s:choose_model'))
+endfunction
+
+function! s:choose_model(id) abort
+  if empty(a:id)
+    return
+  endif
+  let l:rec      = claude#session#get(a:id)
+  let l:provider = empty(l:rec)
+        \ ? claude#provider#default() : claude#provider#of(l:rec)
+  let l:label    = claude#provider#label(l:provider)
+
+  if !claude#provider#has(l:provider, 'model_text')
+    echomsg 'claude.vim: ' . l:label . ' has no in-session model switch'
+    return
+  endif
+  " With no list to offer, hand over to the CLI's own picker rather than
+  " inventing model names: Pi opens its selector on a bare /model, and a user
+  " who wants the numbered list here sets g:claude_providers.<name>.models.
+  let l:models = get(claude#provider#get(l:provider), 'models', [])
+  if empty(l:models)
+    call s:deliver(a:id, claude#provider#call(l:provider, 'model_text',
+          \ [''], ''))
+    return
+  endif
 
   " inputlist() expects item 0 to be a header and items 1..N to be choices.
-  let l:menu = ['Switch Claude model:']
+  let l:menu = ['Switch ' . l:label . ' model:']
   let l:i = 1
   for l:m in l:models
     call add(l:menu, printf('%d. %s', l:i, l:m))
@@ -365,10 +393,12 @@ function! claude#select_model() abort
   if l:choice < 1 || l:choice > len(l:models)
     return
   endif
-  let l:model = l:models[l:choice - 1]
 
-  call claude#session#target('Switch model in which session',
-        \ {id -> s:deliver(id, '/model ' . l:model)})
+  let l:text = claude#provider#call(l:provider, 'model_text',
+        \ [l:models[l:choice - 1]], '')
+  if !empty(l:text)
+    call s:deliver(a:id, l:text)
+  endif
 endfunction
 
 " ── session resume ───────────────────────────────────────────────────────────

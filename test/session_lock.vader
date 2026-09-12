@@ -34,10 +34,10 @@ Execute (a registry entry naming a pid that is no longer alive is ignored):
   " A pid vacated the instant it is stopped is not guaranteed reusable, but
   " is guaranteed to fail `kill -0` from here on, which is all this checks.
   call job_stop(g:_job, 'kill')
-  let l:tries = 0
-  while job_status(g:_job) ==# 'run' && l:tries < 50
+  let g:_tries = 0
+  while job_status(g:_job) ==# 'run' && g:_tries < 50
     sleep 20m
-    let l:tries += 1
+    let g:_tries += 1
   endwhile
   call writefile(['{"pid": ' . g:_pid . ', "sessionId": "abc123"}'],
         \ g:_dir . '/' . g:_pid . '.json')

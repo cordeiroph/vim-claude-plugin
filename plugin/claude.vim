@@ -32,6 +32,28 @@ if !exists('g:claude_models')
         \ ]
 endif
 
+" ── agent configuration ──────────────────────────────────────────────────────
+
+" g:claude_provider — which CLI a new session runs by default: 'claude'
+" (default) or 'pi'. |:PiNew| and the session panel's N start a session on a
+" named agent whatever this says.
+if !exists('g:claude_provider')
+  let g:claude_provider = 'claude'
+endif
+
+" g:claude_providers — per-agent overrides, merged over the built-in defaults
+" and keyed by agent name. Recognised keys: 'cmd', 'models', 'working_pat',
+" 'waiting_pat', and for pi 'model' and 'sessions_root'. For example:
+"
+"   let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
+"
+" Claude's settings are the globals they have always been — |g:claude_cmd|,
+" |g:claude_models|, |g:claude_panel_working_pat|, |g:claude_panel_waiting_pat|
+" — and are read whether or not this dictionary mentions claude.
+if !exists('g:claude_providers')
+  let g:claude_providers = {}
+endif
+
 " ── session panel configuration ──────────────────────────────────────────────
 
 " g:claude_panel_width — panel width in columns.
@@ -240,6 +262,12 @@ command!          ClaudeSessionsClose call claude#panel#close()
 command! -nargs=? ClaudeNew           call claude#new(<q-args>)
 command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
 
+" A session on another CLI. One command per agent, named after the agent
+" rather than the plugin — :PiNew now, :CodexNew when Codex lands. They are
+" written out rather than generated from the provider registry so that loading
+" this file still sources no autoload script.
+command! -nargs=? PiNew call claude#new(<q-args>, 'pi')
+
 " Workspaces: the git worktrees sessions run in.
 command! ClaudeWorkspaces call claude#workspace#pick()
 
@@ -315,6 +343,10 @@ if !exists('g:claude_no_default_mappings')
   " Start a session even when others are running. <leader>co focuses or picks
   " one instead, and only creates when nothing is live.
   nnoremap <silent> <leader>cn :ClaudeNew<CR>
+
+  " Start a Pi session, whatever the default agent is. Outside the <leader>c
+  " family, so it cannot collide with it.
+  nnoremap <silent> <leader>pn :PiNew<CR>
 
   " Toggle the session panel.
   nnoremap <silent> <leader>cs :ClaudeSessions<CR>

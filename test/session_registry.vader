@@ -228,6 +228,60 @@ Execute (no flags are added when the CLI does not support them):
   unlet g:claude_session_flags
   AssertEqual ['sleep', '30'], argv
 
+" ── another CLI's argument vector ────────────────────────────────────────────
+"
+" Pi takes one flag for both halves of the lifecycle: --session-id opens the
+" session when the project already has that id and creates it with that id
+" when it does not. So a resume is the same vector as a spawn, and --resume —
+" which Pi would refuse alongside --session-id — never appears.
+
+Execute (a fresh Pi session is given the id the plugin chose):
+  AssertEqual ['pi', '--session-id', 'abc-123'],
+        \ claude#session#_argv('abc-123', '', 0, 'pi')
+
+Execute (a resumed Pi session is the very same vector):
+  AssertEqual claude#session#_argv('abc-123', '', 0, 'pi'),
+        \ claude#session#_argv('abc-123', '', 1, 'pi')
+
+Execute (a resumed Pi session never passes --resume):
+  AssertEqual -1, index(claude#session#_argv('abc-123', '', 1, 'pi'),
+        \ '--resume')
+
+Execute (a named Pi session carries its name to the CLI):
+  AssertEqual ['pi', '--session-id', 'abc-123', '--name', 'panel design'],
+        \ claude#session#_argv('abc-123', 'panel design', 0, 'pi')
+
+Execute (g:claude_cmd is Claude's alone and never reaches Pi):
+  AssertEqual 'pi', claude#session#_argv('abc-123', '', 0, 'pi')[0]
+
+Execute (g:claude_providers overrides what Pi is launched with):
+  let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
+  AssertEqual ['pi', '--thinking', 'high', '--session-id', 'abc-123'],
+        \ claude#session#_argv('abc-123', '', 0, 'pi')
+  unlet g:claude_providers
+
+Execute (the argv seam still speaks Claude when nobody says otherwise):
+  let g:claude_session_flags = 1
+  AssertEqual claude#session#_argv('abc-123', '', 0),
+        \ claude#session#_argv('abc-123', '', 0, 'claude')
+  unlet g:claude_session_flags
+
+Execute (starting a session on a named agent records which one it is):
+  let g:claude_providers = {'pi': {'cmd': 'sleep 30'}}
+  call claude#new('a pi session', 'pi')
+  let recs = filter(claude#session#all(),
+        \ {_, r -> r.name ==# 'a pi session'})
+  AssertEqual 1, len(recs), 'the session should have been created'
+  AssertEqual 'pi', claude#provider#of(recs[0])
+  unlet g:claude_providers
+
+Execute (starting one without naming an agent uses the configured default):
+  call claude#new('a default session')
+  let recs = filter(claude#session#all(),
+        \ {_, r -> r.name ==# 'a default session'})
+  AssertEqual 1, len(recs)
+  AssertEqual 'claude', claude#provider#of(recs[0])
+
 Execute (the spawned process really receives the arguments intact):
   " Record argv from a stand-in CLI, then read back what actually arrived.
   let script = g:_store_dir . '/fake-claude'

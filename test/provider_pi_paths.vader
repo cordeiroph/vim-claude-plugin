@@ -1,0 +1,78 @@
+" Tests for where Pi keeps a conversation, and how one is found again.
+"
+" Pi encodes the working directory by replacing only separators — slash,
+" backslash, colon — and wrapping the result in a pair of dashes. Dots and
+" underscores survive, which is the opposite of Claude's rule (every character
+" that is not a letter or a digit becomes a dash, see session_project_dir).
+" Getting this wrong is silent: the directory simply does not exist, so every
+" session looks new and no resume ever finds its history.
+
+Before:
+  let g:_saved_providers = get(g:, 'claude_providers', {})
+  let g:_root = resolve(tempname())
+  let g:claude_providers = {'pi': {'sessions_root': g:_root}}
+
+After:
+  let g:claude_providers = g:_saved_providers
+  call delete(g:_root, 'rf')
+
+" ── the directory ────────────────────────────────────────────────────────────
+
+Execute (separators become dashes and the path is wrapped in a pair):
+  AssertEqual g:_root . '/--Users-me-project--',
+        \ claude#provider#pi#session_dir('/Users/me/project')
+
+Execute (a dot in the path is kept, unlike Claude's slug):
+  AssertEqual g:_root . '/--Users-pedro.cordeiro-project--',
+        \ claude#provider#pi#session_dir('/Users/pedro.cordeiro/project')
+
+Execute (an underscore is kept too):
+  AssertEqual g:_root . '/--Users-me-repo-e2e_extraction--',
+        \ claude#provider#pi#session_dir('/Users/me/repo/e2e_extraction')
+
+Execute (a trailing slash does not add an empty segment):
+  AssertEqual g:_root . '/--Users-me-project--',
+        \ claude#provider#pi#session_dir('/Users/me/project/')
+
+Execute (a space in the path is kept):
+  AssertEqual g:_root . '/--Users-me-my project--',
+        \ claude#provider#pi#session_dir('/Users/me/my project')
+
+Execute (the default root is Pi's own, when nothing overrides it):
+  let g:claude_providers = {}
+  AssertEqual expand('~/.pi/agent/sessions') . '/--Users-me-project--',
+        \ claude#provider#pi#session_dir('/Users/me/project')
+
+" ── finding one conversation ─────────────────────────────────────────────────
+
+Execute (helper):
+  function! PiFile(cwd, stamp, id) abort
+    let l:dir = claude#provider#pi#session_dir(a:cwd)
+    call mkdir(l:dir, 'p')
+    let l:path = l:dir . '/' . a:stamp . '_' . a:id . '.jsonl'
+    call writefile([json_encode({'type': 'session', 'version': 3,
+          \ 'id': a:id, 'cwd': a:cwd})], l:path)
+    return l:path
+  endfunction
+
+Execute (an id resolves to the file whose name ends with it):
+  let path = PiFile('/tmp/work', '2026-09-05T13-15-20-249Z',
+        \ '01a071b5-9339-7557-8786-35d5bffc85e8')
+  AssertEqual path, claude#provider#pi#transcript_path(
+        \ '01a071b5-9339-7557-8786-35d5bffc85e8', '/tmp/work')
+
+Execute (an id with no file resolves to nothing, not to a made-up path):
+  call PiFile('/tmp/work', '2026-09-05T13-15-20-249Z', 'aaa')
+  AssertEqual '', claude#provider#pi#transcript_path('bbb', '/tmp/work')
+
+Execute (a directory Pi has never written to resolves to nothing):
+  AssertEqual '', claude#provider#pi#transcript_path('aaa', '/tmp/elsewhere')
+
+Execute (the ids on disk are read from the names, timestamp stripped):
+  call PiFile('/tmp/work', '2026-09-05T13-15-20-249Z', 'aaa')
+  call PiFile('/tmp/work', '2026-09-06T09-00-00-000Z', 'bbb')
+  AssertEqual ['aaa', 'bbb'],
+        \ sort(keys(claude#provider#pi#ids('/tmp/work')))
+
+Execute (a directory with no conversations has no ids):
+  AssertEqual {}, claude#provider#pi#ids('/tmp/nothing-here')

@@ -8,6 +8,8 @@ Run as many sessions as you like, name them, and switch between them from a NERD
 
 - Vim 8.1+ (with `+terminal`)
 - The `claude` CLI on your `$PATH`
+- Optional: the [`pi`](https://github.com/earendil-works/pi) CLI, to run Pi
+  sessions alongside Claude ones — see [Choosing an agent](#choosing-an-agent)
 
 ## Installation
 
@@ -25,6 +27,7 @@ Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into 
 |---------|---------|--------|
 | `<leader>co` | `:ClaudeOpen` | Focus a session, starting one if none is running |
 | `<leader>cn` | `:ClaudeNew` | Start a session even when others are already running |
+| `<leader>pn` | `:PiNew` | Start a session on Pi rather than the default agent |
 | `<leader>cs` | `:ClaudeSessions` | Toggle the session panel |
 | `<leader>cw` | `:ClaudeWorkspaces` | Choose the workspace (git worktree) to work in |
 | `<C-a>` | `:ClaudeSidebars` | Raise or dismiss the whole sidebar column |
@@ -297,6 +300,31 @@ New sessions prompt for a name, which is passed to the Claude CLI too, so it sho
 
 > **Note:** a plugin update or reinstall (`:PlugUpdate`, `:PlugClean`, deleting the bundle directory) deletes that file and every session name with it. To keep names across updates, set `g:claude_session_store` to a path outside the plugin, e.g. `expand('~/.claude/vim-sessions.json')`.
 
+## Choosing an agent
+
+Sessions can run Claude or [Pi](https://github.com/earendil-works/pi). Everything else is the same for both: the panel lists them together, names and resumes them the same way, and a workspace can hold one of each.
+
+```vim
+" Which CLI a new session runs by default
+let g:claude_provider = 'claude'
+
+" Per-agent overrides, merged over the defaults
+let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
+```
+
+| | |
+| --- | --- |
+| `<leader>pn`, `:PiNew [name]` | Start a Pi session, whatever the default is |
+| `<leader>cn`, `:ClaudeNew [name]` | Start one on the default agent |
+| `N` in the panel | Asks which agent, then which branch, then the name |
+| `n` in the panel | Asks nothing, and runs the agent the cursor is on |
+
+A row shows which agent it is running only while the panel is listing more than one, so a Claude-only panel reads exactly as it did. `/pi` filters to Pi sessions.
+
+Claude keeps its own settings under the names it always had — `g:claude_cmd`, `g:claude_models`, `g:claude_panel_working_pat`, `g:claude_panel_waiting_pat` — and a `vimrc` that sets none of the new options behaves exactly as before.
+
+> **Note:** `:ClaudeModel` offers a numbered list only when the agent has one. Pi ships none, so it sends a bare `/model` and lets Pi open its own picker; set `g:claude_providers.pi.models` to get the list here instead.
+
 ## Workspaces
 
 A workspace is a git worktree a session owns: its own checkout of one branch, so two sessions can work on two branches at once without fighting over one directory.
@@ -337,7 +365,7 @@ Press `I` to show the buried ones and again to put them away; renaming one with 
 
 ## Model switching
 
-`:ClaudeModel` (or `<leader>cm`) shows a numbered picker and switches models without interrupting the conversation. Opens a new session first if none is running.
+`:ClaudeModel` (or `<leader>cm`) shows a numbered picker and switches models without interrupting the conversation. Opens a new session first if none is running. The list belongs to the session's agent — `g:claude_models` for Claude, `g:claude_providers.pi.models` for Pi, which ships none and so opens Pi's own picker instead (see [Choosing an agent](#choosing-an-agent)).
 
 ## Help
 

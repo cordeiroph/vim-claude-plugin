@@ -25,6 +25,7 @@ let s:show_help  = 0
 let s:rendered   = []     " session ids in the order last drawn
 let s:grouping   = 'state'
 let s:filter     = ''     " while set, only matching sessions are drawn
+let s:mixed      = 0      " 1 while the drawn rows run more than one agent
 let s:done_all   = 0      " 1 once the Done group has been asked to show all
 
 " Group key -> 1 while that node is folded shut. The two views use different
@@ -315,19 +316,37 @@ function! s:where(rec) abort
   return strcharpart(l:where, 0, 6)
 endfunction
 
+" Whether the rows being drawn are running more than one agent. A panel where
+" they all agree says nothing about it — which is every panel, until the day
+" a second CLI is started.
+function! s:mixed_providers(sessions) abort
+  let l:seen = {}
+  for l:rec in a:sessions
+    let l:seen[claude#provider#of(l:rec)] = 1
+  endfor
+  return len(l:seen) > 1
+endfunction
+
 " The right-hand column of a session row. In the state view nothing else says
 " where the session lives, so the row must; in the place view the parent rows
-" have already said it three times.
+" have already said it three times. Which agent it is running goes in front of
+" both, and only while the panel is showing more than one.
 function! s:suffix(rec) abort
+  let l:parts = []
+  if s:mixed
+    call add(l:parts, claude#provider#of(a:rec))
+  endif
+  if s:grouping ==# 'state'
+    let l:where = s:where(a:rec)
+    if !empty(l:where)
+      call add(l:parts, l:where)
+    endif
+  endif
   let l:age = s:age(a:rec)
-  if s:grouping !=# 'state'
-    return l:age
+  if !empty(l:age)
+    call add(l:parts, l:age)
   endif
-  let l:where = s:where(a:rec)
-  if empty(l:where)
-    return l:age
-  endif
-  return empty(l:age) ? l:where : l:where . ' · ' . l:age
+  return join(l:parts, ' · ')
 endfunction
 
 " Whether a record survives the active filter. Matching is over everything the
@@ -337,7 +356,8 @@ function! s:matches(rec) abort
     return 1
   endif
   let l:hay = join([claude#session#label(a:rec), s:where(a:rec),
-        \ get(a:rec, 'branch', ''), get(a:rec, 'workspace', '')], ' ')
+        \ get(a:rec, 'branch', ''), get(a:rec, 'workspace', ''),
+        \ claude#provider#of(a:rec)], ' ')
   return l:hay =~? '\V' . escape(s:filter, '\')
 endfunction
 
@@ -507,6 +527,7 @@ endfunction
 function! s:build() abort
   let l:lines = []
   let l:nodes = []
+  let s:mixed = s:mixed_providers(claude#session#all())
 
   let l:title = 'Claude Sessions'
   let l:count = s:header_count()
@@ -804,16 +825,37 @@ function! s:place_under_cursor() abort
   return ['', l:dir]
 endfunction
 
+" Which agent the row under the cursor is running, so n can start another like
+" it. A row that names no session — a project, a branch, the header — answers
+" with the configured default.
+function! s:provider_under_cursor() abort
+  let l:nodes = get(b:, 'claude_panel_nodes', [])
+  let l:idx   = line('.') - 1
+  while l:idx >= 0 && l:idx < len(l:nodes)
+    if l:nodes[l:idx].kind ==# 'session'
+      let l:rec = claude#session#get(l:nodes[l:idx].id)
+      if !empty(l:rec)
+        return claude#provider#of(l:rec)
+      endif
+    endif
+    let l:idx -= 1
+  endwhile
+  return claude#provider#default()
+endfunction
+
 " n — a session here. One question, not two: the row under the cursor already
-" says which workspace "here" is, so only the name is worth asking for. Leaving
-" it blank is still an answer — the session labels itself from its first
-" message — and g:claude_session_prompt_name = 0 skips the question entirely.
+" says which workspace "here" is and which agent is running there, so only the
+" name is worth asking for. Leaving it blank is still an answer — the session
+" labels itself from its first message — and g:claude_session_prompt_name = 0
+" skips the question entirely.
 function! s:new() abort
   let [l:ws, l:dir] = s:place_under_cursor()
+  let l:provider    = s:provider_under_cursor()
   call s:enter_main()
   let l:id = claude#session#spawn({
         \ 'workspace': l:ws,
         \ 'cwd':       l:dir,
+        \ 'provider':  l:provider,
         \ 'ask_name':  get(g:, 'claude_session_prompt_name', 1),
         \ })
   if !empty(l:id)
@@ -821,10 +863,45 @@ function! s:new() abort
   endif
 endfunction
 
-" N — the deliberate one: which branch, and what to call it.
+" Which agent a deliberate new session should run. Returns [1, provider], or
+" [0, ''] when the question was cancelled — the same contract as
+" s:prompt_branch(), so CTRL-C here creates nothing at all. With only one agent
+" registered there is nothing worth asking.
+"
+" inputlist() rather than a popup: this is the first of three questions in a
+" row, and the other two are input() prompts. A popup would have to hand the
+" rest of the chain to a callback to ask the same thing.
+function! s:ask_provider() abort
+  let l:names = claude#provider#names()
+  if len(l:names) < 2
+    return [1, claude#provider#default()]
+  endif
+  let l:menu = ['Which agent?']
+  let l:i = 1
+  for l:name in l:names
+    call add(l:menu, printf('%d. %s', l:i, claude#provider#label(l:name)))
+    let l:i += 1
+  endfor
+  try
+    let l:choice = inputlist(l:menu)
+  catch /^Vim:Interrupt$/
+    return [0, '']
+  endtry
+  redraw
+  if l:choice < 1 || l:choice > len(l:names)
+    return [0, '']
+  endif
+  return [1, l:names[l:choice - 1]]
+endfunction
+
+" N — the deliberate one: which agent, which branch, and what to call it.
 function! s:new_asking() abort
+  let [l:ok, l:provider] = s:ask_provider()
+  if !l:ok
+    return
+  endif
   call s:enter_main()
-  let l:id = claude#session#new()
+  let l:id = claude#session#new('', v:null, l:provider)
   if !empty(l:id)
     call claude#session#touch_focus(l:id)
   endif

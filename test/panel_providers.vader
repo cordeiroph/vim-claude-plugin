@@ -1,0 +1,122 @@
+" Tests for how the panel treats a session's agent: it shows one only when
+" there is more than one to tell apart, it can be filtered by, and n starts
+" another session on whichever agent the cursor is sitting on.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  call claude#store#_reset()
+  let g:_saved_store = get(g:, 'claude_session_store', '')
+  let g:_saved_cwd   = getcwd()
+  let g:_dir = tempname()
+  call mkdir(g:_dir, 'p')
+  let g:claude_session_store = g:_dir . '/sessions.json'
+  execute 'cd ' . fnameescape(g:_dir)
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  call claude#panel#_reset()
+  call claude#session#_reset()
+  call claude#store#_reset()
+  let g:claude_session_store = g:_saved_store
+  call delete(g:_dir, 'rf')
+  only
+
+" ── saying which agent ───────────────────────────────────────────────────────
+
+Execute (a panel of Claude sessions says nothing about agents):
+  call claude#session#_inject({'name': 'diff tree work', 'status': 'active'})
+  call claude#session#_inject({'name': 'panel rework',   'status': 'idle'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text !~# 'claude ·', 'a single-agent panel should read as it always did'
+  Assert text !~# '\<pi\>',   'and should not mention an agent nobody started'
+
+Execute (once two agents are listed, each row says which it is):
+  call claude#session#_inject({'name': 'diff tree work', 'status': 'active'})
+  call claude#session#_inject({'name': 'panel rework',   'status': 'active',
+        \ 'provider': 'pi'})
+  call claude#panel#open()
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'claude', 'the Claude row should name its agent'
+  Assert text =~# 'pi',     'and the Pi row should name its'
+
+Execute (the label itself is left alone — the agent goes in the right column):
+  call claude#session#_inject({'name': 'panel rework', 'status': 'active',
+        \ 'provider': 'pi'})
+  call claude#session#_inject({'name': 'diff tree work', 'status': 'active'})
+  call claude#panel#open()
+  let rows = filter(claude#panel#_lines(), {_, l -> l =~# 'panel rework'})
+  AssertEqual 1, len(rows)
+  Assert rows[0] =~# 'panel rework.*pi',
+        \ 'the agent belongs after the name, got ' . string(rows[0])
+
+" ── finding one ──────────────────────────────────────────────────────────────
+
+Execute (filtering by agent name keeps that agent's sessions):
+  call claude#session#_inject({'name': 'diff tree work', 'status': 'active'})
+  call claude#session#_inject({'name': 'panel rework',   'status': 'active',
+        \ 'provider': 'pi'})
+  call claude#panel#open()
+  call claude#panel#_filter('pi')
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# 'panel rework',  'the Pi session should survive the filter'
+  Assert text !~# 'diff tree work', 'the Claude session should not'
+
+" ── starting another ─────────────────────────────────────────────────────────
+
+Execute (n starts another session on the agent under the cursor):
+  let g:_saved_cmd = get(g:, 'claude_cmd', 'claude')
+  let g:claude_cmd = 'sleep 30'
+  let g:claude_providers = {'pi': {'cmd': 'sleep 30'}}
+  let g:_saved_prompt = get(g:, 'claude_session_prompt_name', 1)
+  let g:claude_session_prompt_name = 0
+  call claude#session#_inject({'name': 'pi work', 'status': 'active',
+        \ 'provider': 'pi', 'cwd': g:_dir, 'worktree': g:_dir})
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  " Put the cursor on the Pi row, then press n.
+  let lnum = index(claude#panel#_lines(), filter(copy(claude#panel#_lines()),
+        \ {_, l -> l =~# 'pi work'})[0]) + 1
+  call cursor(lnum, 1)
+  normal n
+  let fresh = filter(claude#session#all(), {_, r -> r.name !=# 'pi work'})
+  AssertEqual 1, len(fresh), 'n should have started exactly one session'
+  AssertEqual 'pi', claude#provider#of(fresh[0]),
+        \ 'and it should be running the agent the cursor was on'
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  let g:claude_cmd = g:_saved_cmd
+  let g:claude_session_prompt_name = g:_saved_prompt
+  unlet g:claude_providers
+
+Execute (n on a row that names no session uses the configured default):
+  let g:_saved_cmd = get(g:, 'claude_cmd', 'claude')
+  let g:claude_cmd = 'sleep 30'
+  let g:_saved_prompt = get(g:, 'claude_session_prompt_name', 1)
+  let g:claude_session_prompt_name = 0
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  call cursor(1, 1)
+  normal n
+  let fresh = claude#session#all()
+  AssertEqual 1, len(fresh)
+  AssertEqual 'claude', claude#provider#of(fresh[0])
+  for b in claude#session#bufnrs()
+    call claude#session#stop_job(b)
+    silent! execute 'bwipeout! ' . b
+  endfor
+  let g:claude_cmd = g:_saved_cmd
+  let g:claude_session_prompt_name = g:_saved_prompt
+
+" ── asking ───────────────────────────────────────────────────────────────────
+
+Execute (N is the key that asks, n the one that does not):
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  Assert maparg('N', 'n', 0, 1).rhs =~# 'new_asking',
+        \ 'N should be the deliberate one'
+  Assert maparg('n', 'n', 0, 1).rhs =~# 'new()',
+        \ 'n should start one without asking which agent'

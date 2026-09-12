@@ -1,0 +1,116 @@
+" Tests for reading Pi's conversations: what a row is called, where it ran,
+" and which files are conversations at all.
+
+Before:
+  let g:_saved_providers = get(g:, 'claude_providers', {})
+  let g:_saved_limit     = get(g:, 'claude_panel_closed_limit', 10)
+  let g:_root = resolve(tempname())
+  let g:claude_providers = {'pi': {'sessions_root': g:_root}}
+  let g:_cwd = '/tmp/pi-work'
+  let g:_dir = claude#provider#pi#session_dir(g:_cwd)
+  call mkdir(g:_dir, 'p')
+
+After:
+  let g:claude_providers          = g:_saved_providers
+  let g:claude_panel_closed_limit = g:_saved_limit
+  call delete(g:_root, 'rf')
+
+Execute (helper):
+  " Write a conversation of {lines} (already-encoded JSON), named the way Pi
+  " names one: <timestamp>_<id>.jsonl.
+  function! PiWrite(stamp, id, lines) abort
+    let l:path = g:_dir . '/' . a:stamp . '_' . a:id . '.jsonl'
+    call writefile(a:lines, l:path)
+    return l:path
+  endfunction
+
+  function! PiHeader(id) abort
+    return json_encode({'type': 'session', 'version': 3, 'id': a:id,
+          \ 'timestamp': '2026-09-05T13:15:20.249Z', 'cwd': g:_cwd})
+  endfunction
+
+  function! PiUser(text) abort
+    return json_encode({'type': 'message', 'message': {'role': 'user',
+          \ 'content': [{'type': 'text', 'text': a:text}]}})
+  endfunction
+
+  function! PiName(name) abort
+    return json_encode({'type': 'session_info', 'name': a:name})
+  endfunction
+
+" ── one conversation ─────────────────────────────────────────────────────────
+
+Execute (the id comes from the header, not from the filename):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'from-the-name',
+        \ [PiHeader('from-the-header')])
+  AssertEqual 'from-the-header', claude#provider#pi#scan(path).id
+
+Execute (the header says where the session ran):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiHeader('a')])
+  AssertEqual g:_cwd, claude#provider#pi#scan(path).cwd
+
+Execute (the first user message is what the session is labelled with):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a',
+        \ [PiHeader('a'), PiUser('pick a diff base'), PiUser('and another')])
+  AssertEqual 'pick a diff base', claude#provider#pi#scan(path).snippet
+
+Execute (the name Pi shows is the last session_info written):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a',
+        \ [PiHeader('a'), PiName('first go'), PiUser('hello'),
+        \  PiName('renamed later')])
+  AssertEqual 'renamed later', claude#provider#pi#scan(path).name
+
+Execute (a conversation nobody named has no name, only a first message):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a',
+        \ [PiHeader('a'), PiUser('hello')])
+  let scan = claude#provider#pi#scan(path)
+  AssertEqual '', scan.name
+  AssertEqual 'hello', scan.snippet
+
+Execute (an assistant message is not mistaken for what was asked):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiHeader('a'),
+        \ json_encode({'type': 'message', 'message': {'role': 'assistant',
+        \   'content': [{'type': 'text', 'text': 'I have finished'}]}}),
+        \ PiUser('actually asked')])
+  AssertEqual 'actually asked', claude#provider#pi#scan(path).snippet
+
+Execute (a corrupt line is skipped rather than losing the conversation):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a',
+        \ [PiHeader('a'), '{not json at all', PiUser('still read')])
+  AssertEqual 'still read', claude#provider#pi#scan(path).snippet
+
+Execute (Pi records no branch, so the record takes one from git instead):
+  let path = PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiHeader('a')])
+  AssertEqual '', claude#provider#pi#scan(path).branch
+
+" ── the sweep ────────────────────────────────────────────────────────────────
+
+Execute (conversations come back newest first):
+  call PiWrite('2026-09-05T13-15-20-249Z', 'older', [PiHeader('older')])
+  sleep 1100m
+  call PiWrite('2026-09-06T09-00-00-000Z', 'newer', [PiHeader('newer')])
+  AssertEqual ['newer', 'older'],
+        \ map(claude#provider#pi#sessions([g:_cwd]), {_, s -> s.id})
+
+Execute (the sweep stops at g:claude_panel_closed_limit):
+  call PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiHeader('a')])
+  call PiWrite('2026-09-06T09-00-00-000Z', 'b', [PiHeader('b')])
+  call PiWrite('2026-09-07T09-00-00-000Z', 'c', [PiHeader('c')])
+  let g:claude_panel_closed_limit = 2
+  AssertEqual 2, len(claude#provider#pi#sessions([g:_cwd]))
+
+Execute (a limit of zero reads nothing at all):
+  call PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiHeader('a')])
+  let g:claude_panel_closed_limit = 0
+  AssertEqual [], claude#provider#pi#sessions([g:_cwd])
+
+Execute (a file with no header is not a conversation):
+  call PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiUser('orphan')])
+  AssertEqual [], claude#provider#pi#sessions([g:_cwd])
+
+Execute (a directory Pi has never written to contributes nothing):
+  AssertEqual [], claude#provider#pi#sessions(['/tmp/somewhere-else'])
+
+Execute (one directory listed twice is read once):
+  call PiWrite('2026-09-05T13-15-20-249Z', 'a', [PiHeader('a')])
+  AssertEqual 1, len(claude#provider#pi#sessions([g:_cwd, g:_cwd]))

@@ -1,38 +1,5 @@
 " ── input completion ─────────────────────────────────────────────────────────
 
-" Built-in slash commands — base list, always available once Claude starts.
-let s:slash_commands_base = [
-      \ {'word': '/add',          'menu': 'Add files to context'},
-      \ {'word': '/bug',          'menu': 'Report a bug to Anthropic'},
-      \ {'word': '/clear',        'menu': 'Clear conversation history'},
-      \ {'word': '/compact',      'menu': 'Compact conversation to save tokens'},
-      \ {'word': '/config',       'menu': 'Open configuration settings'},
-      \ {'word': '/cost',         'menu': 'Show token usage and cost'},
-      \ {'word': '/doctor',       'menu': 'Run diagnostics'},
-      \ {'word': '/help',         'menu': 'Show help'},
-      \ {'word': '/init',         'menu': 'Initialize CLAUDE.md for project'},
-      \ {'word': '/login',        'menu': 'Log in to Claude'},
-      \ {'word': '/logout',       'menu': 'Log out of Claude'},
-      \ {'word': '/memory',       'menu': 'View and manage memory'},
-      \ {'word': '/model',        'menu': 'Switch model'},
-      \ {'word': '/permissions',  'menu': 'Manage tool permissions'},
-      \ {'word': '/pr_comments',  'menu': 'View PR review comments'},
-      \ {'word': '/quit',         'menu': 'Quit Claude'},
-      \ {'word': '/release-notes','menu': 'Show release notes'},
-      \ {'word': '/review',       'menu': 'Code review mode'},
-      \ {'word': '/status',       'menu': 'Show account and session status'},
-      \ {'word': '/terminal',     'menu': 'Run a command in terminal'},
-      \ {'word': '/vim',          'menu': 'Enter Vim mode'},
-      \ ]
-
-let s:agents_base = [
-      \ {'word': '@claude',          'abbr': 'claude',          'menu': '[Built-in Agent]'},
-      \ {'word': '@Explore',         'abbr': 'Explore',         'menu': '[Built-in Agent]'},
-      \ {'word': '@general-purpose', 'abbr': 'general-purpose', 'menu': '[Built-in Agent]'},
-      \ {'word': '@Plan',            'abbr': 'Plan',            'menu': '[Built-in Agent]'},
-      \ {'word': '@statusline-setup','abbr': 'statusline-setup','menu': '[Built-in Agent]'},
-      \ ]
-
 " Completion data belongs to a session: each Claude process sees its own
 " project commands and agents. s:last_* holds the most recently collected set
 " and is used when no single session can be resolved — before the first
@@ -52,36 +19,27 @@ function! s:get_session_agents() abort
         \ ? l:rec.agents : s:last_agents
 endfunction
 
-" Collect slash commands and agents when a Claude instance starts. Called
-" from claude#session#new()/resume() with the session id — never from the
-" input panel. Without an id the data is only cached as the fallback set.
+" Collect the slash commands and agents a session can complete, when it
+" starts. Called from claude#session#new()/resume() with the session id — never
+" from the input panel. Without an id the data is only cached as the fallback
+" set. What there is to collect is the provider's business: Claude reads
+" .claude/commands and .claude/agents, another CLI reads whatever it keeps.
 function! claude#input#collect_data(...) abort
-  " Slash commands: built-ins + project-level + user-level custom commands.
-  let l:cmds = copy(s:slash_commands_base)
-  for l:f in glob(getcwd() . '/.claude/commands/*.md', 0, 1)
-        \ + glob(expand('~') . '/.claude/commands/*.md', 0, 1)
-    call add(l:cmds, {'word': '/' . fnamemodify(l:f, ':t:r'), 'menu': 'Custom command'})
-  endfor
+  let l:id  = a:0 > 0 ? a:1 : ''
+  let l:rec = !empty(l:id) && claude#session#exists(l:id)
+        \ ? claude#session#get(l:id) : {}
+  let l:provider = empty(l:rec)
+        \ ? claude#provider#default() : claude#provider#of(l:rec)
 
-  " Agents: built-ins + project-level + user-level.
-  let l:agents = copy(s:agents_base)
-  for l:f in glob(getcwd() . '/.claude/agents/*.md', 0, 1)
-        \ + glob(expand('~') . '/.claude/agents/*.md', 0, 1)
-    call add(l:agents, {
-          \ 'word': '@' . fnamemodify(l:f, ':t:r'),
-          \ 'abbr': fnamemodify(l:f, ':t:r'),
-          \ 'menu': '[Agent]',
-          \ })
-  endfor
+  let l:data = claude#provider#call(l:provider, 'completion', [getcwd()],
+        \ {'commands': [], 'agents': []})
 
-  let s:last_commands = l:cmds
-  let s:last_agents   = l:agents
+  let s:last_commands = get(l:data, 'commands', [])
+  let s:last_agents   = get(l:data, 'agents', [])
 
-  let l:id = a:0 > 0 ? a:1 : ''
-  if !empty(l:id) && claude#session#exists(l:id)
-    let l:rec = claude#session#get(l:id)
-    let l:rec.commands = l:cmds
-    let l:rec.agents   = l:agents
+  if !empty(l:rec)
+    let l:rec.commands = s:last_commands
+    let l:rec.agents   = s:last_agents
   endif
 endfunction
 
