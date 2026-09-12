@@ -5,10 +5,10 @@ Status: **Design A built for Claude Code; Pi still proposed**
 Claude Code's hook contract is now verified against the published reference and
 implemented in `examples/hooks/claude-vim-status.mjs`, read by the opt-in
 `g:claude_panel_hook_state` path in `autoload/claude/session.vim`. §4 records
-what was built and §8 what a first draft got wrong. Pi ships nothing: its
-extension contract below is unchanged, and the project-local prototype now
-sitting at `.pi/extensions/claude-vim-status.ts` is phase-1 shaped but
-unverified and untracked (§8, phase 1).
+what was built and §8 what a first draft got wrong. Pi ships nothing yet: the
+project-local writer at `.pi/extensions/claude-vim-status.ts` is now written
+against the published 0.85.1 extension API and type-checks against it, but is
+still untracked and has not been run in a real Pi session (§8, phase 1).
 
 ## 1. Decision to make
 
@@ -61,20 +61,29 @@ a dead job into a live one.
 
 Pi supports TypeScript extensions in `~/.pi/agent/extensions/`,
 `.pi/extensions/`, or paths listed in `.pi/settings.json` / global settings.
-Project-local extensions require project trust. The documented extension API
-provides:
+Project-local extensions require project trust. Read from the published
+`@earendil-works/pi-coding-agent` 0.85.1 types, the extension API provides:
 
-- `session_start` and `session_shutdown` for lifecycle;
-- `agent_start` for active agent work;
+- `session_start` and `session_shutdown` for lifecycle, the latter carrying a
+  `reason` of `quit`, `reload`, `new`, `resume` or `fork`;
+- `agent_start` for active agent work, `agent_end` for the end of one agent
+  loop, and `turn_start` / `turn_end` within a run;
 - `agent_settled` when no retry, compaction retry, or queued follow-up remains;
 - `tool_execution_start` / `tool_execution_end` and `tool_call` for
   extension-owned approval gates;
-- `ctx.sessionManager` for session data and `ctx.isIdle()` for runtime state.
+- `ui_prompt_start` / `ui_prompt_end`, which wrap the five `ctx.ui.*` dialog
+  methods and fire for nothing else — Pi's own tool-approval prompt included;
+- `ctx.sessionManager.getSessionId()` for the session id and `ctx.isIdle()` for
+  runtime state.
 
-Therefore Pi can reliably emit `active` at `agent_start`, `closed` during a
-normal `session_shutdown`, and an advisory idle/settled state at
-`agent_settled`. It cannot generically prove a built-in-agent request needs the
-user unless a Pi extension owns that interaction. A Pi extension that presents
+There is no event for background work, because there is none to report: Pi
+ships bash, edit, find, grep, ls, powershell, read and write, with no task or
+subagent tool, and its bash tool takes a `timeout` rather than a detach flag.
+
+Therefore Pi can reliably emit `active` at `agent_start`, an advisory
+idle/settled state at `agent_settled`, and withdraw its record at
+`session_shutdown`. It cannot generically prove a built-in-agent request needs
+the user unless a Pi extension owns that interaction. A Pi extension that presents
 an approval dialog or a custom input tool can emit `waiting` immediately before
 asking and `active`/`idle` when the interaction resolves.
 
@@ -253,7 +262,7 @@ sessions and is not attempted.
 | `test/session_state.vader` | Reader fixtures: disabled, valid states, bad JSON, foreign provider, unknown state, stale, future-stamped, hook `closed`, root resolution, background work past the idle timer, working-beats-waiting, and liveness precedence over a fresh record. | Built |
 | `test/hooks/status_writer.test.mjs`, `make test-hooks` | The event mapping against synthetic payloads; needs node, no Claude installation. | Built |
 | `autoload/claude/provider.vim` | Optionally add a provider capability/config field for hook-state support and root resolution; do not add agent-specific knowledge to the registry. | Not needed yet — one writer, one provider |
-| `autoload/claude/provider/pi.vim` | Declare Pi hook-state support only once the extension contract is shipped and tested. | Blocked on the Pi prototype |
+| `autoload/claude/provider/pi.vim` | Nothing to declare: the reader resolves `<root>/<provider>/<id>.json` from the session record's own provider, so a Pi writer is read as soon as one exists. | Not needed |
 
 ### Failure and lifecycle rules
 
@@ -371,17 +380,42 @@ Capture the exact session-id accessor and confirm it equals the id that
 **Acceptance:** a Pi session changing from active to settled changes one valid
 owner-only record; restart/crash leaves no state trusted beyond the chosen TTL.
 
-An untracked prototype of exactly this shape exists at
-`.pi/extensions/claude-vim-status.ts`, writing `idle`/`active`/`idle`/`closed`
-for `session_start`/`agent_start`/`agent_settled`/`session_shutdown`. It has
-not been run against a real Pi session, so the acceptance above is unmet — and
-three things about it are known to need work before it can be:
-`ctx.sessionManager.getSessionId()` is still the unconfirmed accessor of §10;
-its runtime root ignores `XDG_RUNTIME_DIR`, which the Claude writer and the Vim
-reader now both honour, so the two disagree wherever that variable is set; and
-`session_shutdown` publishes `closed`, which the reader drops by design —
-deleting the record, as the Claude writer does at `SessionEnd`, is what that
-event should do.
+An untracked writer of this shape sits at `.pi/extensions/claude-vim-status.ts`.
+It was rewritten against `@earendil-works/pi-coding-agent` 0.85.1 — read from
+the published package, and the file type-checks against that API — which
+settles the three things the first sketch was known to get wrong.
+`ctx.sessionManager.getSessionId()` is real (`ReadonlySessionManager`, which is
+exactly what `ExtensionContext.sessionManager` is typed as). Its root now
+prefers `XDG_RUNTIME_DIR`, as the Claude writer and the Vim reader both do, so
+the three no longer disagree wherever that variable is set. And
+`session_shutdown` now deletes the record rather than publishing `closed`,
+which the reader drops by design — every one of that event's reasons (`quit`,
+`reload`, `new`, `resume`, `fork`) either ends the session or replaces it with
+one that will publish its own record at `session_start`.
+
+It is level-triggered like the Claude writer, but derives its state in memory
+rather than by reading the record back, because a Pi extension runs inside Pi's
+own process rather than once per event. `agent_start` opens a run and
+`agent_settled` closes it — `agent_end` only ends one agent loop, which a
+retry, a compaction or a queued continuation can follow. `turn_start`,
+`turn_end`, `tool_execution_start` and `tool_execution_end` change nothing and
+republish only to keep the record inside the reader's TTL, which a single slow
+tool call could otherwise outlast.
+
+Two limits are Pi's, not the writer's. **There is no background work to
+report:** Pi ships no task, subagent or dispatch tool, and its bash tool takes
+a `timeout` rather than a detach flag, so nothing answers to the Claude
+writer's `pending` and no run outlives its own settling. **Native attention is
+unreachable:** `ui_prompt_start`/`ui_prompt_end` fire only for dialogs an
+extension itself opens through `ctx.ui.*` (they wrap those five methods and
+nothing else), and the extension API exposes no tool-approval or permission
+event of any kind. So the writer can report `waiting` for a question it asked
+and never for Pi's own approval prompt, which leaves that case exactly where it
+is today — with the `waiting_pat` terminal heuristic in
+`claude#provider#pi#spec()`.
+
+The acceptance above is still unmet: none of this has been run in a real Pi
+session.
 
 ### Phase 2 — waiting semantics
 
@@ -478,14 +512,27 @@ Answered:
   timer?* Immediately, but only once "settled" accounts for outstanding
   background work (§4). Deferring to the timer would have kept the bug the
   transport exists to fix.
+- *Does the Pi extension API expose the same three things?* Two of them. The
+  session id is `ctx.sessionManager.getSessionId()`. Background work does not
+  exist to expose — Pi has no task or subagent tool and no way to detach a
+  bash call. An input/approval event exists only for dialogs an extension
+  opened itself (`ui_prompt_start`/`ui_prompt_end`); Pi's own tool approval
+  raises nothing an extension can see.
 
 Still open:
 
-- What exact Pi `SessionManager` method exposes the session id in the installed
-  Pi version, and does it match the filename id used by this plugin?
+- `getSessionId()` is confirmed in the published 0.85.1 types, but nothing has
+  yet confirmed it returns the same id `--session-id` was given — which is what
+  the panel looks the record up by. One real Pi session answers this.
 - Is a plugin option enough for opt-in, or should each provider expose a
-  separate `hook_state` capability in `g:claude_providers`? One writer and one
-  provider do not justify the capability yet; a Pi writer would.
+  separate `hook_state` capability in `g:claude_providers`? Still one option:
+  the reader resolves the directory from the record's own provider, so a second
+  writer needs no registry change. The capability would only buy a way to say
+  "do not even look" per provider.
+- Pi's native approval prompt is invisible to extensions, so its `waiting`
+  keeps coming from `waiting_pat` while the hook supplies the rest. Is a
+  session whose two sources disagree that way confusing enough to want the
+  record to say which states it can and cannot speak for?
 - Two handler processes per tool call is the cost of the heartbeat. Is that
   visible in practice on a slow machine, and is `PreToolUse` alone enough?
 - Should the writer's 30-minute prune of unclosed background work be
