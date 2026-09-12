@@ -7,8 +7,9 @@ directly.
 
 `claude-vim-status.mjs` is a Claude Code hook handler. It writes one small JSON
 record per session; `g:claude_panel_hook_state` lets the panel read them. It
-needs node and nothing else, and it is never installed for you — the plugin
-does not edit your Claude configuration.
+needs node and nothing else. Nothing installs it behind your back: the plugin
+edits your Claude configuration only when you run `:SessionPanelHookSetup`,
+and then only in the directory you run it from.
 
 The file itself lives at `.claude/hooks/claude-vim-status.mjs`, where this
 repository runs it on its own sessions; the copy here is a symlink to it, so
@@ -18,14 +19,29 @@ the installed example and the one being dogfooded cannot drift apart.
 
 ## Install
 
+For one project, from Vim in that project:
+
+```vim
+:SessionPanelHookSetup
+```
+
+That copies this handler to `.claude/hooks/claude-vim-status.mjs`, merges
+`settings.example.json` into `.claude/settings.local.json`, and installs the Pi
+extension alongside it. It writes nothing outside that directory, keeps every
+other key and handler already in the settings file, refuses one it cannot
+parse, and is safe to run again — `:SessionPanelHookSetup claude` or `pi` does
+one agent only.
+
+For every project, by hand:
+
 ```sh
 mkdir -p ~/.claude/hooks
 cp examples/hooks/claude-vim-status.mjs ~/.claude/hooks/
 chmod +x ~/.claude/hooks/claude-vim-status.mjs
 ```
 
-Merge `settings.example.json` into `~/.claude/settings.json` for every project,
-or into a project's `.claude/settings.local.json` for one. Prefer
+Merge `settings.example.json` into `~/.claude/settings.json`, fixing the
+`${CLAUDE_PROJECT_DIR}`-relative command path to point at your copy. Prefer
 `settings.local.json` over `settings.json` in a shared repository: a committed
 `settings.json` opts every contributor into writing these files.
 
@@ -115,5 +131,18 @@ mapping against synthetic payloads. No Claude installation needed.
 
 ## Pi
 
-Not implemented. `doc/design/session-panel-agent-hooks.md` has the Pi extension
-contract and what is still unverified about it.
+`../pi/claude-vim-status.ts` is the same idea as a Pi extension, installed by
+the same command into `.pi/extensions/`, where Pi loads it once the project is
+trusted. It needs no settings entry of its own, and it is a symlink to this
+repository's own `.pi/extensions/claude-vim-status.ts` for the same
+no-drift reason as the handler above.
+
+It reports working and idle, and `waiting` only for a question an extension
+asked itself: Pi raises no extension event for its own tool-approval prompt, so
+**Needs you** for that case still comes from the terminal patterns. Pi also has
+no background work to report — no subagent or task tool, and no way to detach a
+bash call — so nothing there answers to the Claude writer's `pending`.
+
+Unverified: nothing has yet run it in a real Pi session.
+`doc/design/session-panel-agent-hooks.md` §8 has the contract and what is left
+to confirm.

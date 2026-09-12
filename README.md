@@ -38,6 +38,7 @@ Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into 
 | `<leader>ci` | `:ClaudeInput` | Toggle the input window for multi-line messages |
 | `<leader>cm` | `:ClaudeModel` | Switch model interactively |
 | `<leader>ch/l/k/j` | `:ClaudeWin*` | Navigate between windows |
+| — | `:SessionPanelHookSetup` | Install the status hooks into the current folder |
 
 `:ClaudeNew [name]` starts an extra session, and `:ClaudeRename [name]` renames one. When several sessions are running, commands that need just one show a picker; when only one is running, it is used without prompting.
 
@@ -99,8 +100,8 @@ let g:claude_panel_idle_secs = 30
 
 " Optional agent-hook state files, which report work a terminal never prints
 " (a subagent, a background task outliving its turn). Disabled by default, and
-" nothing writes them until you install examples/hooks/claude-vim-status.mjs;
-" terminal patterns and the idle timer remain the classifier until then.
+" nothing writes them until :SessionPanelHookSetup installs the writers into
+" the project; terminal patterns and the idle timer classify until then.
 let g:claude_panel_hook_state = 1
 " Empty follows the writer: $XDG_RUNTIME_DIR/claude-vim-status, else /tmp.
 let g:claude_panel_hook_state_root = ''
@@ -183,6 +184,14 @@ Each view keeps its own folds, so swapping back and forth loses neither.
 `✻` waiting for you, `●` working, `○` idle, `✗` closed but resumable.
 
 Waiting and working are read from the bottom rows of the session's terminal, where Claude prints its own state — a spinner while it works, a numbered list while it asks. Both are patterns you can change (`g:claude_panel_waiting_pat`, `g:claude_panel_working_pat`); when neither matches, the idle timer decides, as it did before.
+
+### Work the terminal cannot see
+
+A subagent, or a background task that outlives the turn that started it, prints nothing — so the tail alone puts that session in Idle. The agents can say so themselves: `:SessionPanelHookSetup` installs the bundled writers into the folder you are in (Claude Code's hook into `.claude/`, Pi's extension into `.pi/extensions/`), and `g:claude_panel_hook_state = 1` lets the panel read what they write.
+
+It writes only under the current directory, and running it twice changes nothing: a correct copy is left alone, an already-registered handler is not registered again, and a settings file it cannot parse is refused rather than replaced. `examples/hooks/README.md` has the event table, the manual install for every project, and the removal steps.
+
+Records are evidence, never authority: a dead session can never be listed as alive, a record that asks for attention while the terminal says the session is working loses to the terminal, and anything stale, foreign or malformed leaves the patterns deciding exactly as they do today.
 
 `Done` starts folded, draws at most `g:claude_panel_done_rows` rows with a `… N more` for the rest, and hides the sessions nobody named or nobody has touched for `g:claude_panel_stale_days` days. It says how many it is hiding; `I` reveals them.
 

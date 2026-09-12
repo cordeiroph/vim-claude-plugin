@@ -462,6 +462,24 @@ g:claude_providers.pi.models to get the list here instead.
   it starts (see |claude-agents|).
 
 ------------------------------------------------------------------------------
+                                                       *:SessionPanelHookSetup*
+:SessionPanelHookSetup [agent]
+  Install the bundled session-panel status writers into the current directory:
+  the Claude Code hook handler in `.claude/hooks/`, registered in
+  `.claude/settings.local.json`, and the Pi extension in `.pi/extensions/`.
+  Without an argument every agent that ships one is installed; name one
+  (`claude` or `pi`) to install just that. See |claude-panel-hooks|.
+
+  It writes only under the current directory, never under your home, and it is
+  safe to run twice: a copy that is already correct is left alone, a settings
+  file that already registers the handler is not rewritten at all, and one
+  that cannot be parsed as JSON is refused rather than replaced. A copy that
+  differs from the bundled one — an older plugin's, or an edited one — is kept
+  beside it as `.bak`.
+
+  The panel still reads nothing until |g:claude_panel_hook_state| is set.
+
+------------------------------------------------------------------------------
                                                                 *:ClaudeRename*
 :ClaudeRename [name]
   Rename a session. Without an argument the new name is prompted for. The name
@@ -689,21 +707,32 @@ Agent hooks                                           *claude-panel-hooks*
   that started it. Claude Code hooks write one small JSON record per session,
   and |g:claude_panel_hook_state| lets the panel read them.
 
-  Install the bundled writer (it is not wired up for you — the plugin never
-  edits your Claude configuration): >
+  For the project you are in, |:SessionPanelHookSetup| installs and registers
+  the writer for you. That command is the one place the plugin writes another
+  program's configuration, and it only ever touches the current directory: >
+
+    :SessionPanelHookSetup
+<
+  To install it for every project instead, do it by hand: >
 
     cp <plugin>/examples/hooks/claude-vim-status.mjs ~/.claude/hooks/
     chmod +x ~/.claude/hooks/claude-vim-status.mjs
 <
   then merge `examples/hooks/settings.example.json` into your
-  `~/.claude/settings.json` (or a project `.claude/settings.local.json`), and
-  set: >
+  `~/.claude/settings.json`. Either way, set: >
 
     let g:claude_panel_hook_state = 1
 <
   It needs node, and nothing else. `examples/hooks/README.md` has the event
   table and the removal steps; the script itself lives in this plugin's
   `.claude/hooks/`, which `examples/hooks/` links to.
+
+  Pi is installed the same way, and needs no settings of its own: the
+  extension at `.pi/extensions/claude-vim-status.ts` is loaded once the
+  project is trusted. It reports working and idle, but never Needs you for
+  Pi's own approval prompt, which Pi raises no extension event for — that
+  case stays with the terminal patterns (see
+  `doc/design/session-panel-agent-hooks.md`).
 
   What a record can and cannot do:
 

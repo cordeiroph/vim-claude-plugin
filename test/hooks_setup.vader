@@ -1,0 +1,141 @@
+" Tests for :SessionPanelHookSetup — file copying and a settings merge, all of
+" it driven against a temp directory through claude#hooks#_setup_in().
+
+Before:
+  let g:_hooks_dir = tempname()
+  call mkdir(g:_hooks_dir, 'p')
+  let g:_hooks_saved_state = get(g:, 'claude_panel_hook_state', 0)
+  let g:_hooks_settings = g:_hooks_dir . '/.claude/settings.local.json'
+  let g:_hooks_writer   = g:_hooks_dir . '/.claude/hooks/claude-vim-status.mjs'
+  let g:_hooks_pi       = g:_hooks_dir . '/.pi/extensions/claude-vim-status.ts'
+
+After:
+  let g:claude_panel_hook_state = g:_hooks_saved_state
+  call delete(g:_hooks_dir, 'rf')
+
+" ── what gets installed ──────────────────────────────────────────────────────
+
+Execute (both providers install their writer):
+  let report = claude#hooks#_setup_in(g:_hooks_dir, '')
+  Assert report.ok, join(claude#hooks#_texts(report), ' | ')
+  Assert filereadable(g:_hooks_writer), 'the Claude writer should be copied'
+  Assert filereadable(g:_hooks_pi), 'the Pi extension should be copied'
+  Assert getfperm(g:_hooks_writer) =~# '^rwx',
+        \ 'the Claude writer runs as a command, so it must be executable'
+
+Execute (the copy is the content the example links to, not the link):
+  call claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  Assert !empty(readfile(g:_hooks_writer)),
+        \ 'copying a symlink must copy what it points at'
+  Assert readfile(g:_hooks_writer)[0] =~# '^#!',
+        \ 'the writer is a node script with a shebang'
+
+Execute (every example event is registered):
+  call claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  let settings = json_decode(join(readfile(g:_hooks_settings), "\n"))
+  Assert has_key(settings, 'hooks'), 'a hooks block should exist'
+  for event in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop',
+        \ 'SubagentStart', 'SessionEnd', 'Notification']
+    Assert has_key(settings.hooks, event), event . ' should be registered'
+  endfor
+
+Execute (the Notification matcher survives the merge):
+  call claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  let settings = json_decode(join(readfile(g:_hooks_settings), "\n"))
+  let matcher = settings.hooks.Notification[0].matcher
+  AssertEqual 'permission_prompt|idle_prompt|agent_needs_input'
+        \ . '|elicitation_dialog|elicitation_url_dialog', matcher
+
+" ── running it twice ─────────────────────────────────────────────────────────
+
+Execute (a second run registers nothing again and rewrites nothing):
+  call claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  let first = readfile(g:_hooks_settings, 'b')
+  let report = claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  Assert report.ok, join(claude#hooks#_texts(report), ' | ')
+  AssertEqual first, readfile(g:_hooks_settings, 'b'),
+        \ 'a re-run must leave the settings file byte-identical'
+  let settings = json_decode(join(readfile(g:_hooks_settings), "\n"))
+  AssertEqual 1, len(settings.hooks.SessionStart),
+        \ 'the handler must not be registered twice'
+
+Execute (a re-run reports the copy as already installed):
+  call claude#hooks#_setup_in(g:_hooks_dir, 'pi')
+  let report = claude#hooks#_setup_in(g:_hooks_dir, 'pi')
+  Assert !empty(filter(claude#hooks#_texts(report),
+        \ 'v:val =~# "already installed"')),
+        \ 'an identical copy should be left alone'
+
+" ── what it must not destroy ─────────────────────────────────────────────────
+
+Execute (unrelated settings keys and handlers are preserved):
+  call mkdir(g:_hooks_dir . '/.claude', 'p')
+  call writefile([json_encode({
+        \ 'permissions': {'allow': ['Bash(ls:*)']},
+        \ 'hooks': {'SessionStart': [{'hooks': [{'type': 'command',
+        \   'command': 'mine.sh'}]}]}})], g:_hooks_settings)
+  call claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  let settings = json_decode(join(readfile(g:_hooks_settings), "\n"))
+  AssertEqual ['Bash(ls:*)'], settings.permissions.allow
+  AssertEqual 'mine.sh', settings.hooks.SessionStart[0].hooks[0].command
+  AssertEqual 2, len(settings.hooks.SessionStart),
+        \ 'the plugin handler joins the existing one'
+
+Execute (unreadable settings are refused, not overwritten):
+  call mkdir(g:_hooks_dir . '/.claude', 'p')
+  call writefile(['{this is not json'], g:_hooks_settings)
+  let report = claude#hooks#_setup_in(g:_hooks_dir, 'claude')
+  Assert !report.ok, 'a settings file that cannot be parsed must be refused'
+  AssertEqual ['{this is not json'], readfile(g:_hooks_settings)
+  Assert !empty(filter(claude#hooks#_texts(report), 'v:val =~# "refused"')),
+        \ 'the refusal should be reported'
+
+Execute (a modified copy is kept as .bak):
+  call mkdir(g:_hooks_dir . '/.pi/extensions', 'p')
+  call writefile(['// mine'], g:_hooks_pi)
+  call claude#hooks#_setup_in(g:_hooks_dir, 'pi')
+  AssertEqual ['// mine'], readfile(g:_hooks_pi . '.bak')
+  Assert readfile(g:_hooks_pi)[0] !=# '// mine',
+        \ 'the bundled copy should have replaced it'
+
+Execute (nothing is written outside the target directory):
+  call claude#hooks#_setup_in(g:_hooks_dir, '')
+  Assert !isdirectory(g:_hooks_dir . '/.claude/hooks/.claude'),
+        \ 'installation must not nest'
+  Assert !filereadable(g:_hooks_settings . '.tmp'),
+        \ 'the atomic-write temp file must be renamed away'
+
+" ── provider selection ───────────────────────────────────────────────────────
+
+Execute (a named provider installs only its own files):
+  call claude#hooks#_setup_in(g:_hooks_dir, 'pi')
+  Assert filereadable(g:_hooks_pi), 'pi should be installed'
+  Assert !filereadable(g:_hooks_writer), 'claude should be left alone'
+  Assert !filereadable(g:_hooks_settings), 'no settings should be written'
+
+Execute (an unknown provider writes nothing):
+  let report = claude#hooks#_setup_in(g:_hooks_dir, 'codex')
+  Assert !report.ok, 'an unknown provider is an error'
+  Assert !isdirectory(g:_hooks_dir . '/.claude'), 'nothing should be created'
+  Assert !isdirectory(g:_hooks_dir . '/.pi'), 'nothing should be created'
+
+Execute (the reminder appears only while the panel ignores the records):
+  let g:claude_panel_hook_state = 0
+  let report = claude#hooks#_setup_in(g:_hooks_dir, 'pi')
+  Assert !empty(filter(claude#hooks#_texts(report),
+        \ 'v:val =~# "g:claude_panel_hook_state"')),
+        \ 'an install that nothing reads should say so'
+  let g:claude_panel_hook_state = 1
+  let report = claude#hooks#_setup_in(g:_hooks_dir, 'pi')
+  Assert empty(filter(claude#hooks#_texts(report),
+        \ 'v:val =~# "g:claude_panel_hook_state"')),
+        \ 'nothing to remind about once it is set'
+
+" ── the command itself ───────────────────────────────────────────────────────
+
+Execute (the command exists and completes provider names):
+  Assert exists(':SessionPanelHookSetup') == 2,
+        \ ':SessionPanelHookSetup should be defined'
+  let names = claude#hooks#complete('', '', 0)
+  AssertEqual ['claude', 'pi'], sort(copy(names))
+  AssertEqual ['pi'], claude#hooks#complete('p', '', 0)

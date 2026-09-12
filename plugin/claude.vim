@@ -283,6 +283,12 @@ command!          ClaudeSessionsClose call claude#panel#close()
 command! -nargs=? ClaudeNew           call claude#new(<q-args>)
 command! -nargs=? ClaudeRename        call claude#rename(<q-args>)
 
+" Install the bundled status writers into the current directory, for every
+" agent that ships one or just the one named. The only command that writes
+" another program's configuration, and the only one that has to be asked.
+command! -nargs=? -complete=customlist,claude#hooks#complete
+      \ SessionPanelHookSetup call claude#hooks#setup(<q-args>)
+
 " A session on another CLI. One command per agent, named after the agent
 " rather than the plugin — :PiNew now, :CodexNew when Codex lands. They are
 " written out rather than generated from the provider registry so that loading
