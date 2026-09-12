@@ -57,16 +57,18 @@ function! s:stale_days() abort
   return get(g:, 'claude_panel_stale_days', 2)
 endfunction
 
-" What the bottom of a Claude terminal looks like while it is working, and
+" What the bottom of an agent's terminal looks like while it is working, and
 " while it is waiting for an answer. Both are patterns because they track
 " another program's output, which is not ours to promise: a pattern that stops
-" matching costs the state, never a wrong answer.
-function! s:working_pat() abort
-  return get(g:, 'claude_panel_working_pat', 'esc to interrupt')
+" matching costs the state, never a wrong answer. Each provider brings its
+" own; Claude's are still g:claude_panel_working_pat and _waiting_pat.
+function! s:working_pat(provider) abort
+  return get(claude#provider#get(a:provider), 'working_pat',
+        \ 'esc to interrupt')
 endfunction
 
-function! s:waiting_pat() abort
-  return get(g:, 'claude_panel_waiting_pat',
+function! s:waiting_pat(provider) abort
+  return get(claude#provider#get(a:provider), 'waiting_pat',
         \ '\%(^\|\n\)\s*❯\=\s*1\.\s\|Do you want\|(y/n)')
 endfunction
 
@@ -200,116 +202,23 @@ endfunction
 
 " ── transcripts ──────────────────────────────────────────────────────────────
 
-" Claude stores a project's transcripts under a slugified copy of its cwd:
-" every character that is not a letter or digit becomes a '-', not just the
-" path separator — a cwd with a dot or underscore in it (a "pedro.cordeiro"
-" home directory, a "github.com" path segment, an "e2e_extraction" worktree)
-" was slugifying to a directory that does not exist, so has_transcript() and
-" is_foreign_active() always came back empty for such a project and every
-" resume fell through to --session-id instead of --resume — which the CLI
-" then refuses outright, since a transcript for that id already exists on
-" disk under the *correctly* slugified directory it never thought to check.
+" Where Claude keeps this directory's conversations. Still here, and still
+" public, because it is reached by this name from the diff tree and the tests;
+" the rule itself belongs to the Claude provider now.
 function! claude#session#project_dir(cwd) abort
-  return expand('~/.claude/projects/') . substitute(a:cwd, '[^A-Za-z0-9]', '-', 'g')
+  return claude#provider#claude#project_dir(a:cwd)
 endfunction
 
-function! s:trim_snippet(text) abort
-  let l:s = substitute(a:text, '[\r\n]\+', ' ', 'g')
-  let l:s = substitute(l:s, '^\s\+\|\s\+$', '', 'g')
-  return strcharpart(l:s, 0, 60)
-endfunction
-
-" First text block of a transcript entry's message, if any.
-function! s:message_text(entry) abort
-  let l:msg = get(a:entry, 'message', {})
-  if type(l:msg) != v:t_dict
-    return ''
-  endif
-  let l:content = get(l:msg, 'content', '')
-  if type(l:content) == v:t_string
-    return s:trim_snippet(l:content)
-  elseif type(l:content) == v:t_list
-    for l:block in l:content
-      if type(l:block) == v:t_dict && get(l:block, 'type', '') ==# 'text'
-        return s:trim_snippet(get(l:block, 'text', ''))
-      endif
-    endfor
-  endif
-  return ''
-endfunction
-
-" Read enough of a transcript to place and label it. cwd and gitBranch appear
-" on every user entry, so only the head of the file is read — never the whole
-" conversation.
-function! s:scan_transcript(path) abort
-  let l:rec = {
-        \ 'id':      fnamemodify(a:path, ':t:r'),
-        \ 'cwd':     '',
-        \ 'branch':  '',
-        \ 'snippet': '',
-        \ 'created': getftime(a:path),
-        \ }
-  for l:line in readfile(a:path, '', 60)
-    if empty(l:line)
-      continue
-    endif
-    try
-      let l:entry = json_decode(l:line)
-    catch
-      continue
-    endtry
-    if type(l:entry) != v:t_dict
-      continue
-    endif
-    if empty(l:rec.cwd) && has_key(l:entry, 'cwd')
-      let l:rec.cwd    = l:entry.cwd
-      let l:rec.branch = get(l:entry, 'gitBranch', '')
-    endif
-    if empty(l:rec.snippet) && get(l:entry, 'type', '') ==# 'user'
-      let l:rec.snippet = s:message_text(l:entry)
-    endif
-    if !empty(l:rec.cwd) && !empty(l:rec.snippet)
-      break
-    endif
-  endfor
-  return l:rec
-endfunction
-
-" Transcript directories worth scanning: the one Vim is in, plus every
-" workspace of this repository. Claude files a transcript under the directory
-" the session ran in, so a workspace session's conversations live under its
-" own worktree and are invisible from the main checkout otherwise.
-function! s:project_dirs() abort
-  let l:seen = {}
-  let l:here = claude#session#project_dir(getcwd())
-  if isdirectory(l:here)
-    let l:seen[l:here] = 1
-  endif
+" The directories a sweep covers: the one Vim is in, plus every workspace of
+" this repository. A session files its conversation under the directory it ran
+" in, so a workspace session's is invisible from the main checkout otherwise.
+" Each provider maps these to wherever it keeps conversations.
+function! s:sweep_cwds() abort
+  let l:seen = {getcwd(): 1}
   for l:ws in claude#workspace#list()
-    let l:dir = claude#session#project_dir(l:ws.path)
-    if isdirectory(l:dir)
-      let l:seen[l:dir] = 1
-    endif
+    let l:seen[l:ws.path] = 1
   endfor
   return keys(l:seen)
-endfunction
-
-" Newest-first transcript paths for the current project, capped at the
-" configured limit. The cap is across the project, not per directory.
-function! s:transcript_paths() abort
-  let l:limit = s:closed_limit()
-  if l:limit <= 0
-    return []
-  endif
-  let l:paths = []
-  for l:dir in s:project_dirs()
-    call extend(l:paths, glob(l:dir . '/*.jsonl', 0, 1))
-  endfor
-  if empty(l:paths)
-    return []
-  endif
-  call sort(l:paths, {a, b -> getftime(b) - getftime(a)})
-  return l:paths[0 : l:limit - 1]
 endfunction
 
 " ── registry ─────────────────────────────────────────────────────────────────
@@ -352,14 +261,14 @@ endfunction
 " '' means "cannot tell" — the caller falls back to the idle timer, which is
 " what every build before this one used on its own. Working is tested first:
 " the spinner is only on screen while Claude is not waiting for anything.
-function! s:classify(tail) abort
+function! s:classify(tail, provider) abort
   if empty(a:tail)
     return ''
   endif
-  if a:tail =~# s:working_pat()
+  if a:tail =~# s:working_pat(a:provider)
     return 'active'
   endif
-  if a:tail =~# s:waiting_pat()
+  if a:tail =~# s:waiting_pat(a:provider)
     return 'waiting'
   endif
   return ''
@@ -390,7 +299,8 @@ function! claude#session#status(id) abort
   endif
   " The tail is whatever poll() last saw. Reading it again here would double
   " the terminal reads for no new information.
-  let l:said = s:classify(get(l:rec, 'term_tail', ''))
+  let l:said = s:classify(get(l:rec, 'term_tail', ''),
+        \ claude#provider#of(l:rec))
   if !empty(l:said)
     return l:said
   endif
@@ -435,7 +345,8 @@ function! s:adopt_snippet(rec) abort
     return
   endif
   let a:rec.scan_ftime = l:ftime
-  let a:rec.snippet    = s:scan_transcript(l:path).snippet
+  let a:rec.snippet    = get(claude#provider#call(claude#provider#of(a:rec),
+        \ 'scan', [l:path], {}), 'snippet', '')
 endfunction
 
 " Refresh live status. Returns 1 when any session changed state, so the panel
@@ -477,39 +388,50 @@ function! claude#session#poll() abort
   return l:changed
 endfunction
 
+" Add one conversation found on disk to the registry, unless a live record
+" already holds its id.
+function! s:adopt_scan(scan, provider, store) abort
+  let l:id = a:scan.id
+  if has_key(s:sessions, l:id)
+    return
+  endif
+  let l:saved = get(a:store.sessions, l:id, {})
+  let l:cwd   = !empty(a:scan.cwd) ? a:scan.cwd : get(l:saved, 'cwd', '')
+  if empty(l:cwd)
+    let l:group = {
+          \ 'project': '(unknown)', 'worktree': '(unknown)',
+          \ 'branch': '(unknown)' }
+  else
+    let l:group = claude#session#group_of(l:cwd)
+  endif
+  if !empty(get(a:scan, 'branch', ''))
+    let l:group.branch = a:scan.branch
+  endif
+  " A session the CLI started on its own was never named here. It keeps an
+  " empty name and is labelled from its first message instead — a name nobody
+  " typed is not a name, and a timestamp is not a label. A name the CLI itself
+  " carries (Pi writes one into the conversation) is a label rather than a
+  " name: it loses to one typed here, and wins over the first message.
+  let l:named = s:was_named(l:saved)
+  let l:name  = l:named ? get(l:saved, 'name', '') : ''
+  let l:rec   = s:make_record(l:id, l:name, -1, l:cwd, l:group,
+        \ a:scan.created, 'disk', l:named,
+        \ get(l:saved, 'workspace', ''), a:provider)
+  let l:rec.snippet    = !empty(get(a:scan, 'name', ''))
+        \ ? a:scan.name : get(a:scan, 'snippet', '')
+  let l:rec.scan_ftime = getftime(a:scan.path)
+  let s:sessions[l:id] = l:rec
+endfunction
+
 " Merge on-disk transcripts for the current project into the registry. A live
 " record always wins over the disk record with the same id.
 function! claude#session#refresh() abort
   let l:store = claude#store#load()
-  for l:path in s:transcript_paths()
-    let l:scan = s:scan_transcript(l:path)
-    let l:id   = l:scan.id
-    if has_key(s:sessions, l:id)
-      continue
-    endif
-    let l:saved = get(l:store.sessions, l:id, {})
-    let l:cwd   = !empty(l:scan.cwd) ? l:scan.cwd : get(l:saved, 'cwd', '')
-    if empty(l:cwd)
-      let l:group = {
-            \ 'project': '(unknown)', 'worktree': '(unknown)',
-            \ 'branch': '(unknown)' }
-    else
-      let l:group = claude#session#group_of(l:cwd)
-    endif
-    if !empty(l:scan.branch)
-      let l:group.branch = l:scan.branch
-    endif
-    " A session Claude started on its own was never named here. It keeps an
-    " empty name and is labelled from its first message instead — a name
-    " nobody typed is not a name, and a timestamp is not a label.
-    let l:named = s:was_named(l:saved)
-    let l:name  = l:named ? get(l:saved, 'name', '') : ''
-    let l:rec   = s:make_record(l:id, l:name, -1, l:cwd, l:group,
-          \ l:scan.created, 'disk', l:named,
-          \ get(l:saved, 'workspace', ''))
-    let l:rec.snippet    = l:scan.snippet
-    let l:rec.scan_ftime = getftime(l:path)
-    let s:sessions[l:id] = l:rec
+  let l:cwds  = s:sweep_cwds()
+  for l:provider in claude#provider#names()
+    for l:scan in claude#provider#call(l:provider, 'sessions', [l:cwds], [])
+      call s:adopt_scan(l:scan, l:provider, l:store)
+    endfor
   endfor
 
   " Named sessions that never got a transcript (started but never messaged)
@@ -524,7 +446,8 @@ function! claude#session#refresh() abort
     let s:sessions[l:id] = s:make_record(l:id, get(l:entry, 'name', l:id), -1,
           \ l:cwd, claude#session#group_of(l:cwd),
           \ get(l:entry, 'created', localtime()), 'disk',
-          \ s:was_named(l:entry), get(l:entry, 'workspace', ''))
+          \ s:was_named(l:entry), get(l:entry, 'workspace', ''),
+          \ get(l:entry, 'provider', 'claude'))
   endfor
 endfunction
 
@@ -548,10 +471,11 @@ function! s:belongs_here(entry) abort
 endfunction
 
 function! s:make_record(id, name, bufnr, cwd, group, created, origin,
-      \ named, workspace) abort
+      \ named, workspace, provider) abort
   return {
         \ 'id':          a:id,
         \ 'name':        a:name,
+        \ 'provider':    a:provider,
         \ 'named':       a:named,
         \ 'snippet':     '',
         \ 'scan_ftime':  0,
@@ -770,40 +694,14 @@ endfunction
 
 " ── CLI capabilities ─────────────────────────────────────────────────────────
 
-" Whether the configured CLI understands --session-id and --name.
-"
-" The probe runs `<cmd> --help`, so it only runs when g:claude_cmd actually
-" invokes the Claude binary. A stand-in command (tests use `sleep 30`) is
-" never executed just to read its help.
+" Whether the Claude CLI understands --session-id and --name. The probe itself
+" belongs to the Claude provider now; this name is kept because the tests and
+" a user's config reach the answer by it.
 function! claude#session#supports_flags() abort
-  " An explicit override skips the probe entirely: 1 forces the flags on,
-  " 0 forces them off.
-  let l:override = get(g:, 'claude_session_flags', -1)
-  if l:override >= 0
-    return l:override
-  endif
-  if exists('s:flags_ok')
-    return s:flags_ok
-  endif
-  let s:flags_ok = 0
-  let l:words = split(get(g:, 'claude_cmd', 'claude'))
-  if empty(l:words)
-    return s:flags_ok
-  endif
-  if fnamemodify(l:words[0], ':t') !~# '^claude'
-    return s:flags_ok
-  endif
-  let l:help = system(g:claude_cmd . ' --help 2>/dev/null </dev/null')
-  let s:flags_ok = (l:help =~# '--session-id' && l:help =~# '--name') ? 1 : 0
-  if !s:flags_ok
-    call s:warn_once('flags',
-          \ 'claude CLI has no --session-id/--name (needs 2.1+); '
-          \ . 'session ids are adopted from transcripts instead')
-  endif
-  return s:flags_ok
+  return claude#provider#cap('claude', 'preassign_id', 0)
 endfunction
 
-" Build the argument vector for the CLI.
+" Build the argument vector for {provider}'s CLI.
 "
 " This must be a List, not a command string. :terminal and job_start() do not
 " run a shell: a string command is split on whitespace with no quote handling,
@@ -811,17 +709,10 @@ endfunction
 " (--session-id '<uuid>' reaches Claude as "'<uuid>'", which it rejects as an
 " invalid session id) and any name containing a space is torn into several
 " arguments. The List form passes each argument through untouched.
-function! s:build_argv(id, name, resume) abort
-  let l:argv = split(get(g:, 'claude_cmd', 'claude'))
-  if a:resume
-    call extend(l:argv, ['--resume', a:id])
-  elseif claude#session#supports_flags()
-    call extend(l:argv, ['--session-id', a:id])
-  endif
-  if claude#session#supports_flags() && !empty(a:name)
-    call extend(l:argv, ['--name', a:name])
-  endif
-  return l:argv
+function! s:build_argv(id, name, resume, provider) abort
+  return claude#provider#call(a:provider, 'argv',
+        \ [{'id': a:id, 'name': a:name, 'resume': a:resume}],
+        \ split(get(claude#provider#get(a:provider), 'cmd', 'claude')))
 endfunction
 
 " Start {argv} in the current window, returning its buffer number. {cwd} is
@@ -933,6 +824,7 @@ endfunction
 function! s:persist(rec) abort
   call claude#store#put(a:rec.id, {
         \ 'name':      a:rec.name,
+        \ 'provider':  claude#provider#of(a:rec),
         \ 'named':     a:rec.named,
         \ 'workspace': a:rec.workspace,
         \ 'cwd':       a:rec.cwd,
@@ -952,11 +844,15 @@ endfunction
 " a:2 placement    — Ex command that creates the window to spawn into.
 "                    Defaults to the configured Claude split; pass '' to take
 "                    over the current window (the panel does this, having
-"                    already positioned itself).
+"                    already positioned itself). v:null means "the default".
+" a:3 provider     — which CLI to run; defaults to g:claude_provider.
 function! claude#session#new(...) abort
   let l:opts = {'name': a:0 > 0 ? a:1 : ''}
-  if a:0 > 1
+  if a:0 > 1 && a:2 isnot v:null
     let l:opts.placement = a:2
+  endif
+  if a:0 > 2 && !empty(a:3)
+    let l:opts.provider = a:3
   endif
   " With the prompts turned off there is nothing to name the session after, so
   " it is left nameless and Claude names the conversation itself — the same
@@ -981,6 +877,8 @@ endfunction
 "              passes. Ignored when a branch is given, which creates one
 "   cwd        directory to run in when there is no workspace to name: a
 "              worktree the plugin did not create, so there is no id for it
+"   provider   which CLI to run: 'claude' (default), or any other registered
+"              provider. Defaults to g:claude_provider
 "   placement  Ex command creating the window to spawn into; '' takes over the
 "              current window. Absent means the configured Claude split
 "
@@ -992,9 +890,10 @@ endfunction
 "   name             no workspace; the selected one, or the current directory
 "   neither          the same, and the session goes unnamed
 function! claude#session#spawn(opts) abort
-  let l:name   = get(a:opts, 'name', '')
-  let l:named  = !empty(l:name)
-  let l:branch = get(a:opts, 'branch', '')
+  let l:name     = get(a:opts, 'name', '')
+  let l:named    = !empty(l:name)
+  let l:branch   = get(a:opts, 'branch', '')
+  let l:provider = get(a:opts, 'provider', claude#provider#default())
 
   if get(a:opts, 'prompt', 0)
     let [l:ok, l:branch] = s:prompt_branch()
@@ -1044,7 +943,7 @@ function! claude#session#spawn(opts) abort
     let l:cwd = claude#workspace#cwd()
   endif
   let l:group = claude#session#group_of(l:cwd)
-  let l:known = s:known_transcripts(l:cwd)
+  let l:known = s:known_ids(l:provider, l:cwd)
 
   let l:place = has_key(a:opts, 'placement')
         \ ? a:opts.placement : claude#split_cmd()
@@ -1052,26 +951,29 @@ function! claude#session#spawn(opts) abort
     execute l:place
   endif
   try
-    let l:bufnr = s:term_start(s:build_argv(l:id, l:name, 0), l:cwd)
+    let l:bufnr = s:term_start(
+          \ s:build_argv(l:id, l:name, 0, l:provider), l:cwd)
   catch
     if !empty(l:place)
       close
     endif
-    echoerr 'claude.vim: failed to start Claude: ' . v:exception
+    echoerr 'claude.vim: failed to start '
+          \ . claude#provider#label(l:provider) . ': ' . v:exception
     return ''
   endtry
 
   let l:rec = s:make_record(l:id, l:name, l:bufnr, l:cwd, l:group,
-        \ localtime(), 'live', l:named, empty(l:ws) ? '' : l:ws.id)
+        \ localtime(), 'live', l:named, empty(l:ws) ? '' : l:ws.id,
+        \ l:provider)
   let s:sessions[l:id] = l:rec
 
   call claude#apply_buf_options(l:id)
   call claude#input#collect_data(l:id)
   call s:persist(l:rec)
 
-  if !claude#session#supports_flags()
-    " No --session-id: discover the id the CLI chose by watching for a
-    " transcript that was not there before we spawned.
+  if !claude#provider#cap(l:provider, 'preassign_id', 0)
+    " The CLI would not take an id from us: discover the one it chose by
+    " watching for a conversation that was not there before we spawned.
     call timer_start(500, {-> s:adopt_id(l:id, l:known, 10)})
   endif
 
@@ -1079,38 +981,11 @@ function! claude#session#spawn(opts) abort
   return l:id
 endfunction
 
-" Where the CLI keeps its live registry, one JSON file per process it has
-" running (`~/.claude/sessions/<pid>.json`), each naming the sessionId that
-" process holds open. This is entirely a CLI concern — the plugin runs no
-" daemon of its own — but a terminal force-closed instead of let Claude exit
-" cleanly can leave one of these behind, and the CLI then refuses to resume
-" that session as "already in use" even though nothing is really using it.
-function! s:sessions_dir() abort
-  return get(g:, 'claude_sessions_dir', expand('~/.claude/sessions'))
-endfunction
-
-" pid of the CLI process still holding {id} open, or 0 when the registry
-" names none, or names one that is no longer actually alive.
-function! s:holder_pid(id) abort
-  let l:dir = s:sessions_dir()
-  if !isdirectory(l:dir)
-    return 0
-  endif
-  for l:path in glob(l:dir . '/*.json', 0, 1)
-    let l:pid = str2nr(fnamemodify(l:path, ':t:r'))
-    if l:pid <= 0 || l:pid == getpid()
-      continue
-    endif
-    let l:body = join(readfile(l:path), "\n")
-    if l:body !~# '"sessionId"\s*:\s*"' . a:id . '"'
-      continue
-    endif
-    call system('kill -0 ' . l:pid . ' 2>/dev/null')
-    if v:shell_error == 0
-      return l:pid
-    endif
-  endfor
-  return 0
+" pid of a live process the provider's own registry says still holds {id}
+" open, or 0 — including for every provider that keeps no such registry, which
+" is every one but Claude.
+function! s:holder_pid(provider, id) abort
+  return claude#provider#call(a:provider, 'holder_pid', [a:id], 0)
 endfunction
 
 " Before resuming {id}: if the CLI's own registry still names a live process
@@ -1118,14 +993,14 @@ endfunction
 " out from under Claude rather than a session genuinely in use elsewhere —
 " ask to kill it so the resume that follows does not just fail with "session
 " already in use". Returns 1 to proceed, 0 to abort the resume.
-function! s:preflight_resume(id) abort
-  let l:pid = s:holder_pid(a:id)
+function! s:preflight_resume(provider, id) abort
+  let l:pid = s:holder_pid(a:provider, a:id)
   if l:pid == 0
     return 1
   endif
   let l:msg = 'Session ' . strpart(a:id, 0, 8) . '... is still held by process '
         \ . l:pid . " (likely a terminal that was closed\nwithout letting "
-        \ . "Claude exit). Kill it and resume here?"
+        \ . claude#provider#label(a:provider) . " exit). Kill it and resume here?"
   if confirm(l:msg, "&Kill and resume\n&Cancel", 2) != 1
     return 0
   endif
@@ -1138,10 +1013,10 @@ endfunction
 
 " Reopen a closed session. Returns the id, or '' on failure.
 "
-" When the CLI has a transcript for this id the conversation is resumed. When
-" it does not — the session was started but never messaged, so Claude never
-" persisted it — the same id is claimed for a fresh session instead. Either
-" way the panel row, its name and its id survive; only the history differs.
+" When the CLI has a conversation for this id it is resumed. When it does not
+" — the session was started but never messaged, so nothing was persisted — the
+" same id is claimed for a fresh session instead. Either way the panel row, its
+" name and its id survive; only the history differs.
 "
 " a:1 placement — as for claude#session#new().
 function! claude#session#resume(id, ...) abort
@@ -1157,27 +1032,30 @@ function! claude#session#resume(id, ...) abort
     return ''
   endif
 
-  let l:resume = claude#session#has_transcript(a:id)
-  if l:resume && !s:preflight_resume(a:id)
+  let l:provider = claude#provider#of(l:rec)
+  let l:resume   = claude#session#has_transcript(a:id)
+  if l:resume && !s:preflight_resume(l:provider, a:id)
     return ''
   endif
   let l:dir    = s:spawn_dir(l:rec)
-  let l:known  = l:resume ? {} : s:known_transcripts(l:dir)
+  let l:known  = l:resume ? {} : s:known_ids(l:provider, l:dir)
   " Taken even for a genuine resume, only used if it turns out to be one the
   " CLI refuses — see s:retry_as_fork().
-  let l:before = l:resume ? s:known_transcripts(l:dir) : {}
+  let l:before = l:resume ? s:known_ids(l:provider, l:dir) : {}
 
   let l:place = a:0 > 0 ? a:1 : claude#split_cmd()
   if !empty(l:place)
     execute l:place
   endif
   try
-    let l:bufnr = s:term_start(s:build_argv(a:id, l:rec.name, l:resume), l:dir)
+    let l:bufnr = s:term_start(
+          \ s:build_argv(a:id, l:rec.name, l:resume, l:provider), l:dir)
   catch
     if !empty(l:place)
       close
     endif
-    echoerr 'claude.vim: failed to open Claude: ' . v:exception
+    echoerr 'claude.vim: failed to open '
+          \ . claude#provider#label(l:provider) . ': ' . v:exception
     return ''
   endtry
 
@@ -1191,11 +1069,11 @@ function! claude#session#resume(id, ...) abort
   call claude#apply_buf_options(a:id)
   call claude#input#collect_data(a:id)
 
-  if !l:resume && !claude#session#supports_flags()
-    " Started fresh without --session-id: the CLI picked its own id, so watch
-    " for the transcript and re-key the record onto it.
+  if !l:resume && !claude#provider#cap(l:provider, 'preassign_id', 0)
+    " Started fresh without an id of ours: the CLI picked its own, so watch
+    " for the conversation and re-key the record onto it.
     call timer_start(500, {-> s:adopt_id(a:id, l:known, 10)})
-  elseif l:resume
+  elseif l:resume && claude#provider#has(l:provider, 'refusal_pat')
     " s:preflight_resume() already ruled out an orphaned process holding this
     " id; whatever is left is a lock the CLI itself tracks in a way nothing
     " local can see. Watch for that specific refusal and route around it.
@@ -1210,8 +1088,11 @@ endfunction
 " (no local process or registry entry ever names it — it is tracked some
 " other way inside the CLI). Matched case-insensitively against the whole
 " scrollback, not just the last line, since it is the only line printed
-" before the process exits.
-let s:ALREADY_IN_USE_PAT = 'already in use'
+" before the process exits. A provider that names no such refusal is never
+" watched for one.
+function! s:refusal_pat(provider) abort
+  return claude#provider#call(a:provider, 'refusal_pat', [], '')
+endfunction
 
 " A resume whose job has already died with that refusal sitting in its
 " scrollback hit a lock s:preflight_resume() could not see or clear. Waits up
@@ -1230,7 +1111,8 @@ function! s:check_resumed(id, bufnr, dir, before, retries) abort
     endif
     return
   endif
-  if join(getbufline(a:bufnr, 1, '$'), "\n") !~? s:ALREADY_IN_USE_PAT
+  let l:pat = s:refusal_pat(claude#provider#of(s:sessions[a:id]))
+  if empty(l:pat) || join(getbufline(a:bufnr, 1, '$'), "\n") !~? l:pat
     return
   endif
   call s:retry_as_fork(a:id, a:bufnr, a:dir, a:before)
@@ -1255,10 +1137,11 @@ function! s:retry_as_fork(old_id, bufnr, dir, before) abort
   endif
   silent! execute 'bwipeout! ' . a:bufnr
 
-  let l:argv = split(get(g:, 'claude_cmd', 'claude'))
-  call extend(l:argv, ['--resume', a:old_id, '--fork-session'])
-  if claude#session#supports_flags() && !empty(l:rec.name)
-    call extend(l:argv, ['--name', l:rec.name])
+  let l:provider = claude#provider#of(l:rec)
+  let l:argv = claude#provider#call(l:provider, 'fork_argv',
+        \ [{'id': a:old_id, 'name': l:rec.name}], [])
+  if empty(l:argv)
+    return
   endif
   try
     let l:bufnr = s:term_start(l:argv, a:dir)
@@ -1289,9 +1172,8 @@ function! s:adopt_forked_id(old_id, dir, before, retries) abort
   if !has_key(s:sessions, a:old_id)
     return
   endif
-  let l:dir = claude#session#project_dir(a:dir)
-  for l:path in glob(l:dir . '/*.jsonl', 0, 1)
-    let l:id = fnamemodify(l:path, ':t:r')
+  let l:provider = claude#provider#of(s:sessions[a:old_id])
+  for l:id in keys(s:known_ids(l:provider, a:dir))
     if l:id ==# a:old_id || has_key(a:before, l:id) || has_key(s:sessions, l:id)
       continue
     endif
@@ -1303,7 +1185,11 @@ function! s:adopt_forked_id(old_id, dir, before, retries) abort
     endif
     call s:persist(l:rec)
     call claude#store#remove(a:old_id)
-    call delete(l:dir . '/' . a:old_id . '.jsonl')
+    let l:old = claude#provider#call(l:provider, 'transcript_path',
+          \ [a:old_id, a:dir], '')
+    if !empty(l:old)
+      call delete(l:old)
+    endif
     call claude#panel#refresh()
     return
   endfor
@@ -1313,20 +1199,12 @@ function! s:adopt_forked_id(old_id, dir, before, retries) abort
   endif
 endfunction
 
-" Transcript ids already in {cwd}'s directory. Taken before a session is
-" spawned so the one it goes on to write can be told apart; it must be read
+" Session ids {provider} already has on disk for {cwd}. Taken before a session
+" is spawned so the one it goes on to write can be told apart; it must be read
 " from the directory that session will actually run in, which for a workspace
 " session is not the one Vim is in.
-function! s:known_transcripts(cwd) abort
-  let l:dir = claude#session#project_dir(a:cwd)
-  if !isdirectory(l:dir)
-    return {}
-  endif
-  let l:seen = {}
-  for l:p in glob(l:dir . '/*.jsonl', 0, 1)
-    let l:seen[fnamemodify(l:p, ':t:r')] = 1
-  endfor
-  return l:seen
+function! s:known_ids(provider, cwd) abort
+  return claude#provider#call(a:provider, 'ids', [a:cwd], {})
 endfunction
 
 " Fallback for CLIs without --session-id: re-key the record once a transcript
@@ -1336,9 +1214,8 @@ function! s:adopt_id(provisional, known, retries) abort
   if !has_key(s:sessions, a:provisional)
     return
   endif
-  let l:dir = claude#session#project_dir(s:sessions[a:provisional].cwd)
-  for l:path in glob(l:dir . '/*.jsonl', 0, 1)
-    let l:id = fnamemodify(l:path, ':t:r')
+  let l:rec0 = s:sessions[a:provisional]
+  for l:id in keys(s:known_ids(claude#provider#of(l:rec0), l:rec0.cwd))
     if has_key(a:known, l:id) || has_key(s:sessions, l:id)
       continue
     endif
@@ -1393,12 +1270,12 @@ function! claude#session#purge(id) abort
   if !has_key(s:sessions, a:id)
     return
   endif
-  let l:cwd = s:sessions[a:id].cwd
+  let l:path = claude#session#transcript_path(a:id)
   call claude#session#delete(a:id)
   call remove(s:sessions, a:id)
   call claude#store#remove(a:id)
-  if !empty(l:cwd)
-    call delete(claude#session#project_dir(l:cwd) . '/' . a:id . '.jsonl')
+  if !empty(l:path)
+    call delete(l:path)
   endif
   call claude#panel#refresh()
 endfunction
@@ -1422,13 +1299,16 @@ function! claude#session#stop_job(bufnr) abort
   endfor
 endfunction
 
-" Path of a session's transcript, or '' when its cwd is unknown.
+" Path of a session's conversation on disk, or '' when its cwd is unknown or
+" its provider keeps none. The filename is the id for Claude and something
+" else for other CLIs, so nobody else may build this path.
 function! claude#session#transcript_path(id) abort
   let l:rec = get(s:sessions, a:id, {})
   if empty(l:rec) || empty(l:rec.cwd)
     return ''
   endif
-  return claude#session#project_dir(l:rec.cwd) . '/' . a:id . '.jsonl'
+  return claude#provider#call(claude#provider#of(l:rec), 'transcript_path',
+        \ [a:id, l:rec.cwd], '')
 endfunction
 
 " Whether the CLI has anything on disk for this session.
@@ -1450,8 +1330,8 @@ function! claude#session#is_foreign_active(id) abort
   if empty(l:rec) || empty(l:rec.cwd)
     return 0
   endif
-  let l:path = claude#session#project_dir(l:rec.cwd) . '/' . a:id . '.jsonl'
-  if !filereadable(l:path)
+  let l:path = claude#session#transcript_path(a:id)
+  if empty(l:path) || !filereadable(l:path)
     return 0
   endif
   return (localtime() - getftime(l:path)) < 5
@@ -1564,23 +1444,26 @@ function! claude#session#_reset() abort
   let s:group_cache = {}
   let s:warned      = {}
   let s:show_hidden = 0
-  unlet! s:flags_ok
+  call claude#provider#claude#_reset()
+  call claude#provider#_reset()
 endfunction
 
 " The argument vector that would be handed to the CLI. Test seam.
-function! claude#session#_argv(id, name, resume) abort
-  return s:build_argv(a:id, a:name, a:resume)
+" a:1 provider — defaults to claude.
+function! claude#session#_argv(id, name, resume, ...) abort
+  return s:build_argv(a:id, a:name, a:resume, a:0 > 0 ? a:1 : 'claude')
 endfunction
 
 " What the bottom of a terminal would be read as. Test seam.
-function! claude#session#_classify(tail) abort
-  return s:classify(a:tail)
+" a:1 provider — defaults to claude.
+function! claude#session#_classify(tail, ...) abort
+  return s:classify(a:tail, a:0 > 0 ? a:1 : 'claude')
 endfunction
 
 " pid of the process the CLI's own registry says still holds {id} open, or 0.
 " Test seam — reads g:claude_sessions_dir rather than ~/.claude/sessions.
 function! claude#session#_holder_pid(id) abort
-  return s:holder_pid(a:id)
+  return s:holder_pid('claude', a:id)
 endfunction
 
 " Insert a fabricated record, so panel rendering and grouping can be tested
@@ -1600,7 +1483,8 @@ function! claude#session#_inject(rec) abort
         \ get(a:rec, 'created', localtime()),
         \ get(a:rec, 'origin', 'disk'),
         \ get(a:rec, 'named', 1),
-        \ get(a:rec, 'workspace', ''))
+        \ get(a:rec, 'workspace', ''),
+        \ get(a:rec, 'provider', 'claude'))
   if has_key(a:rec, 'status')
     let l:full.status = a:rec.status
     let l:full.pinned = 1
