@@ -1,8 +1,26 @@
 # Design: Pi CLI support
 
-Status: proposed
+Status: implemented
 Target: `claude.vim`
 Last updated: 2026-09-12
+
+Shipped in seven commits, `dff6a44`..`d48b199`. Four things were decided while
+building that this plan did not settle, all noted in §10 as open questions:
+
+- **Pi's model list (open question 4).** Pi ships none. Rather than invent
+  model ids, `:ClaudeModel` now sends a bare `/model` when an agent has no list
+  configured, which hands over to that CLI's own picker;
+  `g:claude_providers.pi.models` still gets the numbered list here.
+- **The `N` picker is `inputlist()`, not `popup_menu()`.** It is the first of
+  three questions in a row and the other two are `input()` prompts, so a popup
+  would have forced the whole chain into a callback to ask the same thing.
+- **Pi's label coverage** went into `test/provider_pi_sessions.vader` (the scan)
+  and `test/session_label.vader` (the row), and the panel's agent behaviour into
+  a new `test/panel_providers.vader` rather than into `test/panel_keys.vader`.
+- **Claude's completion built-ins** moved into the provider module with the
+  globs, rather than staying in `autoload/claude/input.vim`.
+
+Open questions 1, 2, 3 and 5 are unchanged and still want answers.
 
 ---
 
