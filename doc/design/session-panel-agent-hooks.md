@@ -5,10 +5,10 @@ Status: **Design A built for Claude Code; Pi still proposed**
 Claude Code's hook contract is now verified against the published reference and
 implemented in `examples/hooks/claude-vim-status.mjs`, read by the opt-in
 `g:claude_panel_hook_state` path in `autoload/claude/session.vim`. §4 records
-what was built and §8 what a first draft got wrong. Pi ships nothing yet: the
-project-local writer at `.pi/extensions/claude-vim-status.ts` is now written
-against the published 0.85.1 extension API and type-checks against it, but is
-still untracked and has not been run in a real Pi session (§8, phase 1).
+what was built and §8 what a first draft got wrong. Pi now ships the
+project-local writer at `.pi/extensions/claude-vim-status.ts`, written against
+the published 0.85.1 extension API and type-checking against it, but nothing
+about it is verified: it has not been run in a real Pi session (§8, phase 1).
 
 ## 1. Decision to make
 
@@ -380,7 +380,7 @@ Capture the exact session-id accessor and confirm it equals the id that
 **Acceptance:** a Pi session changing from active to settled changes one valid
 owner-only record; restart/crash leaves no state trusted beyond the chosen TTL.
 
-An untracked writer of this shape sits at `.pi/extensions/claude-vim-status.ts`.
+A writer of this shape sits at `.pi/extensions/claude-vim-status.ts`.
 It was rewritten against `@earendil-works/pi-coding-agent` 0.85.1 — read from
 the published package, and the file type-checks against that API — which
 settles the three things the first sketch was known to get wrong.
