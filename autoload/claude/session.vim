@@ -48,6 +48,69 @@ function! s:idle_secs() abort
   return get(g:, 'claude_panel_idle_secs', 30)
 endfunction
 
+" Agent hooks are strictly opt-in. The terminal classifier remains the default
+" and is also the fallback for a missing, bad, foreign or stale hook record.
+function! s:hook_state_enabled() abort
+  return get(g:, 'claude_panel_hook_state', 0)
+endfunction
+
+" Writers default to $XDG_RUNTIME_DIR when the session has one, so this has
+" to agree with them or every record silently goes unread.
+function! s:hook_state_root() abort
+  let l:root = get(g:, 'claude_panel_hook_state_root', '')
+  if empty(l:root)
+    let l:base = empty($XDG_RUNTIME_DIR) ? '/tmp' : $XDG_RUNTIME_DIR
+    let l:root = l:base . '/claude-vim-status'
+  endif
+  return expand(l:root)
+endfunction
+
+" A backstop against a writer that died mid-state, not a freshness window.
+" Hook events are edges: a permission prompt can sit for an hour and emit
+" nothing further, so a record has to outlive the event that wrote it. Job
+" liveness is checked before this is consulted and covers the common crash.
+function! s:hook_state_ttl() abort
+  return get(g:, 'claude_panel_hook_state_ttl_secs', 900)
+endfunction
+
+" A hook record is deliberately tiny and untrusted. Its provider and id must
+" match the live record exactly; it may refine a live state, never establish
+" liveness. State files are written by optional external agent integrations.
+function! s:hook_state(rec) abort
+  if !s:hook_state_enabled()
+    return ''
+  endif
+  let l:id = get(a:rec, 'id', '')
+  let l:provider = claude#provider#of(a:rec)
+  if l:id !~# '^[A-Za-z0-9._-]\+$' || l:provider !~# '^[A-Za-z0-9_-]\+$'
+    return ''
+  endif
+  let l:path = s:hook_state_root() . '/' . l:provider . '/' . l:id . '.json'
+  if !filereadable(l:path)
+    return ''
+  endif
+  try
+    let l:data = json_decode(join(readfile(l:path), "\n"))
+  catch
+    return ''
+  endtry
+  if type(l:data) != v:t_dict
+        \ || get(l:data, 'version', 0) != 1
+        \ || get(l:data, 'provider', '') !=# l:provider
+        \ || get(l:data, 'session_id', '') !=# l:id
+        \ || index(['active', 'waiting', 'idle', 'closed'], get(l:data, 'state', '')) < 0
+        \ || type(get(l:data, 'updated_at', 0)) != v:t_number
+    return ''
+  endif
+  let l:age = localtime() - l:data.updated_at
+  if l:age < 0 || l:age > s:hook_state_ttl()
+    return ''
+  endif
+  " A hook cannot declare a still-running Vim job closed: job liveness is the
+  " session layer's authority, and accepting this would cause poll() to reap it.
+  return l:data.state ==# 'closed' ? '' : l:data.state
+endfunction
+
 function! s:closed_limit() abort
   return get(g:, 'claude_panel_closed_limit', 10)
 endfunction
@@ -301,6 +364,15 @@ function! claude#session#status(id) abort
   " the terminal reads for no new information.
   let l:said = s:classify(get(l:rec, 'term_tail', ''),
         \ claude#provider#of(l:rec))
+  " A matching hook record is optional semantic evidence, read only after job
+  " liveness is established. It outranks the tail because it can see work the
+  " terminal never prints -- but not when it asks for attention a working
+  " terminal contradicts, which is a writer that missed the event resolving
+  " its prompt. Working beats waiting there, as it does for two tail patterns.
+  let l:hook = s:hook_state(l:rec)
+  if !empty(l:hook)
+    return (l:hook ==# 'waiting' && l:said ==# 'active') ? 'active' : l:hook
+  endif
   if !empty(l:said)
     return l:said
   endif
@@ -1458,6 +1530,11 @@ endfunction
 " a:1 provider — defaults to claude.
 function! claude#session#_classify(tail, ...) abort
   return s:classify(a:tail, a:0 > 0 ? a:1 : 'claude')
+endfunction
+
+" Test seam for validating untrusted hook records without a running terminal.
+function! claude#session#_hook_state(rec) abort
+  return s:hook_state(a:rec)
 endfunction
 
 " pid of the process the CLI's own registry says still holds {id} open, or 0.

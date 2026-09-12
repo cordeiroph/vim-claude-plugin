@@ -147,6 +147,39 @@ g:claude_panel_idle_secs~
   Default: 30
 
 ------------------------------------------------------------------------------
+                                                    *g:claude_panel_hook_state*
+g:claude_panel_hook_state~
+  Enable reading per-session state files written by optional Claude or Pi agent
+  hooks, which see work the terminal never prints. Disabled by default, and
+  nothing is written until you install a hook yourself (|claude-panel-hooks|).
+  Missing, malformed, foreign and stale records fall back to terminal patterns
+  and |g:claude_panel_idle_secs|.
+
+  Default: 0
+
+------------------------------------------------------------------------------
+                                               *g:claude_panel_hook_state_root*
+g:claude_panel_hook_state_root~
+  Directory containing <provider>/<session-id>.json hook records. Empty follows
+  what the bundled writer does: $XDG_RUNTIME_DIR/claude-vim-status when the
+  session has one, else /tmp/claude-vim-status. Set it here and the writer
+  needs $CLAUDE_VIM_STATUS_DIR pointed at the same place.
+
+  Default: ''
+
+------------------------------------------------------------------------------
+                                           *g:claude_panel_hook_state_ttl_secs*
+g:claude_panel_hook_state_ttl_secs~
+  Seconds after which a hook record is ignored. This is a backstop against a
+  writer that died mid-state, not a freshness window: hook events are edges,
+  and a permission prompt can stand for an hour without emitting another one,
+  so a record has to outlive the event that wrote it. Process liveness is
+  established before any record is read and covers the ordinary crash, which is
+  why this can be generous.
+
+  Default: 900
+
+------------------------------------------------------------------------------
                                                     *g:claude_panel_working_pat*
 g:claude_panel_working_pat~
   Pattern marking a session as working, matched against the bottom rows of its
@@ -643,8 +676,51 @@ Status                                                *claude-panel-status*
   |g:claude_panel_working_pat|. When neither matches, the idle timer decides,
   as it did before those patterns existed.
 
+  A terminal tail cannot say everything, which is what |claude-panel-hooks| is
+  for: a subagent or a background task runs without printing anything, and the
+  tail alone puts that session in Idle.
+
   Status is polled only while the panel is visible; hiding it stops the poller
   completely.
+
+Agent hooks                                           *claude-panel-hooks*
+  Optional, off by default, and the only way the panel learns about work with
+  no terminal output: a subagent, or a background task that outlives the turn
+  that started it. Claude Code hooks write one small JSON record per session,
+  and |g:claude_panel_hook_state| lets the panel read them.
+
+  Install the bundled writer (it is not wired up for you — the plugin never
+  edits your Claude configuration): >
+
+    cp <plugin>/examples/hooks/claude-vim-status.mjs ~/.claude/hooks/
+    chmod +x ~/.claude/hooks/claude-vim-status.mjs
+<
+  then merge `examples/hooks/settings.example.json` into your
+  `~/.claude/settings.json` (or a project `.claude/settings.local.json`), and
+  set: >
+
+    let g:claude_panel_hook_state = 1
+<
+  It needs node, and nothing else. `examples/hooks/README.md` has the event
+  table and the removal steps; the script itself lives in this plugin's
+  `.claude/hooks/`, which `examples/hooks/` links to.
+
+  What a record can and cannot do:
+
+  - it is read only after the session's job is found running, so a record can
+    never keep a dead session listed as alive
+  - it must match the live session's provider and id exactly; a session whose
+    CLI is too old to take `--session-id` never matches one
+  - it outranks the terminal tail, because it can see what the tail cannot —
+    except when it asks for attention while the tail says the session is
+    working, which means a writer missed the event that resolved its prompt.
+    Working wins there, as it does between two tail patterns
+  - a record older than |g:claude_panel_hook_state_ttl_secs| is ignored
+  - anything unreadable, malformed, foreign or unknown is silently no record
+    at all, and the terminal patterns decide as usual
+
+  Records hold a state, a session id and a timestamp. No prompt, tool
+  argument, transcript text or model output is written to them.
 
 The Done group                                        *claude-panel-done*
   Finished sessions. It starts folded, draws at most

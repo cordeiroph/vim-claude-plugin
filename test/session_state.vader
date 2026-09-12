@@ -11,8 +11,14 @@ Before:
   let g:_saved_cmd   = get(g:, 'claude_cmd', 'claude')
   let g:_saved_store = get(g:, 'claude_session_store', '')
   let g:_saved_idle  = get(g:, 'claude_panel_idle_secs', 30)
+  let g:_saved_hook_state = get(g:, 'claude_panel_hook_state', 0)
+  let g:_saved_hook_root = get(g:, 'claude_panel_hook_state_root', '')
+  let g:_saved_hook_ttl = get(g:, 'claude_panel_hook_state_ttl_secs', 15)
+  let g:claude_panel_hook_state = 0
+  let g:claude_panel_hook_state_ttl_secs = 15
   let g:claude_cmd   = 'sleep 30'
   let g:_dir = tempname()
+  let g:claude_panel_hook_state_root = g:_dir . '/hook-state'
   call mkdir(g:_dir, 'p')
   let g:claude_session_store = g:_dir . '/sessions.json'
 
@@ -26,6 +32,9 @@ After:
   let g:claude_cmd            = g:_saved_cmd
   let g:claude_session_store  = g:_saved_store
   let g:claude_panel_idle_secs = g:_saved_idle
+  let g:claude_panel_hook_state = g:_saved_hook_state
+  let g:claude_panel_hook_state_root = g:_saved_hook_root
+  let g:claude_panel_hook_state_ttl_secs = g:_saved_hook_ttl
   silent! unlet g:claude_panel_waiting_pat
   silent! unlet g:claude_panel_working_pat
   call delete(g:_dir, 'rf')
@@ -69,6 +78,78 @@ Execute (both patterns are configurable):
   AssertEqual '',        claude#session#_classify('esc to interrupt'),
         \ 'the default pattern is replaced, not added to'
 
+" ── optional hook records ────────────────────────────────────────────────────
+
+Execute (hook records are ignored until explicitly enabled):
+  let rec = {'id': 'hook-1', 'provider': 'claude'}
+  let path = g:claude_panel_hook_state_root . '/claude/hook-1.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': 'hook-1', 'state': 'waiting',
+        \ 'updated_at': localtime()})], path)
+  AssertEqual '', claude#session#_hook_state(rec)
+
+Execute (fresh matching hook records refine a live state):
+  let g:claude_panel_hook_state = 1
+  let rec = {'id': 'hook-2', 'provider': 'pi'}
+  let path = g:claude_panel_hook_state_root . '/pi/hook-2.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  for state in ['active', 'waiting', 'idle']
+    call writefile([json_encode({'version': 1, 'provider': 'pi',
+          \ 'session_id': 'hook-2', 'state': state,
+          \ 'updated_at': localtime()})], path)
+    AssertEqual state, claude#session#_hook_state(rec)
+  endfor
+
+Execute (bad, stale and foreign hook records fall back silently):
+  let g:claude_panel_hook_state = 1
+  let rec = {'id': 'hook-3', 'provider': 'claude'}
+  let path = g:claude_panel_hook_state_root . '/claude/hook-3.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile(['not json'], path)
+  AssertEqual '', claude#session#_hook_state(rec)
+  call writefile([json_encode({'version': 1, 'provider': 'pi',
+        \ 'session_id': 'hook-3', 'state': 'waiting',
+        \ 'updated_at': localtime()})], path)
+  AssertEqual '', claude#session#_hook_state(rec)
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': 'hook-3', 'state': 'bogus',
+        \ 'updated_at': localtime()})], path)
+  AssertEqual '', claude#session#_hook_state(rec)
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': 'hook-3', 'state': 'waiting',
+        \ 'updated_at': localtime() - 16})], path)
+  AssertEqual '', claude#session#_hook_state(rec)
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': 'hook-3', 'state': 'waiting',
+        \ 'updated_at': localtime() + 3600})], path)
+  AssertEqual '', claude#session#_hook_state(rec),
+        \ 'a record stamped in the future is a broken clock, not evidence'
+
+Execute (a hook cannot call a session closed):
+  let g:claude_panel_hook_state = 1
+  let rec = {'id': 'hook-4', 'provider': 'claude'}
+  let path = g:claude_panel_hook_state_root . '/claude/hook-4.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': 'hook-4', 'state': 'closed',
+        \ 'updated_at': localtime()})], path)
+  AssertEqual '', claude#session#_hook_state(rec),
+        \ 'liveness is the session layer''s to decide, and poll() would reap it'
+
+Execute (the record root follows the writers when it is not configured):
+  let g:claude_panel_hook_state = 1
+  let g:claude_panel_hook_state_root = ''
+  let rec = {'id': 'hook-5', 'provider': 'claude'}
+  let base = empty($XDG_RUNTIME_DIR) ? '/tmp' : $XDG_RUNTIME_DIR
+  let path = base . '/claude-vim-status/claude/hook-5.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': 'hook-5', 'state': 'active',
+        \ 'updated_at': localtime()})], path)
+  AssertEqual 'active', claude#session#_hook_state(rec)
+  call delete(path)
+
 " ── how it reaches the status ────────────────────────────────────────────────
 
 Execute (a session whose terminal is asking a question is waiting):
@@ -95,6 +176,61 @@ Execute (a session whose terminal is asking a question is waiting):
   AssertEqual 'waiting', claude#session#status(id)
   AssertEqual 'waiting', claude#session#get(id).status,
         \ 'the poll should have written it back to the record'
+
+Execute (a fresh hook state precedes terminal fallback for a running job):
+  let g:claude_panel_hook_state = 1
+  let id = claude#session#new('hooked', 'new')
+  let path = g:claude_panel_hook_state_root . '/claude/' . id . '.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': id, 'state': 'waiting', 'updated_at': localtime()})], path)
+  AssertEqual 'waiting', claude#session#status(id)
+
+Execute (a hook reports background work the terminal never printed):
+  let g:claude_panel_hook_state = 1
+  let g:claude_panel_idle_secs = 0
+  let id = claude#session#new('backgrounded', 'new')
+  let path = g:claude_panel_hook_state_root . '/claude/' . id . '.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': id, 'state': 'active', 'updated_at': localtime()})], path)
+  AssertEqual 'active', claude#session#status(id),
+        \ 'a quiet terminal past the idle timer is still working'
+
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': id, 'state': 'idle', 'updated_at': localtime()})], path)
+  AssertEqual 'idle', claude#session#status(id),
+        \ 'and the hook can settle it again without waiting for the timer'
+
+Execute (a working terminal outranks a hook still asking for attention):
+  let g:claude_panel_hook_state = 1
+  let g:claude_panel_working_pat = 'esc to interrupt'
+  let id = claude#session#new('resumed', 'new')
+  let path = g:claude_panel_hook_state_root . '/claude/' . id . '.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': id, 'state': 'waiting', 'updated_at': localtime()})], path)
+  let rec = claude#session#get(id)
+  let rec.term_tail = 'esc to interrupt'
+  AssertEqual 'active', claude#session#status(id),
+        \ 'the prompt was answered; only the resolving event went missing'
+
+Execute (a hook record cannot keep a dead job alive):
+  let g:claude_panel_hook_state = 1
+  let id = claude#session#new('killed', 'new')
+  let path = g:claude_panel_hook_state_root . '/claude/' . id . '.json'
+  call mkdir(fnamemodify(path, ':h'), 'p')
+  call writefile([json_encode({'version': 1, 'provider': 'claude',
+        \ 'session_id': id, 'state': 'active', 'updated_at': localtime()})], path)
+  let job = term_getjob(claude#session#get(id).bufnr)
+  call job_stop(job, 'kill')
+  for _ in range(100)
+    if job_status(job) !=# 'run'
+      break
+    endif
+    sleep 20m
+  endfor
+  AssertEqual 'closed', claude#session#status(id)
 
 Execute (a session printing nothing falls back to the idle timer):
   let id = claude#session#new('quiet', 'new')

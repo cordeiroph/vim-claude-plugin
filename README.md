@@ -97,6 +97,16 @@ let g:claude_panel_refresh_ms = 2000
 " when the bottom of the terminal says nothing conclusive:
 let g:claude_panel_idle_secs = 30
 
+" Optional agent-hook state files, which report work a terminal never prints
+" (a subagent, a background task outliving its turn). Disabled by default, and
+" nothing writes them until you install examples/hooks/claude-vim-status.mjs;
+" terminal patterns and the idle timer remain the classifier until then.
+let g:claude_panel_hook_state = 1
+" Empty follows the writer: $XDG_RUNTIME_DIR/claude-vim-status, else /tmp.
+let g:claude_panel_hook_state_root = ''
+" A backstop for a writer that died mid-state, not a freshness window.
+let g:claude_panel_hook_state_ttl_secs = 900
+
 " What the bottom of a Claude terminal looks like while it works, and while it
 " waits for you. The second is what fills the panel's "Needs you" group.
 let g:claude_panel_working_pat = 'esc to interrupt'

@@ -90,6 +90,27 @@ if !exists('g:claude_panel_idle_secs')
   let g:claude_panel_idle_secs = 30
 endif
 
+" g:claude_panel_hook_state — opt in to fresh per-session state files written
+" by external Claude/Pi hooks. 0 preserves terminal-pattern classification.
+if !exists('g:claude_panel_hook_state')
+  let g:claude_panel_hook_state = 0
+endif
+
+" g:claude_panel_hook_state_root — root containing <provider>/<id>.json.
+" Empty follows the writers: $XDG_RUNTIME_DIR/claude-vim-status when the
+" session has one, else /tmp/claude-vim-status.
+if !exists('g:claude_panel_hook_state_root')
+  let g:claude_panel_hook_state_root = ''
+endif
+
+" g:claude_panel_hook_state_ttl_secs — ignore hook records older than this.
+" A backstop for a writer that died mid-state, not a freshness window: the
+" events behind a record are edges, and a prompt can stand for far longer
+" than the event that announced it.
+if !exists('g:claude_panel_hook_state_ttl_secs')
+  let g:claude_panel_hook_state_ttl_secs = 900
+endif
+
 " g:claude_panel_working_pat — pattern marking a session as working, matched
 " against the bottom of its terminal. Claude prints this while it runs.
 if !exists('g:claude_panel_working_pat')
