@@ -9,8 +9,9 @@ Before:
   call claude#store#_reset()
   call claude#panel#_reset()
   let g:_saved_cwd   = getcwd()
-  let g:_saved_store = get(g:, 'claude_session_store', '')
-  let g:_saved_limit = get(g:, 'claude_panel_closed_limit', 10)
+  let g:_saved_store     = get(g:, 'claude_session_store', '')
+  let g:_saved_limit     = get(g:, 'claude_panel_closed_limit', 10)
+  let g:_saved_providers = get(g:, 'claude_providers', {})
   let g:claude_panel_closed_limit = 10
   let g:_root = resolve(tempname())
   let g:_dir  = g:_root . '/work'
@@ -32,6 +33,7 @@ After:
   call claude#store#_reset()
   let g:claude_session_store      = g:_saved_store
   let g:claude_panel_closed_limit = g:_saved_limit
+  let g:claude_providers          = g:_saved_providers
   call delete(g:_root, 'rf')
 
 " Write a transcript whose first user message is {text}.
@@ -129,3 +131,52 @@ Execute (an unnamed session is readable in the panel while it runs):
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# 'pick a diff base',
         \ 'the session that needs you must never read as a hex id: ' . text
+
+" ── a session another CLI ran ────────────────────────────────────────────────
+"
+" Pi writes the name it shows into the conversation itself, so a row has three
+" things it could be called by. A name typed here still wins; Pi's own name
+" beats the first message; the first message is the last resort, as always.
+
+Execute (helper):
+  function! PiSession(id, lines) abort
+    let g:claude_providers = {'pi': {'sessions_root': g:_root . '/pi'}}
+    let l:dir = claude#provider#pi#session_dir(g:_dir)
+    call mkdir(l:dir, 'p')
+    call writefile(
+          \ [json_encode({'type': 'session', 'version': 3, 'id': a:id,
+          \               'cwd': g:_dir})] + a:lines,
+          \ l:dir . '/2026-09-05T13-15-20-249Z_' . a:id . '.jsonl')
+  endfunction
+
+  function! PiUserLine(text) abort
+    return json_encode({'type': 'message', 'message': {'role': 'user',
+          \ 'content': [{'type': 'text', 'text': a:text}]}})
+  endfunction
+
+Execute (a Pi session nobody named is labelled with its first message):
+  call PiSession('pi-1', [PiUserLine('port the panel to pi')])
+  call claude#session#refresh()
+  AssertEqual 'port the panel to pi',
+        \ claude#session#label(claude#session#get('pi-1'))
+
+Execute (the name Pi carries beats the first message):
+  call PiSession('pi-2', [PiUserLine('port the panel to pi'),
+        \ json_encode({'type': 'session_info', 'name': 'panel port'})])
+  call claude#session#refresh()
+  AssertEqual 'panel port', claude#session#label(claude#session#get('pi-2'))
+
+Execute (a name typed here still wins over the one Pi carries):
+  call claude#store#put('pi-3', {'name': 'what I called it', 'named': 1,
+        \ 'provider': 'pi', 'cwd': g:_dir, 'project': g:_dir,
+        \ 'worktree': g:_dir, 'branch': 'main', 'created': localtime()})
+  call PiSession('pi-3', [PiUserLine('first message'),
+        \ json_encode({'type': 'session_info', 'name': 'what Pi calls it'})])
+  call claude#session#refresh()
+  AssertEqual 'what I called it',
+        \ claude#session#label(claude#session#get('pi-3'))
+
+Execute (the record remembers which CLI it belongs to):
+  call PiSession('pi-4', [PiUserLine('hello')])
+  call claude#session#refresh()
+  AssertEqual 'pi', claude#provider#of(claude#session#get('pi-4'))

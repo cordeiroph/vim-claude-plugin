@@ -27,7 +27,7 @@
 "   completion({cwd})             slash commands & agents  -> file completion
 
 " Providers shipped with the plugin, in the order pickers offer them.
-let s:BUILTIN = ['claude']
+let s:BUILTIN = ['claude', 'pi']
 
 " name -> 1 once its module has been sourced, 0 when there is no such module.
 let s:loaded = {}

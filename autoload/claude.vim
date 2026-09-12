@@ -370,9 +370,13 @@ function! s:choose_model(id) abort
     echomsg 'claude.vim: ' . l:label . ' has no in-session model switch'
     return
   endif
+  " With no list to offer, hand over to the CLI's own picker rather than
+  " inventing model names: Pi opens its selector on a bare /model, and a user
+  " who wants the numbered list here sets g:claude_providers.<name>.models.
   let l:models = get(claude#provider#get(l:provider), 'models', [])
   if empty(l:models)
-    echomsg 'claude.vim: no models configured for ' . l:label
+    call s:deliver(a:id, claude#provider#call(l:provider, 'model_text',
+          \ [''], ''))
     return
   endif
 
