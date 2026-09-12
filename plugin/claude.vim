@@ -32,6 +32,28 @@ if !exists('g:claude_models')
         \ ]
 endif
 
+" ── agent configuration ──────────────────────────────────────────────────────
+
+" g:claude_provider — which CLI a new session runs by default: 'claude'
+" (default) or 'pi'. |:PiNew| and the session panel's N start a session on a
+" named agent whatever this says.
+if !exists('g:claude_provider')
+  let g:claude_provider = 'claude'
+endif
+
+" g:claude_providers — per-agent overrides, merged over the built-in defaults
+" and keyed by agent name. Recognised keys: 'cmd', 'models', 'working_pat',
+" 'waiting_pat', and for pi 'model' and 'sessions_root'. For example:
+"
+"   let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
+"
+" Claude's settings are the globals they have always been — |g:claude_cmd|,
+" |g:claude_models|, |g:claude_panel_working_pat|, |g:claude_panel_waiting_pat|
+" — and are read whether or not this dictionary mentions claude.
+if !exists('g:claude_providers')
+  let g:claude_providers = {}
+endif
+
 " ── session panel configuration ──────────────────────────────────────────────
 
 " g:claude_panel_width — panel width in columns.

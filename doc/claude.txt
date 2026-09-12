@@ -6,13 +6,14 @@ CONTENTS                                                        *claude-contents
   1. Introduction .............. |claude-introduction|
   2. Requirements .............. |claude-requirements|
   3. Configuration ............. |claude-configuration|
-  4. Commands .................. |claude-commands|
-  5. Mappings .................. |claude-mappings|
-  6. Session panel ............. |claude-session-panel|
-  7. Workspaces ................ |claude-workspaces|
-  8. Model selection ........... |claude-models|
-  9. Input window .............. |claude-input|
- 10. License ................... |claude-license|
+  4. Agents .................... |claude-agents|
+  5. Commands .................. |claude-commands|
+  6. Mappings .................. |claude-mappings|
+  7. Session panel ............. |claude-session-panel|
+  8. Workspaces ................ |claude-workspaces|
+  9. Model selection ........... |claude-models|
+ 10. Input window .............. |claude-input|
+ 11. License ................... |claude-license|
 
 ==============================================================================
 1. INTRODUCTION                                             *claude-introduction*
@@ -30,6 +31,8 @@ Claude windows using a small set of commands and key mappings.
   - Vim 8.1+ (with |+terminal|)
   - The `claude` CLI installed and on $PATH
     (https://docs.anthropic.com/en/docs/claude-code)
+  - Optional: the `pi` CLI, to run Pi sessions as well (|claude-agents|)
+    (https://github.com/earendil-works/pi)
   - `rg` (ripgrep) on $PATH for @ file completions in the input window
     (https://github.com/BurntSushi/ripgrep)
 
@@ -65,6 +68,34 @@ g:claude_cmd~
   Default: 'claude'
   Example: >
     let g:claude_cmd = '/usr/local/bin/claude'
+<
+------------------------------------------------------------------------------
+                                                             *g:claude_provider*
+g:claude_provider~
+  Which CLI a new session runs by default (see |claude-agents|). |:PiNew| and
+  the panel's N start a session on a named agent whatever this says.
+
+  Values:  'claude' (default), 'pi'
+  Example: >
+    let g:claude_provider = 'pi'
+<
+------------------------------------------------------------------------------
+                                                            *g:claude_providers*
+g:claude_providers~
+  Per-agent overrides, keyed by agent name and merged over the built-in
+  defaults. Recognised keys: 'cmd', 'models', 'working_pat', 'waiting_pat',
+  and for pi 'model' and 'sessions_root'.
+
+  Claude's own settings keep the names they have always had — |g:claude_cmd|,
+  |g:claude_models|, |g:claude_panel_working_pat|, |g:claude_panel_waiting_pat|
+  — and are read whether or not this dictionary mentions claude.
+
+  Default: {}
+  Example: >
+    let g:claude_providers = {
+          \ 'pi': {'cmd': 'pi --thinking high',
+          \        'models': ['gpt-5.6-terra', 'anthropic/claude-sonnet-4-6']},
+          \ }
 <
 ------------------------------------------------------------------------------
                                                           *g:claude_panel_width*
@@ -332,7 +363,48 @@ g:claude_no_default_mappings~
 <
 
 ==============================================================================
-4. COMMANDS                                                     *claude-commands*
+4. AGENTS                                                         *claude-agents*
+
+A session runs one coding-agent CLI. Two are shipped:
+
+  claude    Claude Code, run as `claude` (|g:claude_cmd|)
+  pi        Pi (https://github.com/earendil-works/pi), run as `pi`
+
+Everything else is the same for both. The panel lists them together, names and
+resumes them the same way, and one workspace can hold a session of each.
+
+Starting one                                               *claude-agent-start*
+
+  |:ClaudeNew| and <leader>cn        the default agent (|g:claude_provider|)
+  |:PiNew| and <leader>pn            Pi, whatever the default is
+  N in the session panel             asks which agent, then which branch, then
+                                     the name; CTRL-C at any of the three
+                                     creates nothing
+  n in the session panel             asks only for a name, and runs the agent
+                                     of the row the cursor is on
+
+With only one agent registered, N asks nothing about agents — the question
+appears when there is a choice to make.
+
+What differs                                               *claude-agent-differs*
+
+Pi takes one flag for both halves of a session's life: the id the plugin
+chooses is passed as --session-id, which opens that session when it exists and
+creates it when it does not. Two consequences are worth knowing:
+
+  - Pi keeps no registry of which process holds a session open, so resuming a
+    session that is already open somewhere else is not caught in advance the
+    way it is for Claude (see |g:claude_sessions_dir|). Whatever Pi says about
+    it appears on the terminal.
+  - Pi names a session from the inside (its own /name), and the panel reads
+    that name. A name typed here still wins.
+
+|:ClaudeModel| offers a numbered list only when the agent has one. Pi ships
+none, so it sends a bare /model and lets Pi open its own picker; set
+g:claude_providers.pi.models to get the list here instead.
+
+==============================================================================
+5. COMMANDS                                                     *claude-commands*
 
 ------------------------------------------------------------------------------
                                                                   *:ClaudeOpen*
@@ -348,6 +420,13 @@ g:claude_no_default_mappings~
   argument the branch and then the name are prompted for, and the branch
   decides whether the session gets a workspace of its own
   (see |claude-workspaces|).
+
+------------------------------------------------------------------------------
+                                                                       *:PiNew*
+:PiNew [name]
+  Start a new session on Pi rather than on the default agent, prompting for
+  the branch and the name exactly as |:ClaudeNew| does. Named after the agent
+  it starts (see |claude-agents|).
 
 ------------------------------------------------------------------------------
                                                                 *:ClaudeRename*
@@ -455,12 +534,13 @@ g:claude_no_default_mappings~
   Move the cursor to the window below (equivalent to <C-w>j).
 
 ==============================================================================
-5. MAPPINGS                                                     *claude-mappings*
+6. MAPPINGS                                                     *claude-mappings*
 
 Default mappings (disabled when |g:claude_no_default_mappings| is set):
 
   <leader>co    Open Claude (|:ClaudeOpen|)
   <leader>cn    Start a new session (|:ClaudeNew|)
+  <leader>pn    Start a Pi session (|:PiNew|)
   <leader>ct    Toggle Claude window (|:ClaudeToggle|)
   <leader>cx    Close Claude (|:ClaudeClose|)
   <leader>cf    Focus Claude window (|:ClaudeFocus|)
@@ -492,7 +572,7 @@ To define your own mappings after disabling defaults: >
 <
 
 ==============================================================================
-6. SESSION PANEL                                          *claude-session-panel*
+7. SESSION PANEL                                          *claude-session-panel*
 
 |:ClaudeSessions| (or |<leader>cs|) toggles a panel on the left of the screen
 listing every Claude session: the ones running in this Vim instance and the
@@ -610,9 +690,10 @@ Keys inside the panel~
   s            Open the session in a vertical split
   t            Open the session in a new tab
   n            Start a session where the cursor is — the workspace of the row,
-               or of the worktree it sits under — asking only what to call it
-  N            Start a session, asking for a branch and then a name
-               (|claude-workspaces|)
+               or of the worktree it sits under, running the agent that row
+               is running — asking only what to call it
+  N            Start a session, asking which agent (|claude-agents|), then for
+               a branch, then a name (|claude-workspaces|)
   g            Swap the top level: state <-> place
   /            Filter every group (|claude-panel-filter|)
   r            Rename the session under the cursor
@@ -811,7 +892,7 @@ survive a Vim restart. Sessions that were never named in Vim fall back to their
 timestamp and first message.
 
 ==============================================================================
-7. WORKSPACES                                                *claude-workspaces*
+8. WORKSPACES                                                *claude-workspaces*
 
 A workspace is a git worktree that a session owns: its own checkout of one
 branch, so two sessions can work on two branches at once without fighting over
@@ -889,15 +970,21 @@ Unnamed sessions, and the buried tail                            *claude-unnamed
   appears in |:ClaudeResume|, and still runs.
 
 ==============================================================================
-8. MODEL SELECTION                                              *claude-models*
+9. MODEL SELECTION                                              *claude-models*
 
-|:ClaudeModel| (or |<leader>cm|) presents a numbered list built from
-|g:claude_models| and sends `/model <name>` to Claude for the chosen entry.
-You can call this at any point during a session to switch models
-mid-conversation. Opens a new session first if none is running.
+|:ClaudeModel| (or |<leader>cm|) resolves which session to act on, then
+presents a numbered list of that session's agent models and sends
+`/model <name>` for the chosen entry. You can call this at any point during a
+session to switch models mid-conversation. Opens a new session first if none
+is running.
+
+The list is |g:claude_models| for a Claude session, and
+g:claude_providers.pi.models for a Pi one. An agent with no list configured —
+which Pi is, by default — is sent a bare `/model` instead, so it opens its own
+model picker (see |claude-agents|).
 
 ==============================================================================
-9. INPUT WINDOW                                                   *claude-input*
+10. INPUT WINDOW                                                   *claude-input*
 
 |:ClaudeInput| (or |<leader>ci|) toggles a dedicated buffer for composing
 multi-line prompts. A 10-line horizontal split opens at the bottom of the
@@ -939,7 +1026,7 @@ Sending behaviour~
   moves to the Claude terminal automatically.
 
 ==============================================================================
-10. LICENSE                                                      *claude-license*
+11. LICENSE                                                      *claude-license*
 
 MIT License. Copyright (c) 2024 pedro cordeiro.
 

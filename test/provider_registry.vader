@@ -1,0 +1,84 @@
+" Tests for the agent registry: which CLIs exist, what each is configured as,
+" and what happens when something names one that does not.
+
+Before:
+  let g:_saved_provider  = get(g:, 'claude_provider', 'claude')
+  let g:_saved_providers = get(g:, 'claude_providers', {})
+  let g:_saved_cmd       = get(g:, 'claude_cmd', 'claude')
+  call claude#provider#_reset()
+
+After:
+  let g:claude_provider  = g:_saved_provider
+  let g:claude_providers = g:_saved_providers
+  let g:claude_cmd       = g:_saved_cmd
+  call claude#provider#_reset()
+
+" ── who is registered ────────────────────────────────────────────────────────
+
+Execute (both shipped agents exist):
+  Assert claude#provider#exists('claude'), 'claude should be registered'
+  Assert claude#provider#exists('pi'),     'pi should be registered'
+
+Execute (a name with no module behind it does not):
+  Assert !claude#provider#exists('not-a-cli')
+
+Execute (the default comes first, so the muscle-memory answer stays 1):
+  let g:claude_provider = 'pi'
+  AssertEqual 'pi', claude#provider#names()[0]
+  let g:claude_provider = 'claude'
+  AssertEqual 'claude', claude#provider#names()[0]
+
+Execute (every agent is listed exactly once, whichever is default):
+  let g:claude_provider = 'pi'
+  AssertEqual ['claude', 'pi'], sort(copy(claude#provider#names()))
+
+" ── the default ──────────────────────────────────────────────────────────────
+
+Execute (claude is the default when nothing says otherwise):
+  let g:claude_provider = 'claude'
+  AssertEqual 'claude', claude#provider#default()
+
+Execute (a default naming no agent falls back rather than failing a spawn):
+  let g:claude_provider = 'not-a-cli'
+  AssertEqual 'claude', claude#provider#default()
+
+" ── what an agent is configured as ───────────────────────────────────────────
+
+Execute (Claude's command is still g:claude_cmd):
+  let g:claude_cmd = 'claude --resume-last'
+  AssertEqual 'claude --resume-last', claude#provider#get('claude').cmd
+
+Execute (g:claude_providers overrides one key and leaves the rest alone):
+  let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
+  let spec = claude#provider#get('pi')
+  AssertEqual 'pi --thinking high', spec.cmd
+  AssertEqual 'to interrupt',       spec.working_pat
+  AssertEqual 'Pi',                 spec.label
+
+Execute (overriding one capability keeps the others):
+  let g:claude_providers = {'pi': {'caps': {'name_flag': 0}}}
+  let caps = claude#provider#get('pi').caps
+  AssertEqual 0, caps.name_flag
+  AssertEqual 1, caps.preassign_id
+
+Execute (an unknown agent is read as claude rather than erroring):
+  AssertEqual 'claude', claude#provider#get('not-a-cli').name
+
+" ── hooks ────────────────────────────────────────────────────────────────────
+
+Execute (a hook an agent implements is reported as present):
+  Assert claude#provider#has('pi', 'argv')
+  Assert claude#provider#has('claude', 'holder_pid')
+
+Execute (a hook nobody wrote is an answer, not an error):
+  Assert !claude#provider#has('pi', 'holder_pid'),
+        \ 'Pi keeps no live-holder registry'
+  AssertEqual 0, claude#provider#call('pi', 'holder_pid', ['abc'], 0)
+
+Execute (calling a hook that exists returns what it returns):
+  AssertEqual '/model sonnet',
+        \ claude#provider#call('pi', 'model_text', ['sonnet'], '')
+
+Execute (a record with no provider names claude, whatever it was written by):
+  AssertEqual 'claude', claude#provider#of({'id': 'abc'})
+  AssertEqual 'pi',     claude#provider#of({'id': 'abc', 'provider': 'pi'})
