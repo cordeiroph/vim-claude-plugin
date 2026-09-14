@@ -1,6 +1,7 @@
 " Tests for how the panel treats a session's agent: it shows one only when
-" there is more than one to tell apart, it can be filtered by, and n starts
-" another session on whichever agent the cursor is sitting on.
+" there is more than one to tell apart, as a one-letter tag beside the name
+" (not spelled out in the right-hand column), it can be filtered by, and n
+" starts another session on whichever agent the cursor is sitting on.
 
 Before:
   call claude#session#_reset()
@@ -29,8 +30,8 @@ Execute (a panel of Claude sessions says nothing about agents):
   call claude#session#_inject({'name': 'panel rework',   'status': 'idle'})
   call claude#panel#open()
   let text = join(claude#panel#_lines(), "\n")
-  Assert text !~# 'claude ·', 'a single-agent panel should read as it always did'
-  Assert text !~# '\<pi\>',   'and should not mention an agent nobody started'
+  Assert text !~# '\[C\]\|\[P\]',
+        \ 'a single-agent panel should read as it always did'
 
 Execute (once two agents are listed, each row says which it is):
   call claude#session#_inject({'name': 'diff tree work', 'status': 'active'})
@@ -38,18 +39,18 @@ Execute (once two agents are listed, each row says which it is):
         \ 'provider': 'pi'})
   call claude#panel#open()
   let text = join(claude#panel#_lines(), "\n")
-  Assert text =~# 'claude', 'the Claude row should name its agent'
-  Assert text =~# 'pi',     'and the Pi row should name its'
+  Assert text =~# '\[C\]', 'the Claude row should tag its agent'
+  Assert text =~# '\[P\]', 'and the Pi row should tag its'
 
-Execute (the label itself is left alone — the agent goes in the right column):
+Execute (the tag sits right before the name, not in the right-hand column):
   call claude#session#_inject({'name': 'panel rework', 'status': 'active',
         \ 'provider': 'pi'})
   call claude#session#_inject({'name': 'diff tree work', 'status': 'active'})
   call claude#panel#open()
   let rows = filter(claude#panel#_lines(), {_, l -> l =~# 'panel rework'})
   AssertEqual 1, len(rows)
-  Assert rows[0] =~# 'panel rework.*pi',
-        \ 'the agent belongs after the name, got ' . string(rows[0])
+  Assert rows[0] =~# '\[P\]panel rework',
+        \ 'the tag belongs immediately before the name, got ' . string(rows[0])
 
 " ── finding one ──────────────────────────────────────────────────────────────
 

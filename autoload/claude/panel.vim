@@ -265,20 +265,24 @@ endfunction
 
 function! s:session_line(node) abort
   return s:row(a:node.indent, claude#panel#icon(a:node.status),
-        \ a:node.label, a:node.suffix)
+        \ a:node.label, a:node.suffix, get(a:node, 'tag', ''))
 endfunction
 
-" A session row: '<indent><glyph> <label>' with {suffix} pushed against the
-" right edge, and the label fitted into whatever is left between them. The
-" suffix is dropped rather than allowed to squeeze the label to nothing.
-function! s:row(indent, glyph, label, suffix) abort
+" A session row: '<indent><glyph> <tag><label>' with {suffix} pushed against
+" the right edge, and the label fitted into whatever is left between them.
+" {tag} — the agent marker — sits ahead of the label, in the fixed-width part
+" of the row, so it is never the part that gets cut; the label itself is
+" trimmed from the right (an opening snippet stays readable rather than a
+" name's tail). The suffix is dropped rather than allowed to squeeze the
+" label to nothing.
+function! s:row(indent, glyph, label, suffix, tag) abort
   let l:width = s:width()
-  let l:left  = a:indent . a:glyph . ' '
+  let l:left  = a:indent . a:glyph . ' ' . a:tag
   let l:room  = l:width - strchars(l:left) - strchars(a:suffix) - 1
   if empty(a:suffix) || l:room < 4
-    return l:left . claude#sidebar#fit(l:width, l:left, a:label)
+    return l:left . claude#sidebar#fit(l:width, l:left, a:label, 'head')
   endif
-  let l:label = claude#sidebar#fit(l:room + 1, '', a:label)
+  let l:label = claude#sidebar#fit(l:room + 1, '', a:label, 'head')
   let l:pad   = l:width - strchars(l:left) - strchars(l:label)
         \       - strchars(a:suffix)
   return l:left . l:label . repeat(' ', l:pad) . a:suffix
@@ -327,15 +331,22 @@ function! s:mixed_providers(sessions) abort
   return len(l:seen) > 1
 endfunction
 
+" A one-letter tag for the agent a session runs on, shown beside its name
+" rather than spelled out in the suffix column — only while the panel is
+" showing more than one agent.
+function! s:agent_tag(rec) abort
+  if !s:mixed
+    return ''
+  endif
+  let l:provider = claude#provider#of(a:rec)
+  return '[' . toupper(strcharpart(l:provider, 0, 1)) . ']'
+endfunction
+
 " The right-hand column of a session row. In the state view nothing else says
 " where the session lives, so the row must; in the place view the parent rows
-" have already said it three times. Which agent it is running goes in front of
-" both, and only while the panel is showing more than one.
+" have already said it three times.
 function! s:suffix(rec) abort
   let l:parts = []
-  if s:mixed
-    call add(l:parts, claude#provider#of(a:rec))
-  endif
   if s:grouping ==# 'state'
     let l:where = s:where(a:rec)
     if !empty(l:where)
@@ -384,6 +395,7 @@ endfunction
 function! s:add_session(lines, nodes, rec, indent, label) abort
   let l:node = s:node('session', '', a:rec.id, a:indent, a:label, a:rec.status)
   let l:node.suffix = s:suffix(a:rec)
+  let l:node.tag    = s:agent_tag(a:rec)
   call add(a:lines, s:session_line(l:node))
   call add(a:nodes, l:node)
 endfunction

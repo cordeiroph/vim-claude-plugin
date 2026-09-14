@@ -116,6 +116,21 @@ Execute (ascii mode swaps the glyph set):
   call claude#panel#open()
   Assert join(claude#panel#_lines(), "\n") =~# '\[A\] ascii one'
 
+Execute (a long name is trimmed from the end, keeping its opening words):
+  let g:_saved_width = get(g:, 'claude_panel_width', 35)
+  let g:claude_panel_width = 24
+  " An empty worktree and no created/last_focus time leave the row with no
+  " suffix, so the label alone decides where it gets cut.
+  call claude#session#_inject({'name':
+        \ 'ask me if something should be renamed before we ship',
+        \ 'status': 'idle', 'worktree': '', 'created': 0})
+  call claude#panel#open()
+  let rows = filter(claude#panel#_lines(), {_, l -> l =~# 'ask me'})
+  AssertEqual 1, len(rows)
+  AssertEqual '  ○ ask me if somethin…', rows[0],
+        \ 'expected the tail cut, opening words kept'
+  let g:claude_panel_width = g:_saved_width
+
 Execute (g:claude_panel_icons overrides individual glyphs):
   let g:claude_panel_icons = {'active': '>>'}
   AssertEqual '>>', claude#panel#icon('active')

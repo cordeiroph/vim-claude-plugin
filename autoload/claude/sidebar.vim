@@ -480,14 +480,19 @@ function! claude#sidebar#marker_class() abort
 endfunction
 
 " Fit {text} into {width}, trimming from the left of a path so the
-" distinctive tail stays visible.
-function! claude#sidebar#fit(width, indent, text) abort
+" distinctive tail stays visible. a:1 = 'head' trims from the right instead,
+" for prose (a session's name or snippet) where the opening words are the
+" distinctive part.
+function! claude#sidebar#fit(width, indent, text, ...) abort
   let l:room = a:width - strchars(a:indent) - 1
   if l:room < 4 || strchars(a:text) <= l:room
     return a:text
   endif
   let l:ellipsis = claude#sidebar#ascii() ? '...' : '…'
   let l:keep = l:room - strchars(l:ellipsis)
+  if a:0 > 0 && a:1 ==# 'head'
+    return strcharpart(a:text, 0, l:keep) . l:ellipsis
+  endif
   return l:ellipsis . strcharpart(a:text, strchars(a:text) - l:keep)
 endfunction
 
