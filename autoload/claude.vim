@@ -18,11 +18,29 @@ endfunction
 
 " Start a new session regardless of what is already running.
 "
-" a:1 name     — '' asks for one (unless the prompts are turned off)
+" a:1 args     — the raw command args. A leading `word:` names a workspace —
+"                targeting the branch of that name, creating it if it does
+"                not exist — and everything after the colon is the session
+"                name. Without a colon the whole string is the session name,
+"                same as always (spaces and all; nothing to quote); empty
+"                asks for both, unless the prompts are turned off.
 " a:2 provider — which CLI to run; '' or absent means g:claude_provider
 function! claude#new(...) abort
-  call claude#session#new(a:0 > 0 ? a:1 : '', v:null,
-        \ a:0 > 1 ? a:2 : '')
+  let l:args     = a:0 > 0 ? a:1 : ''
+  let l:provider = a:0 > 1 ? a:2 : ''
+  let l:parts    = matchlist(l:args, '^\(\S\+\):\s*\(.*\)$')
+  if empty(l:parts)
+    call claude#session#new(l:args, v:null, l:provider)
+    return
+  endif
+  " A `workspace:` prefix is unambiguous, so both answers are already known
+  " — straight to spawn() rather than through the name-only
+  " claude#session#new(), which cannot express a workspace at all.
+  let l:opts = {'branch': l:parts[1], 'name': l:parts[2]}
+  if !empty(l:provider)
+    let l:opts.provider = l:provider
+  endif
+  call claude#session#spawn(l:opts)
 endfunction
 
 " Toggle the Claude window: hide it if visible, show it if hidden, open a new

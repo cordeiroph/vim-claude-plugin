@@ -448,17 +448,20 @@ g:claude_providers.pi.models to get the list here instead.
 
 ------------------------------------------------------------------------------
                                                                    *:ClaudeNew*
-:ClaudeNew [name]
+:ClaudeNew [workspace:] [name]
   Start a new session even when others are already running. Without an
-  argument the branch and then the name are prompted for, and the branch
-  decides whether the session gets a workspace of its own
-  (see |claude-workspaces|).
+  argument the workspace and then the name are prompted for, and the
+  workspace decides whether the session gets a worktree of its own
+  (see |claude-workspaces|). A leading `word:` answers both without
+  prompting: everything after the colon is the name, e.g.
+  `:ClaudeNew feature/deep: fix the fleet config`. Without a colon the whole
+  argument is just the name, spaces and all, exactly as before.
 
 ------------------------------------------------------------------------------
                                                                        *:PiNew*
-:PiNew [name]
-  Start a new session on Pi rather than on the default agent, prompting for
-  the branch and the name exactly as |:ClaudeNew| does. Named after the agent
+:PiNew [workspace:] [name]
+  Start a new session on Pi rather than on the default agent, taking the
+  workspace and the name exactly as |:ClaudeNew| does. Named after the agent
   it starts (see |claude-agents|).
 
 ------------------------------------------------------------------------------
@@ -1004,23 +1007,32 @@ branch, so two sessions can work on two branches at once without fighting over
 a single directory.
 
 Creating one~
-  Starting a session (|:ClaudeNew|, or `n` in the panel) asks two questions:
+  Starting a session (|:ClaudeNew|, or `N` in the panel) asks two questions:
 >
-    Branch (blank for no workspace): <Tab>
+    Workspace name (blank for none): <Tab>
     Session name:
 <
-  The branch completes over local and remote branches, the same list
-  |:ClaudeDiffBase| offers. A name that matches nothing is accepted and
-  becomes a new branch off the current HEAD; a branch that exists only on a
-  remote gets a local tracking branch.
+  A workspace's name is always its branch's, uniquified — the session's own
+  name never renames the workspace, so two sessions on the same branch still
+  agree on where it lives regardless of what either called itself. The
+  workspace name completes over local and remote branches, the same list
+  |:ClaudeDiffBase| offers. One that matches nothing is accepted and becomes
+  a new branch off the current HEAD; a branch that exists only on a remote
+  gets a local tracking branch.
+
+  A leading `word:` on |:ClaudeNew|/|:PiNew| answers both without prompting:
+  everything after the colon is the session name, e.g.
+  `:ClaudeNew feature/deep: fix the fleet config`.
 
   Between them the two answers decide where the session runs:
 
-  branch + name   a workspace called <name>, checked out on <branch>
-  branch only     a workspace named after the branch
-  name only       no workspace: the session runs in the selected workspace,
-                  or in the current directory
-  neither         the same, and the session is left unnamed
+  workspace + name  a workspace targeting that branch (creating it if it
+                    doesn't exist yet), running a session called <name>
+  workspace only    the same workspace, running a session named after the
+                    branch
+  name only         no workspace: the session runs in the selected
+                    workspace, or in the current directory
+  neither           the same, and the session is left unnamed
 
   A workspace name is unique within the repository: a name already taken gains
   a number, so a second workspace on `feature-branch` becomes

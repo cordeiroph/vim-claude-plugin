@@ -822,16 +822,16 @@ endfunction
 
 " ── naming ───────────────────────────────────────────────────────────────────
 
-" Prompt for the branch to give the session a workspace on. Returns
-" [1, branch] — an empty branch meaning "no workspace" — or [0, ''] when the
-" user pressed CTRL-C.
+" Prompt for the workspace to give the session — the branch to target,
+" creating it if it does not exist. Returns [1, name] — an empty name meaning
+" "no workspace" — or [0, ''] when the user pressed CTRL-C.
 "
 " Completion is the diff tree's, so the same local and remote branches are
 " offered here as by :ClaudeDiffBase. A name that matches nothing is still
 " accepted: claude#workspace#create() branches it off HEAD.
 function! s:prompt_branch() abort
   try
-    let l:answer = input('Branch (blank for no workspace): ', '',
+    let l:answer = input('Workspace name (blank for none): ', '',
           \ 'customlist,claude#difftree#complete_branch')
   catch /^Vim:Interrupt$/
     return [0, '']
@@ -939,12 +939,14 @@ endfunction
 " create a session without asking anything.
 "
 " opts:
-"   prompt     1 asks for a branch and then a name before anything is created
+"   prompt     1 asks for a workspace name and then a session name before
+"              anything is created
 "   ask_name   1 asks for a name only — the panel's n key, which reads the
 "              workspace off the row under the cursor rather than asking
 "   name       session name; '' leaves it unnamed and it labels itself from
 "              its first message instead
-"   branch     branch to give the session a workspace on; '' for none
+"   branch     workspace name to give the session — the branch to target,
+"              creating it if it does not exist; '' for none
 "   workspace  id of an existing workspace to run in — what the panel's n key
 "              passes. Ignored when a branch is given, which creates one
 "   cwd        directory to run in when there is no workspace to name: a
@@ -954,7 +956,9 @@ endfunction
 "   placement  Ex command creating the window to spawn into; '' takes over the
 "              current window. Absent means the configured Claude split
 "
-" With prompting on, the two answers decide where the session lives:
+" With prompting on, or when the branch and name are both given outright
+" (:ClaudeNew/:PiNew's two-or-more-word form), the two answers decide where
+" the session lives:
 "
 "   branch (+ name)  a workspace named after the branch, uniquified — the
 "                     typed name (if any) labels the session, never the

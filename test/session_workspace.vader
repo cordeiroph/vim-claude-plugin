@@ -320,6 +320,48 @@ Execute (a name passed as an argument still names the session):
   AssertEqual 1, claude#session#get(id).named
   AssertEqual 1, len(claude#session#list())
 
+Execute (a multi-word name with no colon still just names the session):
+  " :ClaudeNew fix the bug, unquoted, must keep meaning "name the session
+  " 'fix the bug'" and not be misread as a workspace.
+  call claude#new('fix the bug')
+  let recs = filter(claude#session#all(), {_, r -> r.name ==# 'fix the bug'})
+  AssertEqual 1, len(recs)
+  AssertEqual '', recs[0].workspace, 'no workspace should have been touched'
+
+Execute (a `workspace:` prefix creates the workspace and names the session):
+  call claude#new('feature-branch: Fix the fleet config')
+  let recs = filter(claude#session#all(),
+        \ {_, r -> r.name ==# 'Fix the fleet config'})
+  AssertEqual 1, len(recs)
+  let ws = claude#workspace#get(recs[0].workspace)
+  AssertEqual 'feature-branch', ws.branch
+  AssertEqual ws.path, recs[0].cwd
+
+Execute (`workspace:` with nothing after names the session after the workspace):
+  call claude#new('feature-branch:')
+  let ws = claude#workspace#list()[0]
+  let recs = filter(claude#session#all(), {_, r -> r.workspace ==# ws.id})
+  AssertEqual 1, len(recs)
+  AssertEqual ws.name, recs[0].name
+
+Execute (a `workspace:` prefix on a new branch creates it off HEAD):
+  call claude#new('brand-new-branch: named anyway')
+  let recs = filter(claude#session#all(), {_, r -> r.name ==# 'named anyway'})
+  AssertEqual 1, len(recs)
+  let ws = claude#workspace#get(recs[0].workspace)
+  AssertEqual 'brand-new-branch', ws.branch
+  Assert isdirectory(ws.path)
+
+Execute (PiNew's `workspace:` prefix behaves exactly like ClaudeNew's):
+  let g:claude_providers = {'pi': {'cmd': 'sleep 30'}}
+  call claude#new('feature-branch: a pi session', 'pi')
+  let recs = filter(claude#session#all(), {_, r -> r.name ==# 'a pi session'})
+  AssertEqual 1, len(recs)
+  AssertEqual 'pi', claude#provider#of(recs[0])
+  let ws = claude#workspace#get(recs[0].workspace)
+  AssertEqual 'feature-branch', ws.branch
+  unlet g:claude_providers
+
 Execute (n starts a session in the workspace of the row under the cursor):
   " n asks for a name; this is about where it lands, so the prompt is off.
   let g:claude_session_prompt_name = 0

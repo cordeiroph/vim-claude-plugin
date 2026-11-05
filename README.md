@@ -333,9 +333,9 @@ let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
 
 | | |
 | --- | --- |
-| `<leader>pn`, `:PiNew [name]` | Start a Pi session, whatever the default is |
-| `<leader>cn`, `:ClaudeNew [name]` | Start one on the default agent |
-| `N` in the panel | Asks which agent, then which branch, then the name |
+| `<leader>pn`, `:PiNew [workspace:] [name]` | Start a Pi session, whatever the default is |
+| `<leader>cn`, `:ClaudeNew [workspace:] [name]` | Start one on the default agent |
+| `N` in the panel | Asks which agent, then which workspace, then the name |
 | `n` in the panel | Asks nothing, and runs the agent the cursor is on |
 
 A row shows which agent it is running only while the panel is listing more than one, so a Claude-only panel reads exactly as it did. `/pi` filters to Pi sessions.
@@ -346,21 +346,23 @@ Claude keeps its own settings under the names it always had — `g:claude_cmd`, 
 
 ## Workspaces
 
-A workspace is a git worktree a session owns: its own checkout of one branch, so two sessions can work on two branches at once without fighting over one directory.
+A workspace is a git worktree a session owns: its own checkout of one branch, so two sessions can work on two branches at once without fighting over one directory. A workspace's name is always its branch's, uniquified — the session's own name never renames the workspace, so two sessions on the same branch still agree on where it lives regardless of what either called itself.
 
 Starting a session asks two questions:
 
 ```
-Branch (blank for no workspace): <Tab> completes local and remote branches
+Workspace name (blank for none): <Tab> completes local and remote branches
 Session name:
 ```
 
-| Branch | Name | Result |
-|--------|------|--------|
-| given | given | A workspace called `<name>`, checked out on `<branch>` |
-| given | blank | A workspace named after the branch |
+| Workspace | Name | Result |
+|-----------|------|--------|
+| given | given | A workspace targeting that branch (creating it if it doesn't exist yet), running a session called `<name>` |
+| given | blank | The same workspace, running a session named after the branch |
 | blank | given | No workspace — the session runs in the selected workspace, or where you are |
 | blank | blank | The same, and the session is left unnamed |
+
+`:ClaudeNew`/`:PiNew` answer both questions without prompting when the text starts with `workspace:` — a word immediately followed by a colon: everything after it is the session name, e.g. `:ClaudeNew feature/deep: Fix the fleet config`. `:ClaudeNew feature/deep:` with nothing after the colon leaves the session named after the workspace, same as leaving `N`'s second prompt blank. Without a leading `word:`, the whole text is still just the session name, spaces and all, exactly as before — `:ClaudeNew fix the bug` keeps naming the session "fix the bug", not touching any workspace.
 
 The panel's `N` runs exactly these two prompts. Its `n` runs only the second: the new session lands where the cursor already is, so the only thing left to ask is what to call it. "Where the cursor is" means the whole subtree — a branch row, a worktree row and every session under them all mean that checkout. Leave that blank and the session labels itself from its first message; `g:claude_session_prompt_name = 0` skips it too.
 
