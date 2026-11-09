@@ -55,9 +55,9 @@ Execute (a session is findable by its branch, which the row does not show):
   Assert join(claude#panel#_lines(), "\n") =~# 'nameless work',
         \ 'the filter matches what a row could be recognised by'
 
-Execute (and by its workspace):
+Execute (and by its room):
   call claude#session#_inject({'name': 'over there', 'status': 'active',
-        \ 'workspace': 'feature-git-diff-tree'})
+        \ 'room': 'feature-git-diff-tree'})
   call claude#panel#open()
   call claude#panel#_filter('git-diff')
   Assert join(claude#panel#_lines(), "\n") =~# 'over there'

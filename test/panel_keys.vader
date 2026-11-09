@@ -219,7 +219,9 @@ Execute (n asks for a name, and nothing else):
   let rec = claude#session#get(id)
   AssertEqual 'a quick one', rec.name
   AssertEqual 1,  rec.named
-  AssertEqual '', rec.workspace, 'no branch was asked for'
+  " Nothing was asked about the room, so it is the selected one: the root
+  " checkout of whatever repository the suite runs in, or none outside one.
+  AssertEqual empty(claude#room#project_root()) ? '' : 'root', rec.room
 
 Execute (a blank name is still an answer):
   call feedkeys("\<CR>", 't')
@@ -248,7 +250,7 @@ Execute (with the prompts turned off n asks nothing at all):
   endtry
 
 Execute (N is the one that asks):
-  " What it asks, and what each answer does, is test/session_workspace.vader.
+  " What it asks, and what each answer does, is test/session_room.vader.
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   let m = maparg('N', 'n', 0, 1)

@@ -181,9 +181,10 @@ if !exists('g:claude_session_store')
   let g:claude_session_store = ''
 endif
 
-" g:claude_session_prompt_name — 0 skips both prompts for new sessions: no
-" branch, no workspace, and no name — Claude names the conversation itself,
-" which leaves the session hidden from the panel until I reveals it.
+" g:claude_session_prompt_name — 0 skips both prompts for new sessions: the
+" session runs in the selected room (the root checkout unless <leader>cw chose
+" another) and has no name — Claude names the conversation itself, which
+" leaves the session hidden from the panel until I reveals it.
 if !exists('g:claude_session_prompt_name')
   let g:claude_session_prompt_name = 1
 endif
@@ -196,19 +197,35 @@ if !exists('g:claude_session_flags')
   let g:claude_session_flags = -1
 endif
 
-" ── workspace configuration ──────────────────────────────────────────────────
+" ── room configuration ───────────────────────────────────────────────────────
 
-" g:claude_workspace_dir — parent directory for the git worktrees new
-" workspaces check out into. Empty (default) puts each one beside the main
-" checkout as <repo>-<workspace name>; set it to keep them elsewhere, e.g.
-" '~/src/worktrees'.
+" g:claude_room_dir — where rooms (git worktrees) are checked out. Empty
+" (default) means '.vim-workspace' inside the project, kept out of git status
+" through .git/info/exclude. An absolute path, e.g. '~/src/rooms', puts them
+" outside the project instead, under <path>/<project>/.
+if !exists('g:claude_room_dir')
+  let g:claude_room_dir = ''
+endif
+
+" g:claude_room_fetch — 0 skips the `git fetch` that makes a new room start
+" from the latest default branch; it is then cut from the last fetched one.
+if !exists('g:claude_room_fetch')
+  let g:claude_room_fetch = 1
+endif
+
+" g:claude_room_store — where rooms are persisted, with the same
+" override-or-plugin-dir rule (and reinstall caveat) as
+" |g:claude_session_store|.
+if !exists('g:claude_room_store')
+  let g:claude_room_store = ''
+endif
+
+" g:claude_workspace_dir and g:claude_workspace_store are deprecated: the
+" first is read as an absolute g:claude_room_dir when that is unset, the
+" second is the store rooms are migrated from once.
 if !exists('g:claude_workspace_dir')
   let g:claude_workspace_dir = ''
 endif
-
-" g:claude_workspace_store — where workspaces are persisted, with the same
-" override-or-plugin-dir rule (and reinstall caveat) as
-" |g:claude_session_store|.
 if !exists('g:claude_workspace_store')
   let g:claude_workspace_store = ''
 endif
@@ -295,8 +312,10 @@ command! -nargs=? -complete=customlist,claude#hooks#complete
 " this file still sources no autoload script.
 command! -nargs=? PiNew call claude#new(<q-args>, 'pi')
 
-" Workspaces: the git worktrees sessions run in.
-command! ClaudeWorkspaces call claude#workspace#pick()
+" Rooms: the git worktrees sessions run in. :ClaudeWorkspaces is the name this
+" had before rooms, kept so existing mappings keep working.
+command! ClaudeRooms      call claude#room#pick()
+command! ClaudeWorkspaces call claude#room#pick()
 
 " Git diff tree.
 " The whole sidebar column: sessions, diff tree and NERDTree together.
@@ -381,8 +400,8 @@ if !exists('g:claude_no_default_mappings')
   " Toggle the git diff tree.
   nnoremap <silent> <leader>cd :ClaudeDiff<CR>
 
-  " Pick the workspace to work in; NERDTree follows the choice.
-  nnoremap <silent> <leader>cw :ClaudeWorkspaces<CR>
+  " Pick the room to work in; NERDTree follows the choice.
+  nnoremap <silent> <leader>cw :ClaudeRooms<CR>
 
   " Raise or dismiss the whole sidebar column. Normal mode only: <C-a> must
   " keep incrementing a number under the cursor elsewhere (insert mode,

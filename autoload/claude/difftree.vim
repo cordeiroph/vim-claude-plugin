@@ -23,6 +23,7 @@ let s:base_over  = ''    " session-wide default, set with B
 let s:base_cache = ''    " the auto-detected default, resolved once
 let s:bases      = {}    " branch -> base, loaded from the store on refresh
 let s:bases_ok   = 0
+let s:room_bases = {}    " branch -> its room's base, read once per refresh
 let s:filter     = ''
 let s:show_help  = 0
 
@@ -74,34 +75,56 @@ function! claude#difftree#base() abort
 endfunction
 
 " The auto-detected default: what the remote calls its trunk, else main, else
-" master, else nothing.
+" master, else nothing. The same answer a new room is cut from.
 function! s:detect_base() abort
   let l:root = s:repo_root()
   if empty(l:root)
     return ''
   endif
-  let l:head = s:git(l:root, 'symbolic-ref --short refs/remotes/origin/HEAD')
-  if !empty(l:head)
-    return substitute(l:head[0], '^origin/', '', '')
-  endif
-  for l:cand in ['main', 'master']
-    if !empty(s:git(l:root, 'rev-parse --verify --quiet ' . l:cand))
-      return l:cand
-    endif
-  endfor
-  return ''
+  return claude#room#default_branch(l:root).branch
 endfunction
 
-" The base for one branch: its own override, or the default above.
+" The base for one branch:
+"
+"   its own override (:ClaudeDiffBase)  ->  its room's  ->  the default above
+"
+" A room diffs against what it was cut from and a sub-room against its room,
+" so the room's base is looked up here rather than written as an override:
+" clearing an override falls back to the room's base, not to main.
 function! claude#difftree#base_for(branch) abort
-  return get(s:branch_bases(), a:branch, claude#difftree#base())
+  let l:own = get(s:branch_bases(), a:branch, '')
+  if !empty(l:own)
+    return l:own
+  endif
+  let l:room = s:room_base(a:branch)
+  return empty(l:room) ? claude#difftree#base() : l:room
+endfunction
+
+" The room base for {branch}, read once per refresh. '' when no room holds the
+" branch, or the room's base no longer resolves — a parent room renamed or
+" deleted — in which case the default is the honest answer.
+function! s:room_base(branch) abort
+  if !has_key(s:room_bases, a:branch)
+    " Rooms are keyed by the main checkout, which is not the toplevel when
+    " Vim is inside a room itself.
+    let l:base = claude#room#base_of_branch(a:branch,
+          \ claude#room#project_root())
+    if !empty(l:base) && empty(s:git(s:repo_root(),
+          \ 'rev-parse --verify --quiet ' . shellescape(l:base . '^{commit}')))
+      let l:base = ''
+    endif
+    let s:room_bases[a:branch] = l:base
+  endif
+  return s:room_bases[a:branch]
 endfunction
 
 " True when {branch} diffs against something other than the default, which is
 " what the panel shows in brackets.
 function! claude#difftree#has_override(branch) abort
-  let l:own = get(s:branch_bases(), a:branch, '')
-  return !empty(l:own) && l:own !=# claude#difftree#base()
+  let l:own  = get(s:branch_bases(), a:branch, '')
+  let l:room = s:room_base(a:branch)
+  return !empty(l:own)
+        \ && l:own !=# (empty(l:room) ? claude#difftree#base() : l:room)
 endfunction
 
 " ── the per-branch store ─────────────────────────────────────────────────────
@@ -255,7 +278,7 @@ function! s:build_sources() abort
   let l:out = []
 
   " git lists the main worktree first — the checkout that owns .git/ as a real
-  " directory — so the first entry is the root workspace.
+  " directory — so the first entry is the root checkout.
   let l:first = 1
   for l:wt in s:worktrees()
     if !s:branch_listed(l:out, l:wt.branch)
@@ -512,6 +535,7 @@ function! s:field(rec) abort
 endfunction
 
 function! s:invalidate() abort
+  let s:room_bases = {}
   let s:cache      = {}
   let s:sources    = []
   let s:sources_ok = 0
@@ -613,6 +637,8 @@ function! claude#difftree#tree() abort
     endif
     call add(l:out, {
           \ 'branch':       l:src.branch,
+          \ 'room':         l:src.has_worktree
+          \                   ? s:room_of(l:src.worktree) : {},
           \ 'label':        s:branch_label(l:src, l:rootkey),
           \ 'worktree':     l:src.has_worktree ? l:src.worktree : l:rootkey,
           \ 'has_worktree': l:src.has_worktree,
@@ -626,6 +652,17 @@ function! claude#difftree#tree() abort
   call sort(l:out, {a, b -> s:branch_rank(a, l:rootkey)
         \                 - s:branch_rank(b, l:rootkey)})
   return l:out
+endfunction
+
+" The room whose worktree is {path}, or {} for the root checkout and for a
+" worktree the plugin did not make.
+function! s:room_of(path) abort
+  let l:proj = claude#room#project_root()
+  let l:id   = claude#room#of_path(a:path, l:proj)
+  if empty(l:id) || l:id ==# 'root'
+    return {}
+  endif
+  return claude#room#get(l:id, l:proj)
 endfunction
 
 function! s:branch_rank(node, rootkey) abort
@@ -868,7 +905,7 @@ function! s:build() abort
           \ ' t tab     R refresh  b base',
           \ ' / filter  <Esc> clear filter',
           \ ' <Space> fold   q hide   ? help',
-          \ ' d remove worktree  D force-remove worktree',
+          \ ' d remove room  D force-remove room',
           \ ]
       call s:add(l:lines, l:nodes, l:h, s:node('help', '', '', l:h, ''))
     endfor
@@ -897,28 +934,105 @@ function! s:build() abort
     return [l:lines, l:nodes]
   endif
 
-  " Project, then one row per branch, then its directories.
+  " Project; then the root checkout's branch; then each room with its
+  " worktree folder and its sub-rooms; then every other branch.
   let l:pkey = 'p:' . s:repo_root()
   call s:add(l:lines, l:nodes,
         \ s:marker(l:pkey) . ' ' . fnamemodify(s:repo_root(), ':t'),
         \ s:node('project', l:pkey, '', fnamemodify(s:repo_root(), ':t'), ''))
   if s:is_open(l:pkey)
+    let l:by_room = {}
+    let l:plain   = []
     for l:br in l:tree
-      let l:node = s:node('branch', l:br.key, '  ', l:br.label, l:br.worktree)
-      let l:node.has_upstream = l:br.has_upstream
-      let l:node.has_worktree = l:br.has_worktree
-      let l:node.branch       = l:br.branch
-      call s:add(l:lines, l:nodes,
-            \ '  ' . s:marker(l:br.key) . ' ' . l:br.label, l:node)
-      if s:is_open(l:br.key)
-        call s:emit_dir(l:br.root, l:br.key, '', '    ', l:lines, l:nodes)
+      if empty(l:br.room)
+        call add(l:plain, l:br)
+      else
+        let l:by_room[l:br.room.id] = l:br
       endif
+    endfor
+    let l:rootkey = s:root_key()
+    let l:first   = !empty(l:plain) && s:branch_rank(l:plain[0], l:rootkey) == 0
+    if l:first
+      call s:emit_branch(l:plain[0], '  ', l:plain[0].label, l:lines, l:nodes)
+    endif
+    call s:emit_rooms(l:by_room, l:lines, l:nodes)
+    for l:br in l:plain[(l:first ? 1 : 0) :]
+      call s:emit_branch(l:br, '  ', l:br.label, l:lines, l:nodes)
     endfor
   endif
 
   call s:add(l:lines, l:nodes, '', s:node('blank', '', '', '', ''))
   call s:add(l:lines, l:nodes, '? help', s:node('help', '', '', '', ''))
   return [l:lines, l:nodes]
+endfunction
+
+" A branch row and, when it is open, its directories.
+function! s:emit_branch(br, indent, label, lines, nodes) abort
+  let l:node = s:node('branch', a:br.key, a:indent, a:label, a:br.worktree)
+  let l:node.has_upstream = a:br.has_upstream
+  let l:node.has_worktree = a:br.has_worktree
+  let l:node.branch       = a:br.branch
+  call s:add(a:lines, a:nodes,
+        \ a:indent . s:marker(a:br.key) . ' ' . a:label, l:node)
+  if s:is_open(a:br.key)
+    call s:emit_dir(a:br.root, a:br.key, '', a:indent . '  ', a:lines, a:nodes)
+  endif
+endfunction
+
+" Rooms laid out the way they are on disk:
+"
+"   ▾ panel/                  the room
+"     ▾ claude.vim/           its worktree: room/panel vs what it was cut from
+"     ▾ icons/                a sub-room
+"       ▾ claude.vim/         its worktree: room/panel--icons vs room/panel
+"
+" A room is drawn when it or any of its sub-rooms has changes; its own folder
+" row only when it does.
+function! s:emit_rooms(by_room, lines, nodes) abort
+  let l:rooms = filter(claude#room#list(claude#room#project_root()),
+        \ {_, r -> !get(r, 'root', 0)})
+  let l:folder = fnamemodify(claude#room#project_root(), ':t') . '/'
+  for l:top in filter(copy(l:rooms), {_, r -> empty(r.parent)})
+    let l:subs = filter(copy(l:rooms), {_, r -> r.parent ==# l:top.id
+          \ && has_key(a:by_room, r.id)})
+    if !has_key(a:by_room, l:top.id) && empty(l:subs)
+      continue
+    endif
+    call s:emit_room(l:top, '  ', a:lines, a:nodes)
+    if !s:is_open('r:' . l:top.id)
+      continue
+    endif
+    if has_key(a:by_room, l:top.id)
+      call s:emit_branch(a:by_room[l:top.id], '    ',
+            \ s:folder_label(a:by_room[l:top.id], l:folder), a:lines, a:nodes)
+    endif
+    for l:sub in l:subs
+      call s:emit_room(l:sub, '    ', a:lines, a:nodes)
+      if s:is_open('r:' . l:sub.id)
+        call s:emit_branch(a:by_room[l:sub.id], '      ',
+              \ s:folder_label(a:by_room[l:sub.id], l:folder), a:lines,
+              \ a:nodes)
+      endif
+    endfor
+  endfor
+endfunction
+
+function! s:emit_room(rec, indent, lines, nodes) abort
+  let l:key  = 'r:' . a:rec.id
+  let l:node = s:node('room', l:key, a:indent, a:rec.name, a:rec.path)
+  let l:node.branch       = a:rec.branch
+  let l:node.room         = a:rec.id
+  let l:node.has_worktree = !a:rec.missing && isdirectory(a:rec.path)
+  call s:add(a:lines, a:nodes,
+        \ a:indent . s:marker(l:key) . ' ' . a:rec.name . '/', l:node)
+endfunction
+
+" A room's worktree folder, carrying the bracketed base only when the user set
+" one: the room's own base is what the nesting already says.
+function! s:folder_label(br, folder) abort
+  return claude#difftree#has_override(a:br.branch)
+        \ ? '[' . claude#difftree#base_for(a:br.branch) . '] ' . a:folder
+        \ : a:folder
 endfunction
 
 " A branch with no remote-tracking branch exists only on this machine. That
@@ -1144,46 +1258,47 @@ function! s:prompt_default_base() abort
   endif
 endfunction
 
-" The workspace whose worktree lives at {path}, or {} when it is the main
-" checkout or not a plugin-managed workspace at all.
-function! s:workspace_for_path(path) abort
-  let l:want = resolve(a:path)
-  for l:rec in claude#workspace#list()
-    if resolve(l:rec.path) ==# l:want
-      return l:rec
-    endif
-  endfor
-  return {}
-endfunction
-
-" d/D: remove the worktree of the branch row under the cursor. Silently does
-" nothing off a branch row, the main checkout, or a branch with no worktree
-" of its own (nothing there to remove).
+" d/D: remove the room on the row under the cursor — a room row, or the
+" worktree folder row under it. Silently does nothing on the root checkout, a
+" branch with no worktree, or a worktree the plugin did not make. A room with
+" sub-rooms is refused before anything is asked.
 function! s:remove_worktree(force) abort
   let l:node = s:current()
-  if empty(l:node) || l:node.kind !=# 'branch' || !get(l:node, 'has_worktree', 0)
+  if empty(l:node) || index(['branch', 'room'], l:node.kind) < 0
+        \ || !get(l:node, 'has_worktree', 0)
     return
   endif
   if resolve(l:node.payload) ==# resolve(s:repo_root())
     return
   endif
-  let l:ws = s:workspace_for_path(l:node.payload)
-  if empty(l:ws)
+  let l:proj = claude#room#project_root()
+  let l:id   = claude#room#of_path(l:node.payload, l:proj)
+  if empty(l:id) || l:id ==# 'root'
+    return
+  endif
+  let l:rec  = claude#room#get(l:id, l:proj)
+  let l:subs = claude#room#children(l:id, l:proj)
+  if !empty(l:subs)
+    echohl WarningMsg
+    echomsg 'claude.vim: ' . l:rec.name . ' has ' . len(l:subs) . ' sub-room'
+          \ . (len(l:subs) == 1 ? '' : 's') . '; remove them first'
+    echohl None
     return
   endif
 
+  let l:what = 'room "' . l:rec.name . '" (' . l:rec.branch . ' is kept)'
   if a:force
-    let l:msg = 'Force-remove worktree "' . l:node.label
-          \ . '"? Uncommitted changes will be lost.'
+    let l:msg = 'Force-remove ' . l:what
+          \ . '? Uncommitted changes will be lost.'
   else
-    let l:msg = 'Remove worktree "' . l:node.label . '"?'
+    let l:msg = 'Remove ' . l:what . '?'
   endif
   if confirm(l:msg, "&Yes\n&No", 2) != 1
     return
   endif
 
-  let l:ok = a:force ? claude#workspace#force_remove(l:ws.id)
-        \            : claude#workspace#remove(l:ws.id)
+  let l:ok = a:force ? claude#room#force_remove(l:id)
+        \            : claude#room#remove(l:id)
   if l:ok
     call claude#difftree#refresh()
   endif
@@ -1195,7 +1310,7 @@ function! s:cursor_branch() abort
   let l:idx = line('.') - 1
   while l:idx >= 0
     let l:node = get(s:nodes, l:idx, {})
-    if get(l:node, 'kind', '') ==# 'branch'
+    if index(['branch', 'room'], get(l:node, 'kind', '')) >= 0
       return get(l:node, 'branch', '')
     endif
     let l:idx -= 1
@@ -1309,6 +1424,7 @@ function! claude#difftree#_reset() abort
   let s:base_cache = ''
   let s:bases      = {}
   let s:bases_ok   = 0
+  let s:room_bases = {}
   let s:filter     = ''
   let s:show_help  = 0
 endfunction

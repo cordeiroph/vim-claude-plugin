@@ -1,6 +1,6 @@
 # Design: sessions belong to workspaces
 
-Status: proposed
+Status: superseded by `doc/design/rooms.md`
 Target: `claude.vim`
 Last updated: 2026-09-08
 

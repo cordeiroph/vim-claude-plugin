@@ -18,12 +18,13 @@ endfunction
 
 " Start a new session regardless of what is already running.
 "
-" a:1 args     — the raw command args. A leading `word:` names a workspace —
-"                targeting the branch of that name, creating it if it does
-"                not exist — and everything after the colon is the session
-"                name. Without a colon the whole string is the session name,
-"                same as always (spaces and all; nothing to quote); empty
-"                asks for both, unless the prompts are turned off.
+" a:1 args     — the raw command args. A leading `room:` names the room to
+"                run in — `root`, an existing room or sub-room, or a new room
+"                (or `room/sub` for a new sub-room) made on the spot — and
+"                everything after the colon is the session name. Without a
+"                colon the whole string is the session name, same as always
+"                (spaces and all; nothing to quote); empty asks for both,
+"                unless the prompts are turned off.
 " a:2 provider — which CLI to run; '' or absent means g:claude_provider
 function! claude#new(...) abort
   let l:args     = a:0 > 0 ? a:1 : ''
@@ -33,10 +34,14 @@ function! claude#new(...) abort
     call claude#session#new(l:args, v:null, l:provider)
     return
   endif
-  " A `workspace:` prefix is unambiguous, so both answers are already known
-  " — straight to spawn() rather than through the name-only
-  " claude#session#new(), which cannot express a workspace at all.
-  let l:opts = {'branch': l:parts[1], 'name': l:parts[2]}
+  " A `room:` prefix is unambiguous, so both answers are already known —
+  " straight to spawn() rather than through the name-only
+  " claude#session#new(), which cannot express a room at all.
+  let l:answer = claude#room#answer_for(l:parts[1])
+  if empty(l:answer)
+    return
+  endif
+  let l:opts = {'answer': l:answer, 'name': l:parts[2]}
   if !empty(l:provider)
     let l:opts.provider = l:provider
   endif

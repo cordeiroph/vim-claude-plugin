@@ -184,7 +184,7 @@ function! claude#provider#pi#scan(path) abort
 endfunction
 
 " Every conversation Pi holds for the directories in {cwds}: the one Vim is in,
-" plus every workspace of this repository. Newest first, capped across the
+" plus every room of this repository. Newest first, capped across the
 " project rather than per directory.
 function! claude#provider#pi#sessions(cwds) abort
   let l:limit = get(g:, 'claude_panel_closed_limit', 10)

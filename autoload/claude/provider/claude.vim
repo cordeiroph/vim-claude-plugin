@@ -226,8 +226,8 @@ function! claude#provider#claude#scan(path) abort
 endfunction
 
 " Every conversation belonging to the directories in {cwds}: the one Vim is
-" in, plus every workspace of this repository. Claude files a transcript under
-" the directory the session ran in, so a workspace session's conversations
+" in, plus every room of this repository. Claude files a transcript under
+" the directory the session ran in, so a room session's conversations
 " live under its own worktree and are invisible from the main checkout
 " otherwise. Newest first, capped across the project rather than per directory.
 function! claude#provider#claude#sessions(cwds) abort

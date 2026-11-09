@@ -3,14 +3,13 @@
 " A NERDTree-style side panel listing every Claude session. It has two views,
 " swapped with g:
 "
-"   state   what each session is doing — Needs you, Working, Idle, Done.
-"           The default, because with several agents running the question is
-"           almost always "which one is waiting for me?"
-"   place   Group > Branch, for when the question really is "what is
-"           happening in that checkout?" A workspace-backed session gets its
-"           own group (a workspace is one branch, always); a session run
-"           straight in the main checkout shares a group with the repo's
-"           other such sessions, split by branch.
+"   state   what each session is doing — Needs you, Working, Idle, Done —
+"           and, inside each, which room it is in. The default, because with
+"           several agents running the question is almost always "which one
+"           is waiting for me?"
+"   place   Project > Room > Sub-room, for when the question really is
+"           "what is happening in that room?" Every room is listed, with or
+"           without sessions, so this view doubles as the room list.
 "
 " The panel owns presentation only: it never starts, stops or inspects a
 " process directly — autoload/claude/session.vim is the single source of
@@ -29,7 +28,7 @@ let s:mixed      = 0      " 1 while the drawn rows run more than one agent
 let s:done_all   = 0      " 1 once the Done group has been asked to show all
 
 " Group key -> 1 while that node is folded shut. The two views use different
-" key prefixes — 'st:' here, 'p:' / 'w:' / 'b:' in the tree — so switching
+" key prefixes — 'st:' here, 'p:' / 'r:' in the tree — so switching
 " views with g preserves both sets of folds. Done starts shut: it is the tail,
 " and the tail is what nobody wants to scroll past.
 let s:collapsed = {'st:done': 1}
@@ -174,7 +173,8 @@ endfunction
 " depending on NERDTree being loaded at all.
 "
 "   header / project   NERDTreeCWD       Statement   (its root line)
-"   branch             NERDTreeDir       Directory   (its directories)
+"   room               NERDTreeDir       Directory   (its directories)
+"   — branch, [sub]    Type
 "   fold marker        NERDTreeClosable  Directory   (its arrows)
 "   session name       NERDTreeFile      Normal      (its files)
 "   active icon        NERDTreeFlags     Number      (its flags)
@@ -182,7 +182,9 @@ endfunction
 let s:highlights = [
       \ ['ClaudeSessionHeader',     'NERDTreeCWD',      'Statement'],
       \ ['ClaudeSessionProject',    'NERDTreeCWD',      'Statement'],
+      \ ['ClaudeSessionWorktree',   'NERDTreeDir',      'Directory'],
       \ ['ClaudeSessionBranch',     '',                 'Type'],
+      \ ['ClaudeSessionRoomTag',    '',                 'ClaudeSessionBranch'],
       \ ['ClaudeSessionMarker',     'NERDTreeClosable', 'Directory'],
       \ ['ClaudeSessionName',       'NERDTreeFile',     'Normal'],
       \ ['ClaudeSessionWaiting',    '',                 'WarningMsg'],
@@ -202,11 +204,14 @@ function! s:setup_syntax() abort
   silent! syntax clear
   let l:m = claude#sidebar#marker_class()
 
-  " Tree nodes, identified by their indent.
+  " Tree nodes, identified by their indent: projects and status groups at
+  " the margin, rooms and sub-rooms below them. A room's branch, when it is
+  " not the one its name implies, follows an em dash.
   execute 'syntax match ClaudeSessionProject  /^' . l:m
         \ . ' .*$/ contains=ClaudeSessionMarker'
-  execute 'syntax match ClaudeSessionBranch   /^  ' . l:m
-        \ . ' .*$/ contains=ClaudeSessionMarker'
+  execute 'syntax match ClaudeSessionWorktree /^ \{2,}' . l:m
+        \ . ' .*$/ contains=ClaudeSessionMarker,ClaudeSessionBranch'
+  syntax match ClaudeSessionBranch / — .*$/ contained
   execute 'syntax match ClaudeSessionMarker   /' . l:m . '/ contained'
 
   " Session rows: the glyph carries the status, the name is coloured like a
@@ -224,7 +229,12 @@ function! s:setup_syntax() abort
           \ . '/ nextgroup=' . l:name . ' skipwhite'
   endfor
   syntax match ClaudeSessionName       /.*$/ contained
+        \ contains=ClaudeSessionRoomTag
   syntax match ClaudeSessionNameClosed /.*$/ contained
+        \ contains=ClaudeSessionRoomTag
+  " A sub-room's sessions are drawn under their room in the state view, with
+  " the sub-room named after them.
+  syntax match ClaudeSessionRoomTag /\[[^]]\+\]\%( \|$\)/ contained
 
   syntax match ClaudeSessionHeader /\%1lClaude Sessions.*/
   " The footer, and the inline help block, whose lines are the only ones
@@ -265,7 +275,8 @@ endfunction
 
 function! s:session_line(node) abort
   return s:row(a:node.indent, claude#panel#icon(a:node.status),
-        \ a:node.label, a:node.suffix, get(a:node, 'tag', ''))
+        \ a:node.label, a:node.suffix, get(a:node, 'tag', ''),
+        \ get(a:node, 'trail', ''))
 endfunction
 
 " A session row: '<indent><glyph> <tag><label>' with {suffix} pushed against
@@ -275,14 +286,21 @@ endfunction
 " trimmed from the right (an opening snippet stays readable rather than a
 " name's tail). The suffix is dropped rather than allowed to squeeze the
 " label to nothing.
-function! s:row(indent, glyph, label, suffix, tag) abort
+"
+" a:1 — {trail}, the sub-room a session is in, follows the label as
+" `[name]`. Like the tag it is never what gets cut: the label is fitted into
+" what the trail leaves.
+function! s:row(indent, glyph, label, suffix, tag, ...) abort
+  let l:trail = a:0 > 0 && !empty(a:1) ? ' [' . a:1 . ']' : ''
   let l:width = s:width()
   let l:left  = a:indent . a:glyph . ' ' . a:tag
-  let l:room  = l:width - strchars(l:left) - strchars(a:suffix) - 1
+  let l:room  = l:width - strchars(l:left) - strchars(a:suffix)
+        \       - strchars(l:trail) - 1
   if empty(a:suffix) || l:room < 4
-    return l:left . claude#sidebar#fit(l:width, l:left, a:label, 'head')
+    return l:left . claude#sidebar#fit(l:width - strchars(l:trail), l:left,
+          \ a:label, 'head') . l:trail
   endif
-  let l:label = claude#sidebar#fit(l:room + 1, '', a:label, 'head')
+  let l:label = claude#sidebar#fit(l:room + 1, '', a:label, 'head') . l:trail
   let l:pad   = l:width - strchars(l:left) - strchars(l:label)
         \       - strchars(a:suffix)
   return l:left . l:label . repeat(' ', l:pad) . a:suffix
@@ -310,14 +328,11 @@ function! s:age(rec) abort
   return (l:secs / 86400) . 'd'
 endfunction
 
-" Where a session lives, in six columns. Its workspace when it has one, else
-" the basename of its worktree.
+" Where a session lives, in six columns: the basename of its worktree. Only
+" drawn for a session that sits under no room row, which is the only case in
+" which nothing else on screen says it.
 function! s:where(rec) abort
-  let l:where = get(a:rec, 'workspace', '')
-  if empty(l:where)
-    let l:where = fnamemodify(get(a:rec, 'worktree', ''), ':t')
-  endif
-  return strcharpart(l:where, 0, 6)
+  return strcharpart(fnamemodify(get(a:rec, 'worktree', ''), ':t'), 0, 6)
 endfunction
 
 " Whether the rows being drawn are running more than one agent. A panel where
@@ -342,12 +357,14 @@ function! s:agent_tag(rec) abort
   return '[' . toupper(strcharpart(l:provider, 0, 1)) . ']'
 endfunction
 
-" The right-hand column of a session row. In the state view nothing else says
-" where the session lives, so the row must; in the place view the parent rows
-" have already said it three times.
-function! s:suffix(rec) abort
+" The right-hand column of a session row. A session drawn under no room row
+" has nothing else saying where it lives, so the row must; under a room row,
+" the room has already said it.
+"
+" a:1 — 1 when the row sits under a room.
+function! s:suffix(rec, ...) abort
   let l:parts = []
-  if s:grouping ==# 'state'
+  if !(a:0 > 0 && a:1)
     let l:where = s:where(a:rec)
     if !empty(l:where)
       call add(l:parts, l:where)
@@ -367,7 +384,7 @@ function! s:matches(rec) abort
     return 1
   endif
   let l:hay = join([claude#session#label(a:rec), s:where(a:rec),
-        \ get(a:rec, 'branch', ''), get(a:rec, 'workspace', ''),
+        \ get(a:rec, 'branch', ''), get(a:rec, 'room', ''),
         \ claude#provider#of(a:rec)], ' ')
   return l:hay =~? '\V' . escape(s:filter, '\')
 endfunction
@@ -392,10 +409,14 @@ function! s:disambiguate(sessions) abort
 endfunction
 
 " Add a session row to the buffer under construction.
-function! s:add_session(lines, nodes, rec, indent, label) abort
+"
+" a:1 — 1 when the row sits under a room row; a:2 — the sub-room it is in,
+" when the room row above it is its parent room's.
+function! s:add_session(lines, nodes, rec, indent, label, ...) abort
   let l:node = s:node('session', '', a:rec.id, a:indent, a:label, a:rec.status)
-  let l:node.suffix = s:suffix(a:rec)
+  let l:node.suffix = s:suffix(a:rec, a:0 > 0 && a:1)
   let l:node.tag    = s:agent_tag(a:rec)
+  let l:node.trail  = a:0 > 1 ? a:2 : ''
   call add(a:lines, s:session_line(l:node))
   call add(a:nodes, l:node)
 endfunction
@@ -443,12 +464,7 @@ function! s:build_states(lines, nodes) abort
           \ ? s:done_rows() : len(l:sessions)
     let l:shown  = l:cap < len(l:sessions) ? l:sessions[0 : l:cap - 1]
           \                                : l:sessions
-    let l:labels = s:disambiguate(l:shown)
-    let l:i = 0
-    for l:rec in l:shown
-      call s:add_session(a:lines, a:nodes, l:rec, '  ', l:labels[l:i])
-      let l:i += 1
-    endfor
+    call s:add_by_room(a:lines, a:nodes, l:group.key, l:shown)
 
     let l:rest = len(l:sessions) - len(l:shown)
     if l:rest > 0
@@ -470,18 +486,114 @@ function! s:build_states(lines, nodes) abort
   endif
 endfunction
 
+" The rows of one status group, each under the room it is in.
+"
+" Rooms are ordered by their first session, and the sessions keep the group's
+" own order, so a room appears where its most urgent session would have been.
+" A sub-room gets no row of its own here: its sessions sit with its room,
+" tagged with its name, so the answer to "what needs me" costs no third
+" indent. Sessions in no room — outside any repository — sit directly under
+" the group, as they always have.
+function! s:add_by_room(lines, nodes, gkey, shown) abort
+  let l:labels  = s:disambiguate(a:shown)
+  let l:loose   = []
+  let l:buckets = []
+  let l:index   = {}
+  let l:projs   = {}
+  let l:i = 0
+  for l:rec in a:shown
+    let [l:project, l:room, l:sub] = claude#session#place_of(l:rec)
+    if empty(l:room) || empty(l:project) || l:project[0] ==# '('
+      call add(l:loose, [l:rec, l:labels[l:i]])
+    else
+      let l:key = l:project . '|' . l:room
+      if !has_key(l:index, l:key)
+        let l:index[l:key] = len(l:buckets)
+        call add(l:buckets, {'project': l:project, 'room': l:room,
+              \ 'items': []})
+        let l:projs[l:project] = 1
+      endif
+      call add(l:buckets[l:index[l:key]].items, [l:rec, l:labels[l:i], l:sub])
+    endif
+    let l:i += 1
+  endfor
+
+  for [l:rec, l:label] in l:loose
+    call s:add_session(a:lines, a:nodes, l:rec, '  ', l:label)
+  endfor
+
+  let l:mixed = len(l:projs) > 1
+  for l:b in l:buckets
+    let l:rec   = s:room_rec(l:b.project, l:b.room)
+    let l:label = s:room_label(l:rec)
+    if l:mixed
+      let l:label = fnamemodify(l:b.project, ':t') . ' › ' . l:label
+    endif
+    let l:key = a:gkey . '|r:' . l:b.project . '|' . l:b.room
+    call s:add_group(a:lines, a:nodes, 'room', l:key, '  ', l:label)
+    call s:tag_room(a:nodes[-1], l:b.project, l:rec)
+    if has_key(s:collapsed, l:key) && empty(s:filter)
+      continue
+    endif
+    for [l:rec, l:label, l:sub] in l:b.items
+      call s:add_session(a:lines, a:nodes, l:rec, '    ', l:label, 1, l:sub)
+    endfor
+  endfor
+endfunction
+
+" The record for room {id} of {project}, or a stand-in when the store no
+" longer knows it.
+function! s:room_rec(project, id) abort
+  let l:rec = claude#room#get(a:id, a:project)
+  if !empty(l:rec)
+    return l:rec
+  endif
+  if a:id ==# 'root'
+    return extend(claude#room#root(a:project), {'path': a:project})
+  endif
+  return {'id': a:id, 'name': a:id, 'parent': '', 'branch': '', 'path': '',
+        \ 'project': a:project, 'missing': 1, 'legacy': 0}
+endfunction
+
+" A room row's text. The state view names the root checkout without its
+" branch: the group row above already says what the session is doing, and a
+" 35-column row has no space for both.
+function! s:room_label(rec) abort
+  if get(a:rec, 'root', 0)
+    return a:rec.name . ' (root)'
+  endif
+  return claude#room#label(a:rec)
+endfunction
+
+" What a room row carries for the keys: n starts a session in it, d removes
+" it, and both need to know which room and which project.
+function! s:tag_room(node, project, rec) abort
+  let a:node.room    = a:rec.id
+  let a:node.project = a:project
+  let a:node.missing = get(a:rec, 'missing', 0)
+  let a:node.path    = get(a:rec, 'missing', 0) ? '' : get(a:rec, 'path', '')
+endfunction
+
 " ── the place view ───────────────────────────────────────────────────────────
+
+function! s:count_room(room) abort
+  let l:n = len(s:keep(a:room.sessions))
+  for l:sub in a:room.subs
+    let l:n += s:count_room(l:sub)
+  endfor
+  return l:n
+endfunction
 
 function! s:build_tree(lines, nodes) abort
   let l:tree  = claude#session#tree(!empty(s:filter))
   let l:drawn = 0
 
   for l:proj in l:tree
-    " A group whose every session was filtered out is not drawn at all.
-    let l:count = 0
-    for l:br in l:proj.branches
-      let l:count += len(s:keep(l:br.sessions))
+    let l:count = len(s:keep(l:proj.loose))
+    for l:room in l:proj.rooms
+      let l:count += s:count_room(l:room)
     endfor
+    " A project whose every session was filtered out is not drawn at all.
     if l:count == 0 && !empty(s:filter)
       continue
     endif
@@ -489,36 +601,54 @@ function! s:build_tree(lines, nodes) abort
 
     call s:add_group(a:lines, a:nodes, 'project', l:proj.key, '', l:proj.label,
           \ 1)
-    let a:nodes[-1].path = l:proj.path
+    let a:nodes[-1].path    = l:proj.path
+    let a:nodes[-1].project = l:proj.project
     if has_key(s:collapsed, l:proj.key) && empty(s:filter)
       continue
     endif
 
-    for l:br in l:proj.branches
-      let l:sessions = s:keep(l:br.sessions)
-      if empty(l:sessions) && !empty(s:filter)
-        continue
-      endif
-      call s:add_group(a:lines, a:nodes, 'branch', l:br.key, '  ',
-            \ l:br.label, 1)
-      let a:nodes[-1].path = l:br.path
-      if has_key(s:collapsed, l:br.key) && empty(s:filter)
-        continue
-      endif
-
-      let l:labels = s:disambiguate(l:sessions)
-      let l:i = 0
-      for l:rec in l:sessions
-        call s:add_session(a:lines, a:nodes, l:rec, '    ', l:labels[l:i])
-        let l:i += 1
-      endfor
+    for l:room in l:proj.rooms
+      call s:add_room(a:lines, a:nodes, l:proj.project, l:room, '  ')
+    endfor
+    let l:loose  = s:keep(l:proj.loose)
+    let l:labels = s:disambiguate(l:loose)
+    let l:i = 0
+    for l:rec in l:loose
+      call s:add_session(a:lines, a:nodes, l:rec, '  ', l:labels[l:i])
+      let l:i += 1
     endfor
   endfor
 
-  if empty(l:tree) || (!empty(s:filter) && l:drawn == 0)
+  if l:drawn == 0
     call s:add_note(a:lines, a:nodes, '  ',
           \ empty(s:filter) ? '(no sessions)' : '(nothing matches)')
   endif
+endfunction
+
+" A room row, its sessions, then its sub-rooms, each the same way one level
+" further in. A filter hides a room with nothing matching in it.
+function! s:add_room(lines, nodes, project, room, indent) abort
+  if !empty(s:filter) && s:count_room(a:room) == 0
+    return
+  endif
+  call s:add_group(a:lines, a:nodes, 'room', a:room.key, a:indent,
+        \ claude#room#label(a:room.rec), 1)
+  call s:tag_room(a:nodes[-1], a:project, a:room.rec)
+  if has_key(s:collapsed, a:room.key) && empty(s:filter)
+    return
+  endif
+
+  let l:inner    = a:indent . '  '
+  let l:sessions = s:keep(a:room.sessions)
+  let l:labels   = s:disambiguate(l:sessions)
+  let l:i = 0
+  for l:rec in l:sessions
+    call s:add_session(a:lines, a:nodes, l:rec, l:inner, l:labels[l:i], 1)
+    let l:i += 1
+  endfor
+  for l:sub in a:room.subs
+    call s:add_room(a:lines, a:nodes, a:project, l:sub, l:inner)
+  endfor
 endfunction
 
 " ── the whole buffer ─────────────────────────────────────────────────────────
@@ -789,52 +919,56 @@ function! s:prompt_filter() abort
   call s:render()
 endfunction
 
-" Where a session started with n should run, as [workspace id, directory].
-" At most one of the two is set; both empty means "wherever a session with no
-" workspace would have run anyway".
+" Where a session started with n should run, as [room id, directory]. At most
+" one of the two is set; both empty means "wherever a session with nowhere to
+" go would have run anyway" — the selected room.
 "
 " "Where the cursor is" means the whole subtree, not just the row it is on: a
-" project row, a branch row and every session row under them all answer with
-" the same directory, because that is the checkout you are looking at.
+" room row and every session row under it answer with the same room, because
+" that is the checkout you are looking at. A project row answers with its root
+" checkout.
 function! s:place_under_cursor() abort
   let l:nodes = get(b:, 'claude_panel_nodes', [])
   let l:idx   = line('.') - 1
-  let l:dir   = ''
+  let l:here  = claude#room#project_root()
 
   if l:idx >= 0 && l:idx < len(l:nodes)
-    if l:nodes[l:idx].kind ==# 'session'
+    let l:node = l:nodes[l:idx]
+    if l:node.kind ==# 'session'
       " A session row answers for itself, in either view: it knows both the
-      " workspace it belongs to and the directory it ran in.
-      let l:rec = claude#session#get(l:nodes[l:idx].id)
-      if !empty(get(l:rec, 'workspace', ''))
-        return [l:rec.workspace, '']
+      " room it belongs to and the directory it ran in.
+      let l:rec = claude#session#get(l:node.id)
+      if !empty(get(l:rec, 'room', '')) && get(l:rec, 'project', '') ==# l:here
+            \ && !empty(claude#room#get(l:rec.room))
+        return [l:rec.room, '']
       endif
       let l:dir = get(l:rec, 'worktree', '')
+      return isdirectory(l:dir) ? ['', l:dir] : ['', '']
     endif
 
-    " Otherwise walk up the drawn rows to the nearest node that names a
-    " directory: the worktree the cursor is inside, or the project root when
-    " it is on the project row itself.
+    " Otherwise walk up the drawn rows to the nearest room or project row.
     let l:i = l:idx
-    while empty(l:dir) && l:i >= 0
-      if !empty(l:nodes[l:i].path)
-        let l:dir = l:nodes[l:i].path
+    while l:i >= 0
+      let l:up = l:nodes[l:i]
+      if l:up.kind ==# 'room' && !get(l:up, 'missing', 0)
+        if get(l:up, 'project', '') ==# l:here
+          return [l:up.room, '']
+        endif
+        return isdirectory(l:up.path) ? ['', l:up.path] : ['', '']
+      endif
+      if l:up.kind ==# 'project'
+        if get(l:up, 'project', '') ==# l:here && !empty(l:here)
+          return ['root', '']
+        endif
+        return isdirectory(l:up.path) ? ['', l:up.path] : ['', '']
+      endif
+      if l:up.kind ==# 'group'
+        break
       endif
       let l:i -= 1
     endwhile
   endif
-
-  if empty(l:dir) || !isdirectory(l:dir)
-    return [get(claude#workspace#current(), 'id', ''), '']
-  endif
-  " A directory the plugin knows as a workspace is passed as one, so the new
-  " session records where it belongs and not merely where it ran.
-  for l:ws in claude#workspace#list()
-    if l:ws.path ==# l:dir
-      return [l:ws.id, '']
-    endif
-  endfor
-  return ['', l:dir]
+  return ['', '']
 endfunction
 
 " Which agent the row under the cursor is running, so n can start another like
@@ -856,16 +990,16 @@ function! s:provider_under_cursor() abort
 endfunction
 
 " n — a session here. One question, not two: the row under the cursor already
-" says which workspace "here" is and which agent is running there, so only the
+" says which room "here" is and which agent is running there, so only the
 " name is worth asking for. Leaving it blank is still an answer — the session
 " labels itself from its first message — and g:claude_session_prompt_name = 0
 " skips the question entirely.
 function! s:new() abort
-  let [l:ws, l:dir] = s:place_under_cursor()
-  let l:provider    = s:provider_under_cursor()
+  let [l:room, l:dir] = s:place_under_cursor()
+  let l:provider      = s:provider_under_cursor()
   call s:enter_main()
   let l:id = claude#session#spawn({
-        \ 'workspace': l:ws,
+        \ 'room':      l:room,
         \ 'cwd':       l:dir,
         \ 'provider':  l:provider,
         \ 'ask_name':  get(g:, 'claude_session_prompt_name', 1),
@@ -877,7 +1011,7 @@ endfunction
 
 " Which agent a deliberate new session should run. Returns [1, provider], or
 " [0, ''] when the question was cancelled — the same contract as
-" s:prompt_branch(), so CTRL-C here creates nothing at all. With only one agent
+" claude#room#ask(), so CTRL-C here creates nothing at all. With only one agent
 " registered there is nothing worth asking.
 "
 " inputlist() rather than a popup: this is the first of three questions in a
@@ -906,7 +1040,7 @@ function! s:ask_provider() abort
   return [1, l:names[l:choice - 1]]
 endfunction
 
-" N — the deliberate one: which agent, which branch, and what to call it.
+" N — the deliberate one: which agent, which room, and what to call it.
 function! s:new_asking() abort
   let [l:ok, l:provider] = s:ask_provider()
   if !l:ok
@@ -932,9 +1066,17 @@ function! s:rename() abort
   endif
 endfunction
 
+" d — end the session under the cursor, or, on a room row, remove the room.
 function! s:end_session() abort
   let l:node = s:current_node()
-  if empty(l:node) || l:node.kind !=# 'session'
+  if empty(l:node)
+    return
+  endif
+  if l:node.kind ==# 'room'
+    call s:remove_room(l:node, 0)
+    return
+  endif
+  if l:node.kind !=# 'session'
     return
   endif
   let l:rec = claude#session#get(l:node.id)
@@ -944,8 +1086,49 @@ function! s:end_session() abort
   endif
 endfunction
 
+" Remove the room on {node}'s row: its worktree, never its branch. {force}
+" discards uncommitted work, and says so before asking. The root checkout,
+" rooms of another project and rooms that are already gone are left alone.
+function! s:remove_room(node, force) abort
+  let l:id = get(a:node, 'room', '')
+  if empty(l:id) || l:id ==# 'root' || get(a:node, 'missing', 0)
+        \ || get(a:node, 'project', '') !=# claude#room#project_root()
+    return
+  endif
+  let l:rec = claude#room#get(l:id)
+  if empty(l:rec)
+    return
+  endif
+  " A room with sub-rooms is refused before anything is asked: a yes would
+  " only be met with a no.
+  let l:subs = claude#room#children(l:id)
+  if !empty(l:subs)
+    echohl WarningMsg
+    echomsg 'claude.vim: ' . l:rec.name . ' has ' . len(l:subs) . ' sub-room'
+          \ . (len(l:subs) == 1 ? '' : 's') . '; remove them first'
+    echohl None
+    return
+  endif
+  let l:msg = (a:force ? 'Force-remove' : 'Remove') . ' room "' . l:rec.name
+        \ . '"? Its branch ' . l:rec.branch . ' is kept.'
+        \ . (a:force ? ' Uncommitted changes will be lost.' : '')
+  if confirm(l:msg, "&Yes\n&No", 2) != 1
+    return
+  endif
+  let l:ok = a:force ? claude#room#force_remove(l:id) : claude#room#remove(l:id)
+  if l:ok
+    call s:render()
+  endif
+endfunction
+
+" D — purge the session under the cursor, or, on a room row, force-remove the
+" room.
 function! s:purge() abort
   let l:node = s:current_node()
+  if !empty(l:node) && l:node.kind ==# 'room'
+    call s:remove_room(l:node, 1)
+    return
+  endif
   if empty(l:node) || l:node.kind !=# 'session'
     return
   endif

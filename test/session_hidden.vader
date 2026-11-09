@@ -66,7 +66,7 @@ Execute (an injected record is named unless it says otherwise):
 
 " ── the tree ─────────────────────────────────────────────────────────────────
 
-Execute (a branch group whose sessions are all hidden is not built):
+Execute (a hidden session is left out of its room):
   call claude#session#_inject({'id': 'aaa', 'name': 'named one',
         \ 'project': '/p', 'worktree': '/p', 'branch': 'main'})
   call claude#session#_inject({'id': 'bbb', 'name': '', 'named': 0,
@@ -74,14 +74,13 @@ Execute (a branch group whose sessions are all hidden is not built):
 
   let tree = claude#session#tree()
   AssertEqual 1, len(tree)
-  let branches = map(copy(tree[0].branches), {_, b -> b.label})
-  AssertEqual ['main'], branches
+  AssertEqual ['root'], map(copy(tree[0].rooms), {_, r -> r.id})
+  AssertEqual ['aaa'], map(copy(tree[0].rooms[0].sessions), {_, r -> r.id})
 
   call claude#session#toggle_hidden()
   let tree = claude#session#tree()
-  let branches = sort(map(copy(tree[0].branches),
-        \ {_, b -> b.label}))
-  AssertEqual ['main', 'sidebar'], branches
+  AssertEqual ['aaa', 'bbb'],
+        \ sort(map(copy(tree[0].rooms[0].sessions), {_, r -> r.id}))
 
 " ── labels ───────────────────────────────────────────────────────────────────
 
@@ -145,12 +144,19 @@ Execute (a stored entry that was never named stays hidden):
   call claude#session#toggle_hidden()
   AssertEqual ['auto'], map(copy(claude#session#list()), {_, r -> r.id})
 
-Execute (a stored entry remembers the workspace it ran in):
+Execute (a stored entry from before rooms keeps its workspace as its room):
   call claude#store#save({'version': 1, 'sessions':
         \ {'ws': {'name': 'in a worktree', 'named': 1, 'workspace': 'feature',
         \         'cwd': getcwd(), 'created': 1}}})
   call claude#session#refresh()
-  AssertEqual 'feature', claude#session#get('ws').workspace
+  AssertEqual 'feature', claude#session#get('ws').room
+
+Execute (a stored entry remembers the room it ran in):
+  call claude#store#save({'version': 1, 'sessions':
+        \ {'rm': {'name': 'in a room', 'named': 1, 'room': 'panel/icons',
+        \         'cwd': getcwd(), 'created': 1}}})
+  call claude#session#refresh()
+  AssertEqual 'panel/icons', claude#session#get('rm').room
 
 Execute (a reset puts the toggle back):
   call claude#session#toggle_hidden()

@@ -1,0 +1,284 @@
+" Tests for claude#room#create() and the rest of a room's life: where it is
+" cut from, where it lands on disk, removing it and selecting it. Uses a real
+" fixture repository, and a bare clone standing in for its remote; no
+" terminal, no Claude process.
+
+Before:
+  call claude#room#_reset()
+  call claude#store#_reset()
+  let g:_saved_cwd    = getcwd()
+  let g:_saved_store  = get(g:, 'claude_room_store', '')
+  let g:_saved_wstore = get(g:, 'claude_workspace_store', '')
+  let g:_saved_dir    = get(g:, 'claude_room_dir', '')
+  let g:_saved_wdir   = get(g:, 'claude_workspace_dir', '')
+  let g:_saved_fetch  = get(g:, 'claude_room_fetch', 1)
+
+  let g:_root = tempname()
+  call mkdir(g:_root, 'p')
+  let g:_root = resolve(g:_root)
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo, 'p')
+  let g:_git  = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_git . 'init -q -b main')
+  call system(g:_git . 'config user.email t@t')
+  call system(g:_git . 'config user.name test')
+  call writefile(['hello'], g:_repo . '/file.txt')
+  call system(g:_git . 'add -A')
+  call system(g:_git . 'commit -qm first')
+  call system(g:_git . 'branch feature')
+
+  let g:claude_room_store      = g:_root . '/rooms.json'
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  let g:claude_room_dir        = ''
+  let g:claude_workspace_dir   = ''
+  let g:claude_room_fetch      = 1
+  execute 'cd ' . fnameescape(g:_repo)
+
+  " A remote for the repository, and a second clone of it that pushes a
+  " commit the fixture has not fetched yet: what "latest main" has to find.
+  function! WithRemote() abort
+    let remote = g:_root . '/remote.git'
+    call system('git clone -q --bare ' . shellescape(g:_repo) . ' '
+          \ . shellescape(remote))
+    call system(g:_git . 'remote add origin ' . shellescape(remote))
+    call system(g:_git . 'fetch -q origin')
+    call system(g:_git . 'remote set-head origin main')
+    let other = g:_root . '/other'
+    call system('git clone -q ' . shellescape(remote) . ' ' . shellescape(other))
+    let og = 'git -C ' . shellescape(other) . ' '
+    call system(og . 'config user.email t@t')
+    call system(og . 'config user.name test')
+    call writefile(['upstream'], other . '/upstream.txt')
+    call system(og . 'add -A')
+    call system(og . 'commit -qm upstream')
+    call system(og . 'push -q origin main')
+    return remote
+  endfunction
+
+  function! Head(dir, ...) abort
+    return systemlist('git -C ' . shellescape(a:dir) . ' rev-parse '
+          \ . (a:0 ? a:1 : '--abbrev-ref HEAD'))[0]
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  let g:claude_room_store      = g:_saved_store
+  let g:claude_workspace_store = g:_saved_wstore
+  let g:claude_room_dir        = g:_saved_dir
+  let g:claude_workspace_dir   = g:_saved_wdir
+  let g:claude_room_fetch      = g:_saved_fetch
+  call claude#room#_reset()
+  call claude#store#_reset()
+  call delete(g:_root, 'rf')
+
+" ── the repository ───────────────────────────────────────────────────────────
+
+Execute (the project root is the main checkout):
+  AssertEqual g:_repo, claude#room#project_root()
+
+Execute (the root checkout heads the list, with its branch read live):
+  let list = claude#room#list()
+  AssertEqual 1, len(list)
+  AssertEqual 'root',  list[0].id
+  AssertEqual 'repo',  list[0].name
+  AssertEqual g:_repo, list[0].path
+  AssertEqual 'main',  list[0].branch
+  AssertEqual 'repo (root) — main', claude#room#label(list[0])
+
+" ── creating ─────────────────────────────────────────────────────────────────
+
+Execute (a room is a worktree under .vim-workspace on its own branch):
+  let room = claude#room#create('panel', '')
+  Assert !empty(room), 'a room should have been created'
+  AssertEqual 'panel',       room.id
+  AssertEqual 'panel',       room.name
+  AssertEqual '',            room.parent
+  AssertEqual 'room/panel',  room.branch
+  AssertEqual g:_repo,       room.project
+  AssertEqual g:_repo . '/.vim-workspace/panel/repo', room.path
+  Assert filereadable(room.path . '/file.txt'),
+        \ 'the worktree should hold the project'
+  AssertEqual 'room/panel', Head(room.path)
+  AssertEqual 'panel', claude#room#label(room),
+        \ 'a branch that is just room/<name> is not repeated in the label'
+
+Execute (with no remote, a room is cut from the local default branch):
+  let room = claude#room#create('panel', '')
+  AssertEqual 'main', room.base
+  AssertEqual Head(g:_repo, 'main'), Head(room.path, 'HEAD')
+
+Execute (the room directory is kept out of git status):
+  call claude#room#create('panel', '')
+  call claude#room#create('other', '')
+  let exclude = readfile(g:_repo . '/.git/info/exclude')
+  AssertEqual 1, count(exclude, '/.vim-workspace/'),
+        \ 'listed exactly once: ' . string(exclude)
+  AssertEqual [], systemlist(g:_git . 'status --porcelain'),
+        \ 'the main checkout should be clean'
+
+Execute (a room is cut from the remote's default branch after a fetch):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  AssertEqual 'origin/main', room.base,
+        \ 'the base is the remote ref, so upstream commits are not its diff'
+  Assert filereadable(room.path . '/upstream.txt'),
+        \ 'the commit pushed elsewhere should be in the room'
+  Assert !filereadable(g:_repo . '/upstream.txt'),
+        \ 'the main checkout was not touched'
+
+Execute (a room has no upstream, so git pull never pulls main into it):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  AssertEqual '', system(g:_git . 'config --get branch.room/panel.merge')
+
+Execute (with fetching turned off, the room is cut from what was last fetched):
+  call WithRemote()
+  let g:claude_room_fetch = 0
+  let room = claude#room#create('panel', '')
+  AssertEqual 'origin/main', room.base
+  Assert !filereadable(room.path . '/upstream.txt'),
+        \ 'nothing was fetched, so the new commit is not there'
+
+Execute (a failed fetch falls back to the last fetched remote branch):
+  call WithRemote()
+  call system(g:_git . 'remote set-url origin ' . shellescape(g:_root . '/nowhere.git'))
+  let room = claude#room#create('panel', '')
+  Assert !empty(room), 'a room should still be created'
+  AssertEqual 'origin/main', room.base
+
+Execute (a named base branch is cut from as it is, and becomes the base):
+  call system(g:_git . 'checkout -q feature')
+  call writefile(['on feature'], g:_repo . '/feature.txt')
+  call system(g:_git . 'add -A')
+  call system(g:_git . 'commit -qm feature')
+  call system(g:_git . 'checkout -q main')
+  let room = claude#room#create('review', 'feature')
+  AssertEqual 'feature', room.base
+  Assert filereadable(room.path . '/feature.txt')
+  AssertEqual 'room/review', room.branch, 'the room still has its own branch'
+
+Execute (an unknown base branch creates nothing):
+  AssertEqual {}, claude#room#create('panel', 'no-such-branch')
+  AssertEqual 1, len(claude#room#list()), 'only the root checkout'
+  Assert !isdirectory(g:_repo . '/.vim-workspace/panel'),
+        \ 'no directory was left behind'
+
+Execute (no default branch to cut from creates nothing):
+  call system(g:_git . 'branch -m main trunk')
+  AssertEqual {}, claude#room#create('panel', '')
+  AssertEqual 1, len(claude#room#list())
+
+" ── naming ───────────────────────────────────────────────────────────────────
+
+Execute (a taken name gains a number, and keeps counting):
+  call claude#room#create('panel', '')
+  AssertEqual 'panel-1', claude#room#unique_name('panel')
+  call claude#room#create('panel', '')
+  AssertEqual 'panel-2', claude#room#unique_name('panel')
+  AssertEqual ['root', 'panel', 'panel-1'],
+        \ map(claude#room#list(), {_, r -> r.id}), 'oldest first, root ahead'
+
+Execute (a leftover branch from an earlier room is not taken over):
+  call system(g:_git . 'branch room/old')
+  AssertEqual 'old-1', claude#room#unique_name('old')
+
+Execute (root is reserved):
+  AssertEqual 'root-1', claude#room#unique_name('root')
+
+Execute (names become one directory- and ref-safe segment):
+  AssertEqual 'topic-deep', claude#room#unique_name('topic/deep')
+  AssertEqual 'two-words',  claude#room#unique_name('two words')
+  AssertEqual 'a-b',        claude#room#unique_name('a--b'),
+        \ 'a double dash is what joins a room to a sub-room in a branch name'
+  AssertEqual 'room',       claude#room#unique_name('///')
+
+" ── where rooms live ─────────────────────────────────────────────────────────
+
+Execute (an absolute g:claude_room_dir puts rooms outside the project):
+  let g:claude_room_dir = g:_root . '/rooms'
+  let room = claude#room#create('panel', '')
+  AssertEqual g:_root . '/rooms/repo/panel/repo', room.path
+  Assert isdirectory(room.path)
+  Assert index(readfile(g:_repo . '/.git/info/exclude'), '/.vim-workspace/') < 0,
+        \ 'nothing inside the project to exclude'
+
+Execute (the deprecated g:claude_workspace_dir is still honoured):
+  let g:claude_workspace_dir = g:_root . '/trees'
+  let room = claude#room#create('panel', '')
+  AssertEqual g:_root . '/trees/repo/panel/repo', room.path
+
+" ── removing ─────────────────────────────────────────────────────────────────
+
+Execute (removing a room drops its worktree and its directory, not its branch):
+  let room = claude#room#create('panel', '')
+  Assert claude#room#remove('panel'), 'removal should report success'
+  Assert !isdirectory(room.path), 'the worktree should be gone'
+  Assert !isdirectory(g:_repo . '/.vim-workspace/panel'),
+        \ 'and the empty directory that held it'
+  AssertEqual {}, claude#room#get('panel')
+  AssertEqual 'room/panel', systemlist(g:_git
+        \ . "for-each-ref --format='%(refname:short)' refs/heads/room")[0],
+        \ 'the branch, and every commit on it, is kept'
+
+Execute (removing an unknown room, or the root checkout, does nothing):
+  Assert !claude#room#remove('nope')
+  Assert !claude#room#remove('root')
+
+Execute (a dirty room resists a plain removal but yields to force):
+  let room = claude#room#create('panel', '')
+  call writefile(['dirty'], room.path . '/file.txt')
+  Assert !claude#room#remove('panel'), 'git should refuse a dirty worktree'
+  Assert isdirectory(room.path)
+  AssertEqual 2, len(claude#room#list()), 'and the record is kept'
+  Assert claude#room#force_remove('panel'), 'force should succeed'
+  Assert !isdirectory(room.path)
+
+Execute (a room removed behind our back is pruned from the list):
+  let room = claude#room#create('panel', '')
+  call system(g:_git . 'worktree remove ' . shellescape(room.path))
+  AssertEqual ['root'], map(claude#room#list(), {_, r -> r.id})
+  AssertEqual {}, claude#room#get('panel')
+
+" ── the selected room ────────────────────────────────────────────────────────
+
+Execute (the root checkout is selected until another room is chosen):
+  AssertEqual 'root',  claude#room#current().id
+  AssertEqual g:_repo, claude#room#cwd()
+
+Execute (selecting a room makes it the directory new sessions use):
+  let room = claude#room#create('panel', '')
+  Assert claude#room#set_current('panel'), 'selection should take'
+  AssertEqual 'panel',   claude#room#current().id
+  AssertEqual room.path, claude#room#cwd()
+
+Execute (selecting an unknown room changes nothing):
+  call claude#room#create('panel', '')
+  call claude#room#select('panel')
+  call claude#room#select('nope')
+  AssertEqual 'panel', claude#room#current().id,
+        \ 'the selection stands; only the re-rooting needs NERDTree'
+
+Execute (root selects the root checkout again):
+  call claude#room#create('panel', '')
+  call claude#room#set_current('panel')
+  Assert claude#room#set_current('root')
+  AssertEqual 'root', claude#room#current().id
+
+Execute (removing the selected room selects the root checkout):
+  call claude#room#create('panel', '')
+  call claude#room#set_current('panel')
+  call claude#room#remove('panel')
+  AssertEqual 'root', claude#room#current().id
+
+" ── outside a repository ─────────────────────────────────────────────────────
+
+Execute (a plain directory has no rooms and creates none):
+  let plain = g:_root . '/plain'
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  call claude#room#_reset()
+  AssertEqual '', claude#room#project_root()
+  AssertEqual [], claude#room#list()
+  AssertEqual {}, claude#room#current()
+  AssertEqual {}, claude#room#create('panel', '')
+  AssertEqual plain, claude#room#cwd()

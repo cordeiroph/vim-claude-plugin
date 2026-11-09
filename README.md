@@ -2,7 +2,7 @@
 
 A Vim plugin that opens the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) in a terminal split, giving you persistent AI sessions alongside your code.
 
-Run as many sessions as you like, name them, and switch between them from a NERDTree-style side panel grouped by what they're doing or by workspace and branch.
+Run as many sessions as you like, name them, and switch between them from a NERDTree-style side panel grouped by what they're doing or by the room they run in. A room is a git worktree of its own — on its own branch, inside the project — and can be split into sub-rooms, so several agents can work side by side without sharing a checkout.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into 
 | `<leader>cn` | `:ClaudeNew` | Start a session even when others are already running |
 | `<leader>pn` | `:PiNew` | Start a session on Pi rather than the default agent |
 | `<leader>cs` | `:ClaudeSessions` | Toggle the session panel |
-| `<leader>cw` | `:ClaudeWorkspaces` | Choose the workspace (git worktree) to work in |
+| `<leader>cw` | `:ClaudeRooms` | Choose the room (git worktree) to work in |
 | `<C-a>` | `:ClaudeSidebars` | Raise or dismiss the whole sidebar column |
 | `<leader>ct` | `:ClaudeToggle` | Show/hide a Claude window |
 | `<leader>cx` | `:ClaudeClose` | End a session |
@@ -42,7 +42,7 @@ Or copy `plugin/claude.vim`, `autoload/claude.vim`, and `autoload/claude/` into 
 
 `:ClaudeNew [name]` starts an extra session, and `:ClaudeRename [name]` renames one. When several sessions are running, commands that need just one show a picker; when only one is running, it is used without prompting.
 
-Starting a session without naming it on the command line asks for a branch first, and gives the session its own checkout of that branch — see [Workspaces](#workspaces).
+Starting a session without naming it on the command line asks which room it goes in first — an existing one, or a new room or sub-room — see [Rooms](#rooms).
 
 Inside the Claude terminal, press `<Esc><Esc>` to enter terminal-normal mode (so Vim handles the cursor and mouse). Single `<Esc>` is passed through to Claude.
 
@@ -135,13 +135,16 @@ let g:claude_models = [
 " Set to 1 to disable all default mappings
 let g:claude_no_default_mappings = 0
 
-" Where new workspaces (git worktrees) are checked out. Empty puts each one
-" beside the main checkout as <repo>-<workspace name>.
-let g:claude_workspace_dir = ''
+" Where rooms (git worktrees) are checked out. Empty means .vim-workspace
+" inside the project; an absolute path keeps them outside it.
+let g:claude_room_dir = ''
 
-" Where workspaces are remembered. Empty means data/workspaces.json inside
-" the plugin directory.
-let g:claude_workspace_store = ''
+" Fetch the default branch before cutting a new room from it.
+let g:claude_room_fetch = 1
+
+" Where rooms are remembered. Empty means data/rooms.json inside the plugin
+" directory.
+let g:claude_room_store = ''
 ```
 
 ## Session panel
@@ -154,29 +157,35 @@ let g:claude_workspace_store = ''
 Claude Sessions           2 waiting
 
 ▾ Needs you (2)
-  ✻ pick a diff base        wt · 2m
-  ✻ rerun the tests?      root · 5m
+  ▾ panel
+    ✻ pick a diff base          2m
+    ✻ icon set [icons]          5m
 ▾ Working (1)
-  ● panel rework          root · 1m
+  ▾ claude-plugin (root)
+    ● panel rework              1m
 ▾ Idle (1)
-  ○ user_interface        root · 2h
+  ▾ claude-plugin (root)
+    ○ user_interface            2h
 ▸ Done (10)
 ```
 
-**By place** — group, then branch — for when the question really is what is happening in that checkout. A session that ran in a plugin-managed workspace gets its own group, one per workspace; a session run straight in the main checkout shares a group with every other such session in the repo, split by branch:
+Inside each group, sessions sit under their room; a sub-room's sessions sit with its room, tagged with its name.
+
+**By place** — project, room, sub-room — for when the question really is what is happening in that room. Every room is listed, with sessions or without, so this view doubles as the room list:
 
 ```
 Claude Sessions           2 waiting
 
 ▾ claude-plugin
-  ▾ main
-    ● panel design           1m
-    ○ doc rewrite            2h
-  ▾ feature/session-registry
-    ○ registry spike         4h
-▾ claude-plugin-hotfix-e947
-  ▾ hotfix/e947
-    ✗ E947 repro             2d
+  ▾ claude-plugin (root) — main
+    ● panel design             1m
+  ▾ panel
+    ✻ pick a diff base         2m
+    ▾ icons
+      ✻ icon set               5m
+    ▾ layout
+  ▾ difftree — feature/git-diff-tree
+    ✗ review pass              2d
 ```
 
 Each view keeps its own folds, so swapping back and forth loses neither.
@@ -195,7 +204,7 @@ Records are evidence, never authority: a dead session can never be listed as ali
 
 `Done` starts folded, draws at most `g:claude_panel_done_rows` rows with a `… N more` for the rest, and hides the sessions nobody named or nobody has touched for `g:claude_panel_stale_days` days. It says how many it is hiding; `I` reveals them.
 
-`/` filters every group by label, workspace or branch. Groups left empty are dropped, folds that hid a match are opened, and the hidden tail is searched too — a row you asked for by name is not a row to hide.
+`/` filters every group by label, room or branch. Groups left empty are dropped, folds that hid a match are opened, and the hidden tail is searched too — a row you asked for by name is not a row to hide.
 
 The panel uses NERDTree's palette — group nodes coloured like directories, session names like files — so the sidebar reads as one thing. Where NERDTree's highlight groups exist they are used directly, so restyling NERDTree restyles the panel. Override `ClaudeSessionProject`, `ClaudeSessionBranch`, `ClaudeSessionName`, `ClaudeSessionActive` and friends to restyle just the panel; a link you set is never overwritten.
 
@@ -270,13 +279,24 @@ One row per **branch**, directly under the project. A worktree holds exactly one
 | `hotfix/e947 (wt-hotfix)` | checked out in a linked worktree of that name |
 | `feature/x (no worktree)` | has commits but no checkout anywhere — committed changes only |
 
+[Rooms](#rooms) are drawn the way they sit on disk instead, after your own branch: the room, its worktree folder, then each sub-room and its folder. A room diffs against what it was cut from, a sub-room against its room:
+
+```
+▾ panel/
+  ▾ claude-plugin/        room/panel vs origin/main
+    ▸ autoload/
+  ▾ icons/
+    ▾ claude-plugin/      room/panel--icons vs room/panel
+      ▸ autoload/
+```
+
 The branch you are actually sitting on comes first. It is what shows *your* uncommitted work: a branch has no committed changes against itself, so on the base branch every other rule would skip your checkout and the panel would come up empty. When a branch is the base, the committed half is compared against its upstream instead, so unpushed commits still show. A row disappears when it has nothing to report.
 
 Branch names are **yellow**, except a branch with no remote-tracking branch — work that exists only on your machine — which is **grey**. In the status glyphs, added is **green** and removed is **red**, taken from your `DiffAdd` and `DiffDelete` colours.
 
 Each branch can diff against a base of its own: press `b` on a branch row to set it, or clear it with an empty answer. The choice persists across Vim restarts in `g:claude_difftree_store`, keyed by repository. `B` sets a session-wide default for branches with no base of their own. A branch on a non-default base shows it in brackets: `[feature/alpha] feature/delta (beta)`.
 
-The branches listed are the union of every worktree, every branch a Claude session has run on (live or closed, taken from the session registry), and the branch you are on now. That is the point: a branch Claude worked on stays visible after you move off it. A branch no longer checked out anywhere is listed under the root workspace beside the branch that *is* checked out there, marked `(no worktree)` and dimmed. It shows **committed changes only** — with no working tree there is nothing to be dirty, so its second indicator slot is always blank.
+The branches listed are the union of every worktree, every branch a Claude session has run on (live or closed, taken from the session registry), and the branch you are on now. That is the point: a branch Claude worked on stays visible after you move off it. A branch no longer checked out anywhere is listed under the project beside the branch that *is* checked out there, marked `(no worktree)` and dimmed. It shows **committed changes only** — with no working tree there is nothing to be dirty, so its second indicator slot is always blank.
 
 Each row carries a bracketed field with **two slots**. The first says what the branch did to the file relative to the base; the second what the working tree has done since:
 
@@ -321,7 +341,7 @@ New sessions prompt for a name, which is passed to the Claude CLI too, so it sho
 
 ## Choosing an agent
 
-Sessions can run Claude or [Pi](https://github.com/earendil-works/pi). Everything else is the same for both: the panel lists them together, names and resumes them the same way, and a workspace can hold one of each.
+Sessions can run Claude or [Pi](https://github.com/earendil-works/pi). Everything else is the same for both: the panel lists them together, names and resumes them the same way, and a room can hold one of each.
 
 ```vim
 " Which CLI a new session runs by default
@@ -333,8 +353,8 @@ let g:claude_providers = {'pi': {'cmd': 'pi --thinking high'}}
 
 | | |
 | --- | --- |
-| `<leader>pn`, `:PiNew [workspace:] [name]` | Start a Pi session, whatever the default is |
-| `<leader>cn`, `:ClaudeNew [workspace:] [name]` | Start one on the default agent |
+| `<leader>pn`, `:PiNew [room:] [name]` | Start a Pi session, whatever the default is |
+| `<leader>cn`, `:ClaudeNew [room:] [name]` | Start one on the default agent |
 | `N` in the panel | Asks which agent, then which workspace, then the name |
 | `n` in the panel | Asks nothing, and runs the agent the cursor is on |
 
@@ -344,35 +364,51 @@ Claude keeps its own settings under the names it always had — `g:claude_cmd`, 
 
 > **Note:** `:ClaudeModel` offers a numbered list only when the agent has one. Pi ships none, so it sends a bare `/model` and lets Pi open its own picker; set `g:claude_providers.pi.models` to get the list here instead.
 
-## Workspaces
+## Rooms
 
-A workspace is a git worktree a session owns: its own checkout of one branch, so two sessions can work on two branches at once without fighting over one directory. A workspace's name is always its branch's, uniquified — the session's own name never renames the workspace, so two sessions on the same branch still agree on where it lives regardless of what either called itself.
-
-Starting a session asks two questions:
+A room is a git worktree that sessions belong to: its own checkout, on its own branch, inside the project. A room can hold sub-rooms — each a worktree of its own, cut from the room — to split the room's work between agents. The project's main checkout is the root room. Work flows sub-room → room → main, but every merge is yours: the plugin never merges or pushes.
 
 ```
-Workspace name (blank for none): <Tab> completes local and remote branches
-Session name:
+project/
+└── .vim-workspace/                 kept out of git status via .git/info/exclude
+    ├── panel/
+    │   ├── project/                room panel, on room/panel
+    │   └── icons/
+    │       └── project/            sub-room icons, on room/panel--icons
+    └── difftree/
+        └── project/
 ```
 
-| Workspace | Name | Result |
-|-----------|------|--------|
-| given | given | A workspace targeting that branch (creating it if it doesn't exist yet), running a session called `<name>` |
-| given | blank | The same workspace, running a session named after the branch |
-| blank | given | No workspace — the session runs in the selected workspace, or where you are |
-| blank | blank | The same, and the session is left unnamed |
+Starting a session asks which room first, then the session's name:
 
-`:ClaudeNew`/`:PiNew` answer both questions without prompting when the text starts with `workspace:` — a word immediately followed by a colon: everything after it is the session name, e.g. `:ClaudeNew feature/deep: Fix the fleet config`. `:ClaudeNew feature/deep:` with nothing after the colon leaves the session named after the workspace, same as leaving `N`'s second prompt blank. Without a leading `word:`, the whole text is still just the session name, spaces and all, exactly as before — `:ClaudeNew fix the bug` keeps naming the session "fix the bug", not touching any workspace.
+```
+Room for the new session (blank keeps *):
+1. * claude-plugin (root) — main
+2.   panel
+3.     icons
+4.   + New room…
+5.   + New sub-room…
+```
 
-The panel's `N` runs exactly these two prompts. Its `n` runs only the second: the new session lands where the cursor already is, so the only thing left to ask is what to call it. "Where the cursor is" means the whole subtree — a branch row, a worktree row and every session under them all mean that checkout. Leave that blank and the session labels itself from its first message; `g:claude_session_prompt_name = 0` skips it too.
+- **An existing room** — the session joins it; nothing is created. A blank answer keeps the selected room.
+- **A new room** asks for a name and a base branch. Blank means the *latest* default branch: it is fetched (`g:claude_room_fetch`) and the room is cut from the remote's copy, not a stale local one. The room's branch has no upstream, so `git pull` in it never pulls main in.
+- **A new sub-room** goes in the selected room (or asks which), and starts from the room's last commit. Uncommitted work in the room is not carried over, and you are told when there is some.
 
-A branch that matches nothing becomes a new branch off `HEAD`; one that exists only on a remote gets a local tracking branch. Names are unique per repository, so a second workspace called `feature-branch` becomes `feature-branch-1`, then `feature-branch-2`, and slashes become dashes (`feature/deep` → `feature-deep`).
+Nothing is created until every question is answered, so CTRL-C anywhere leaves nothing behind. A session left unnamed in a room it just created takes the room's name.
 
-The worktree is created beside the main checkout as `<repo>-<name>`, or under `g:claude_workspace_dir`.
+`:ClaudeNew`/`:PiNew` answer both questions without prompting when the text starts with `room:` — a word immediately followed by a colon. Everything after it is the session name, e.g. `:ClaudeNew panel: Fix the fleet config`. The room is used if it exists and made from the latest default branch if it doesn't; `panel/icons:` does the same for a sub-room of `panel`, and `root:` means the main checkout. `:ClaudeNew panel:` with nothing after the colon names the session after the room. Without a leading `word:` the whole text is still just the session name, spaces and all — `:ClaudeNew fix the bug` names the session "fix the bug" and touches no room.
 
-A branch that already has a checkout is not an error — the session runs in that checkout. It joins the workspace if there is one, adopts the worktree as a workspace if you made it yourself, or just runs in the main checkout when that is where the branch lives. Nothing is created only when the directory is in the way; you are told, and the session runs where you already were. Removing a workspace is left to `git worktree remove`; a worktree that is gone drops out of the list on its own.
+The panel's `N` runs these prompts; its `n` asks only for the name, because the row under the cursor already says which room — a room row, a sub-room row, or any session under them. On a project row it means the root room.
 
-`<leader>cw` (`:ClaudeWorkspaces`) lists the main checkout and every workspace, and re-roots NERDTree onto the one you pick, so the file tree shows that checkout and nothing else. Sessions started without a branch run there. It also runs `:tcd` to that workspace's directory, so the current tab's working directory — and anything that depends on it, like `:Git status` — follows the switch too; other tabs are left alone.
+The diff tree compares a room with what it was cut from and a sub-room with its room, so a sub-room shows its own work and nothing of the room's — see [Git diff tree](#git-diff-tree).
+
+`<leader>cw` (`:ClaudeRooms`; `:ClaudeWorkspaces` still works) lists every room and re-roots NERDTree onto the one you pick. Sessions started without being asked run there. It also runs `:tcd` to that room, so the current tab's working directory — and anything that depends on it, like `:Git status` — follows; other tabs are left alone.
+
+`d` on a room row, in the session panel or the diff tree, removes the room's worktree; `D` forces it past uncommitted changes. The branch is always kept. A room that still has sub-rooms is refused.
+
+> **Watch out:** `git clean -ffdx` in the main checkout deletes every room, uncommitted work included (a single `-f` skips them). Tools that ignore git's ignore rules — `:vimgrep **`, some test runners — see one copy of the project per room; set an absolute `g:claude_room_dir` to keep rooms outside the project.
+
+Existing workspaces become rooms the first time the plugin runs, where they already are — nothing is moved — and the sessions in them follow.
 
 ### Unnamed sessions, and the buried tail
 

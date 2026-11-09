@@ -3,8 +3,9 @@
 " Persists small dictionaries to JSON so they survive a Vim restart. Three of
 " them exist: session naming and grouping metadata (see
 " autoload/claude/session.vim), per-branch diff bases (see
-" autoload/claude/difftree.vim), and the git worktrees a session can be given
-" to work in (see autoload/claude/workspace.vim). Runtime state — buffer
+" autoload/claude/difftree.vim), and the rooms — git worktrees — sessions run
+" in (see autoload/claude/room.vim). A fourth, the workspace store, is only
+" ever read: it is what rooms are migrated from. Runtime state — buffer
 " numbers, jobs, status — is never written here.
 "
 " The *_at() functions take a path and a payload key so the stores share one
@@ -51,8 +52,18 @@ function! claude#store#difftree_path() abort
   return s:plugin_root . '/data/difftree.json'
 endfunction
 
-" Path of the workspace store, following the same rule again
-" (g:claude_workspace_store, else the plugin's data directory).
+" Path of the room store, following the same rule again (g:claude_room_store,
+" else the plugin's data directory).
+function! claude#store#room_path() abort
+  let l:override = get(g:, 'claude_room_store', '')
+  if !empty(l:override)
+    return expand(l:override)
+  endif
+  return s:plugin_root . '/data/rooms.json'
+endfunction
+
+" Path of the workspace store rooms replaced. Read once, to migrate from, and
+" never written (g:claude_workspace_store, else the plugin's data directory).
 function! claude#store#workspace_path() abort
   let l:override = get(g:, 'claude_workspace_store', '')
   if !empty(l:override)
@@ -80,7 +91,7 @@ endfunction
 " Read a store from disk. Always returns a usable dict — a missing file, a
 " corrupt file or a future schema never raises.
 "
-" {key} is the payload key ("sessions", "bases", "workspaces"); {what} names
+" {key} is the payload key ("sessions", "bases", "rooms", "workspaces"); {what} names
 " the store in warnings.
 function! claude#store#load_at(path, key, what) abort
   let s:read_only = v:false

@@ -99,7 +99,7 @@ Execute (a row says where the session lives and how long ago it stirred):
         \ 'created': localtime() - 7200})
   call claude#panel#open()
   let row = filter(claude#panel#_lines(), {_, l -> l =~# 'panel design'})[0]
-  Assert row =~# 'alpha', 'the row should name the workspace: ' . row
+  Assert row =~# 'alpha', 'the row should name where it ran: ' . row
   Assert row =~# '2h$',   'and how old it is: ' . row
   AssertEqual 35, strchars(row), 'the suffix is flush with the panel edge'
 
@@ -112,7 +112,7 @@ Execute (a long label is trimmed rather than pushing the suffix off):
   AssertEqual 35, strchars(row)
   Assert row =~# '…', 'the label should be the part that gives: ' . row
 
-Execute (the place view drops the workspace, which its parent rows already say):
+Execute (under a room row the row drops where it ran, which the room already says):
   call claude#session#_inject({'name': 'panel design', 'status': 'idle',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main',
         \ 'created': localtime() - 7200})
@@ -120,7 +120,7 @@ Execute (the place view drops the workspace, which its parent rows already say):
   call claude#panel#_grouping('place')
   let row = filter(claude#panel#_lines(), {_, l -> l =~# 'panel design'})[0]
   Assert row =~# '2h$',    'the age stays: ' . row
-  Assert row !~# 'alpha ', 'the workspace does not: ' . row
+  Assert row !~# 'alpha ', 'where it ran does not: ' . row
 
 " ── the Done tail ────────────────────────────────────────────────────────────
 

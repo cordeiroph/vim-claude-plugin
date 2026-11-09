@@ -13,7 +13,9 @@
 "                blank and Claude names the conversation itself
 "   snippet      first thing that was asked of the session, from its
 "                transcript — what an unnamed session is labelled with
-"   workspace    id of the workspace (git worktree) the session runs in, or ''
+"   room         id of the room (git worktree) the session runs in: a room id,
+"                'root' for the project's main checkout, or '' outside a
+"                repository. See autoload/claude/room.vim
 "   cwd          working directory the session was started in
 "   project      main repository root (worktrees of one repo share this)
 "   worktree     worktree root
@@ -272,14 +274,16 @@ function! claude#session#project_dir(cwd) abort
   return claude#provider#claude#project_dir(a:cwd)
 endfunction
 
-" The directories a sweep covers: the one Vim is in, plus every workspace of
-" this repository. A session files its conversation under the directory it ran
-" in, so a workspace session's is invisible from the main checkout otherwise.
-" Each provider maps these to wherever it keeps conversations.
+" The directories a sweep covers: the one Vim is in, plus every room and
+" sub-room of this repository. A session files its conversation under the
+" directory it ran in, so a room session's is invisible from the main checkout
+" otherwise. Each provider maps these to wherever it keeps conversations.
 function! s:sweep_cwds() abort
   let l:seen = {getcwd(): 1}
-  for l:ws in claude#workspace#list()
-    let l:seen[l:ws.path] = 1
+  for l:room in claude#room#list()
+    if !empty(l:room.path)
+      let l:seen[l:room.path] = 1
+    endif
   endfor
   return keys(l:seen)
 endfunction
@@ -488,7 +492,7 @@ function! s:adopt_scan(scan, provider, store) abort
   let l:name  = l:named ? get(l:saved, 'name', '') : ''
   let l:rec   = s:make_record(l:id, l:name, -1, l:cwd, l:group,
         \ a:scan.created, 'disk', l:named,
-        \ get(l:saved, 'workspace', ''), a:provider)
+        \ s:saved_room(l:saved), a:provider)
   let l:rec.snippet    = !empty(get(a:scan, 'name', ''))
         \ ? a:scan.name : get(a:scan, 'snippet', '')
   let l:rec.scan_ftime = getftime(a:scan.path)
@@ -518,14 +522,14 @@ function! claude#session#refresh() abort
     let s:sessions[l:id] = s:make_record(l:id, get(l:entry, 'name', l:id), -1,
           \ l:cwd, claude#session#group_of(l:cwd),
           \ get(l:entry, 'created', localtime()), 'disk',
-          \ s:was_named(l:entry), get(l:entry, 'workspace', ''),
+          \ s:was_named(l:entry), s:saved_room(l:entry),
           \ get(l:entry, 'provider', 'claude'))
   endfor
 endfunction
 
 " Whether a stored entry belongs to the project Vim is in.
 "
-" The directory alone is not enough: a session given a workspace ran in its own
+" The directory alone is not enough: a session in a room ran in its own
 " worktree, so matching cwd would lose it the moment Vim starts anywhere else
 " in the repository — which is every time you open it in the main checkout.
 " The project root is what every worktree of one repository shares.
@@ -542,8 +546,32 @@ function! s:belongs_here(entry) abort
   return l:project ==# claude#session#group_of(getcwd()).project
 endfunction
 
+" The room a stored entry names. Entries written before rooms existed call
+" it 'workspace'; a migrated workspace kept its id as a room, so the value
+" carries over unchanged.
+function! s:saved_room(entry) abort
+  return get(a:entry, 'room', get(a:entry, 'workspace', ''))
+endfunction
+
+" The room a record belongs to. Given one, that; otherwise worked out from
+" where it ran — the main checkout is the root room, a room's worktree is that
+" room — so a record from before rooms still lands under the right row.
+function! s:room_for(room, group) abort
+  if !empty(a:room)
+    return a:room
+  endif
+  let l:project = a:group.project
+  if empty(l:project) || l:project[0] ==# '('
+    return ''
+  endif
+  if resolve(a:group.worktree) ==# resolve(l:project)
+    return 'root'
+  endif
+  return claude#room#of_path(a:group.worktree, l:project)
+endfunction
+
 function! s:make_record(id, name, bufnr, cwd, group, created, origin,
-      \ named, workspace, provider) abort
+      \ named, room, provider) abort
   return {
         \ 'id':          a:id,
         \ 'name':        a:name,
@@ -551,7 +579,7 @@ function! s:make_record(id, name, bufnr, cwd, group, created, origin,
         \ 'named':       a:named,
         \ 'snippet':     '',
         \ 'scan_ftime':  0,
-        \ 'workspace':   a:workspace,
+        \ 'room':        s:room_for(a:room, a:group),
         \ 'bufnr':       a:bufnr,
         \ 'cwd':         a:cwd,
         \ 'project':     a:group.project,
@@ -699,69 +727,127 @@ function! claude#session#groups(...) abort
   return l:out
 endfunction
 
-" Sessions folded into Group > Branch. The place view's data source; it does
-" no grouping of its own.
+" Where a record sits in the room hierarchy, as [project, room, sub-room]:
+" the top-level room id ('root' for the main checkout, '' for none) and, for a
+" session in a sub-room, the sub-room's name. Both views group by this.
+function! claude#session#place_of(rec) abort
+  let l:room = get(a:rec, 'room', '')
+  let l:top  = matchstr(l:room, '^[^/]*')
+  let l:sub  = l:room =~# '/' ? matchstr(l:room, '[^/]*$') : ''
+  return [get(a:rec, 'project', ''), l:top, l:sub]
+endfunction
+
+" A row for a room the store does not know: a session names it, but its record
+" is gone. Drawn dimmed, so the sessions in it are still reachable.
+function! s:missing_room(project, id) abort
+  return {
+        \ 'id':      a:id,
+        \ 'name':    matchstr(a:id, '[^/]*$'),
+        \ 'parent':  a:id =~# '/' ? matchstr(a:id, '^[^/]*') : '',
+        \ 'branch':  '',
+        \ 'base':    '',
+        \ 'path':    '',
+        \ 'project': a:project,
+        \ 'created': 0,
+        \ 'legacy':  0,
+        \ 'missing': 1,
+        \ }
+endfunction
+
+function! s:room_node(project, rec) abort
+  return {
+        \ 'id':       a:rec.id,
+        \ 'rec':      a:rec,
+        \ 'path':     a:rec.missing ? '' : a:rec.path,
+        \ 'key':      'r:' . a:project . '|' . a:rec.id,
+        \ 'sessions': [],
+        \ 'subs':     [],
+        \ }
+endfunction
+
+" Sessions folded into Project > Room > Sub-room. The place view's data
+" source; it does no grouping of its own.
 "
-" A session that ran in a plugin-managed workspace gets its own top-level
-" group — one workspace is one branch, so there is nothing a worktree tier
-" would add — labelled with the workspace's directory name (repo-workspace)
-" and a single branch-shaped child named after the branch actually checked
-" out there (the workspace's slugified directory name may differ, e.g. when
-" the branch has a '/' in it). A
-" session with no workspace (run straight in the main checkout) still shares
-" a group with every other such session in the repo, one child per branch
-" that checkout happened to be on when a session started there.
+" Every room of a listed project is included whether or not it has sessions,
+" so the panel doubles as the room list. A project is listed when it has a
+" session, or is the one Vim is in. Sessions that belong to no room — run
+" outside any repository, or in a worktree the plugin does not know — are the
+" project's 'loose' sessions.
 "
 " a:1 — 1 to include the buried tail, as for groups().
 function! claude#session#tree(...) abort
-  let l:all   = a:0 > 0 && a:1
-  let l:tree  = []
-  let l:gidx  = {}
-  for l:rec in (l:all ? claude#session#all() : claude#session#list())
-    if !empty(l:rec.workspace)
-      let l:ws    = claude#workspace#get(l:rec.workspace)
-      let l:path  = !empty(l:ws) ? l:ws.path   : l:rec.worktree
-      let l:sub   = !empty(l:ws) ? l:ws.branch : l:rec.branch
-      let l:gkey  = 'p:ws:' . l:rec.workspace
-      let l:subid = 'ws'
-      let l:bkey  = 'b:ws:' . l:rec.workspace
-      let l:bpath = l:path
-    else
-      let l:path  = l:rec.project
-      let l:sub   = l:rec.branch
-      let l:gkey  = 'p:' . l:rec.project
-      let l:subid = l:rec.branch
-      let l:bkey  = 'b:' . l:rec.project . '|' . l:rec.branch
-      " Usually the same as the project (the main checkout); a foreign
-      " worktree with no workspace of its own (e.g. a pre-workspace record)
-      " still points n at the directory the session actually runs in.
-      let l:bpath = l:rec.worktree
-    endif
+  let l:all  = a:0 > 0 && a:1
+  let l:recs = l:all ? claude#session#all() : claude#session#list()
 
-    if !has_key(l:gidx, l:gkey)
-      let l:gidx[l:gkey] = len(l:tree)
-      call add(l:tree, {
-            \ 'label':    fnamemodify(l:path, ':t'),
-            \ 'path':     l:path,
-            \ 'key':      l:gkey,
-            \ 'branches': [],
-            \ 'index':    {},
-            \ })
+  let l:order = []
+  let l:projs = {}
+  let l:here  = claude#room#project_root()
+  for l:rec in l:recs
+    let l:p = get(l:rec, 'project', '')
+    if !has_key(l:projs, l:p)
+      let l:projs[l:p] = 1
+      call add(l:order, l:p)
     endif
-    let l:group = l:tree[l:gidx[l:gkey]]
+  endfor
+  if !empty(l:here) && !has_key(l:projs, l:here)
+    call add(l:order, l:here)
+  endif
 
-    if !has_key(l:group.index, l:subid)
-      let l:group.index[l:subid] = len(l:group.branches)
-      call add(l:group.branches, {
-            \ 'label':    l:sub,
-            \ 'path':     l:bpath,
-            \ 'key':      l:bkey,
-            \ 'sessions': [],
-            \ })
-    endif
-    call add(l:group.branches[l:group.index[l:subid]].sessions, l:rec)
+  let l:tree = []
+  for l:project in l:order
+    let l:real = !empty(l:project) && l:project[0] !=# '('
+    let l:node = {
+          \ 'label':   l:real ? fnamemodify(l:project, ':t') : l:project,
+          \ 'path':    l:real && isdirectory(l:project) ? l:project : '',
+          \ 'project': l:project,
+          \ 'key':     'p:' . l:project,
+          \ 'rooms':   [],
+          \ 'loose':   [],
+          \ }
+    let l:index = {}
+    for l:room in (l:real ? claude#room#list(l:project) : [])
+      call s:place_room(l:node, l:index, l:project, l:room)
+    endfor
+
+    for l:rec in l:recs
+      if get(l:rec, 'project', '') !=# l:project
+        continue
+      endif
+      let l:id = get(l:rec, 'room', '')
+      if empty(l:id) || !l:real
+        call add(l:node.loose, l:rec)
+        continue
+      endif
+      if !has_key(l:index, l:id)
+        let l:room = l:id ==# 'root'
+              \ ? extend(claude#room#root(l:project), {'path': l:project})
+              \ : s:missing_room(l:project, l:id)
+        call s:place_room(l:node, l:index, l:project, l:room)
+      endif
+      call add(l:index[l:id].sessions, l:rec)
+    endfor
+
+    " The root checkout heads the list, wherever it was first seen.
+    call sort(l:node.rooms, {a, b -> (b.id ==# 'root') - (a.id ==# 'root')})
+    call add(l:tree, l:node)
   endfor
   return l:tree
+endfunction
+
+" File {room} under {node}: a room at the top, a sub-room under its room —
+" which is made up as a missing row when its own record is gone.
+function! s:place_room(node, index, project, room) abort
+  let l:rnode = s:room_node(a:project, a:room)
+  if empty(a:room.parent)
+    call add(a:node.rooms, l:rnode)
+  else
+    if !has_key(a:index, a:room.parent)
+      call s:place_room(a:node, a:index, a:project,
+            \ s:missing_room(a:project, a:room.parent))
+    endif
+    call add(a:index[a:room.parent].subs, l:rnode)
+  endif
+  let a:index[a:room.id] = l:rnode
 endfunction
 
 " ── CLI capabilities ─────────────────────────────────────────────────────────
@@ -788,7 +874,7 @@ function! s:build_argv(id, name, resume, provider) abort
 endfunction
 
 " Start {argv} in the current window, returning its buffer number. {cwd} is
-" the directory the job runs in — a workspace's worktree, or '' for wherever
+" the directory the job runs in — a room's worktree, or '' for wherever
 " Vim already is.
 function! s:term_start(argv, cwd) abort
   if empty(a:cwd) || !isdirectory(a:cwd) || a:cwd ==# getcwd()
@@ -804,41 +890,23 @@ function! s:term_start(argv, cwd) abort
   endtry
 endfunction
 
-" Where a session should be spawned: its workspace when it still has one,
-" else the directory it was started in.
+" Where a session should be spawned: its room when that is still there, else
+" the directory it was started in.
 function! s:spawn_dir(rec) abort
-  let l:id = get(a:rec, 'workspace', '')
-  if empty(l:id)
+  let l:id = get(a:rec, 'room', '')
+  if empty(l:id) || l:id ==# 'root'
     return a:rec.cwd
   endif
-  let l:ws = claude#workspace#get(l:id)
-  if empty(l:ws)
-    call s:warn_once('workspace-gone-' . l:id,
-          \ 'workspace ' . l:id . ' is gone; opening in ' . a:rec.cwd)
+  let l:room = claude#room#get(l:id, get(a:rec, 'project', ''))
+  if empty(l:room) || l:room.missing
+    call s:warn_once('room-gone-' . l:id,
+          \ 'room ' . l:id . ' is gone; opening in ' . a:rec.cwd)
     return a:rec.cwd
   endif
-  return l:ws.path
+  return l:room.path
 endfunction
 
 " ── naming ───────────────────────────────────────────────────────────────────
-
-" Prompt for the workspace to give the session — the branch to target,
-" creating it if it does not exist. Returns [1, name] — an empty name meaning
-" "no workspace" — or [0, ''] when the user pressed CTRL-C.
-"
-" Completion is the diff tree's, so the same local and remote branches are
-" offered here as by :ClaudeDiffBase. A name that matches nothing is still
-" accepted: claude#workspace#create() branches it off HEAD.
-function! s:prompt_branch() abort
-  try
-    let l:answer = input('Workspace name (blank for none): ', '',
-          \ 'customlist,claude#difftree#complete_branch')
-  catch /^Vim:Interrupt$/
-    return [0, '']
-  endtry
-  redraw
-  return [1, trim(l:answer)]
-endfunction
 
 " Prompt for a session name. Returns [1, name] or [0, ''] when cancelled.
 "
@@ -898,7 +966,7 @@ function! s:persist(rec) abort
         \ 'name':      a:rec.name,
         \ 'provider':  claude#provider#of(a:rec),
         \ 'named':     a:rec.named,
-        \ 'workspace': a:rec.workspace,
+        \ 'room':      a:rec.room,
         \ 'cwd':       a:rec.cwd,
         \ 'project':   a:rec.project,
         \ 'worktree':  a:rec.worktree,
@@ -939,40 +1007,33 @@ endfunction
 " create a session without asking anything.
 "
 " opts:
-"   prompt     1 asks for a workspace name and then a session name before
-"              anything is created
+"   prompt     1 asks which room, then a name, before anything is created
 "   ask_name   1 asks for a name only — the panel's n key, which reads the
-"              workspace off the row under the cursor rather than asking
+"              room off the row under the cursor rather than asking
 "   name       session name; '' leaves it unnamed and it labels itself from
 "              its first message instead
-"   branch     workspace name to give the session — the branch to target,
-"              creating it if it does not exist; '' for none
-"   workspace  id of an existing workspace to run in — what the panel's n key
-"              passes. Ignored when a branch is given, which creates one
-"   cwd        directory to run in when there is no workspace to name: a
-"              worktree the plugin did not create, so there is no id for it
+"   room       id of the room to run in — what the panel's n key passes
+"   answer     where to run, already decided, in claude#room#ask()'s shape —
+"              what a `room:` prefix on :ClaudeNew/:PiNew comes to
+"   cwd        directory to run in when there is no room to name; the room
+"              is then worked out from it
 "   provider   which CLI to run: 'claude' (default), or any other registered
 "              provider. Defaults to g:claude_provider
 "   placement  Ex command creating the window to spawn into; '' takes over the
 "              current window. Absent means the configured Claude split
 "
-" With prompting on, or when the branch and name are both given outright
-" (:ClaudeNew/:PiNew's two-or-more-word form), the two answers decide where
-" the session lives:
-"
-"   branch (+ name)  a workspace named after the branch, uniquified — the
-"                     typed name (if any) labels the session, never the
-"                     workspace's directory
-"   name             no workspace; the selected one, or the current directory
-"   neither          the same, and the session goes unnamed
+" A session always has a room when it runs inside a repository: the one asked
+" for, else the one under the cursor, else the selected one (<leader>cw), else
+" the root checkout. A room created by the prompt is only created once every
+" question has been answered, so CTRL-C at any of them leaves nothing behind.
 function! claude#session#spawn(opts) abort
   let l:name     = get(a:opts, 'name', '')
   let l:named    = !empty(l:name)
-  let l:branch   = get(a:opts, 'branch', '')
   let l:provider = get(a:opts, 'provider', claude#provider#default())
+  let l:answer   = get(a:opts, 'answer', {})
 
   if get(a:opts, 'prompt', 0)
-    let [l:ok, l:branch] = s:prompt_branch()
+    let [l:ok, l:answer] = claude#room#ask()
     if !l:ok
       return ''
     endif
@@ -990,33 +1051,32 @@ function! claude#session#spawn(opts) abort
     return ''
   endif
 
-  " A workspace record with an empty id is the main checkout: somewhere to run,
-  " but not a workspace to belong to.
-  let l:ws = {}
-  if !empty(l:branch)
-    " The typed name labels the session, not the workspace: its directory is
-    " always <project>-<branch>, so two sessions on the same branch still
-    " agree on where it lives regardless of what either called itself.
-    let l:ws = claude#workspace#create(l:branch, '')
-  elseif !empty(get(a:opts, 'workspace', ''))
-    " Asked for by id: an existing workspace, so nothing is created and the
-    " session is not named after it — it was not the user's answer to a
-    " question, it was where the cursor happened to be.
-    let l:ws = claude#workspace#get(a:opts.workspace)
-  endif
-  if !empty(l:ws) && !empty(l:branch) && !l:named
-    " No name was typed, so the workspace's — the branch's, uniquified —
-    " becomes the session's too.
-    let l:name  = l:ws.name
-    let l:named = 1
+  let l:room = {}
+  let l:cwd  = get(a:opts, 'cwd', '')
+  if !empty(l:answer)
+    let l:room = claude#room#realise(l:answer)
+    if empty(l:room) && has_key(l:answer, 'new')
+      " Creation failed and said why; starting the session somewhere else
+      " instead would put it in a room nobody chose.
+      return ''
+    endif
+    if has_key(l:answer, 'new') && !l:named
+      " A room named for this session names the session too, as typing a
+      " branch name used to.
+      let l:name  = l:room.name
+      let l:named = 1
+    endif
+  elseif !empty(get(a:opts, 'room', ''))
+    let l:room = claude#room#get(a:opts.room)
+  elseif empty(l:cwd) || !isdirectory(l:cwd)
+    let l:room = claude#room#current()
   endif
 
-  let l:id  = claude#session#uuid()
-  let l:cwd = get(a:opts, 'cwd', '')
-  if !empty(l:ws)
-    let l:cwd = l:ws.path
+  let l:id = claude#session#uuid()
+  if !empty(l:room) && !l:room.missing && isdirectory(l:room.path)
+    let l:cwd = l:room.path
   elseif empty(l:cwd) || !isdirectory(l:cwd)
-    let l:cwd = claude#workspace#cwd()
+    let l:cwd = getcwd()
   endif
   let l:group = claude#session#group_of(l:cwd)
   let l:known = s:known_ids(l:provider, l:cwd)
@@ -1039,8 +1099,7 @@ function! claude#session#spawn(opts) abort
   endtry
 
   let l:rec = s:make_record(l:id, l:name, l:bufnr, l:cwd, l:group,
-        \ localtime(), 'live', l:named, empty(l:ws) ? '' : l:ws.id,
-        \ l:provider)
+        \ localtime(), 'live', l:named, get(l:room, 'id', ''), l:provider)
   let s:sessions[l:id] = l:rec
 
   call claude#apply_buf_options(l:id)
@@ -1277,7 +1336,7 @@ endfunction
 
 " Session ids {provider} already has on disk for {cwd}. Taken before a session
 " is spawned so the one it goes on to write can be told apart; it must be read
-" from the directory that session will actually run in, which for a workspace
+" from the directory that session will actually run in, which for a room
 " session is not the one Vim is in.
 function! s:known_ids(provider, cwd) abort
   return claude#provider#call(a:provider, 'ids', [a:cwd], {})
@@ -1564,7 +1623,7 @@ function! claude#session#_inject(rec) abort
         \ get(a:rec, 'created', localtime()),
         \ get(a:rec, 'origin', 'disk'),
         \ get(a:rec, 'named', 1),
-        \ get(a:rec, 'workspace', ''),
+        \ get(a:rec, 'room', get(a:rec, 'workspace', '')),
         \ get(a:rec, 'provider', 'claude'))
   if has_key(a:rec, 'status')
     let l:full.status = a:rec.status
