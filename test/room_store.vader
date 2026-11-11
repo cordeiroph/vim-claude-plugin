@@ -1,5 +1,6 @@
-" Tests for the room store: where it lives, what it holds, and the one-time
-" migration from the workspace store it replaced.
+" Tests for the project (room) store: where it lives, what it holds, the
+" one-time migration from the workspace store it replaced, and the flattening
+" of sub-rooms written by older builds.
 
 Before:
   call claude#room#_reset()
@@ -51,23 +52,21 @@ Execute (path falls back to data/rooms.json inside the plugin):
 
 " ── round trip ───────────────────────────────────────────────────────────────
 
-Execute (a created room survives a reload of the store):
+Execute (a created project survives a reload of the store):
   let room = claude#room#create('panel', '')
-  call claude#room#create_sub('panel', 'icons')
   call claude#store#_reset()
   call claude#room#_reset()
   let back = claude#room#get('panel')
   AssertEqual room.branch, back.branch
   AssertEqual room.base,   back.base
   AssertEqual room.path,   back.path
-  AssertEqual 'panel', claude#room#get('panel/icons').parent
 
 Execute (rooms are keyed by repository root, and the root is never stored):
   call claude#room#create('panel', '')
   let data = json_decode(join(readfile(g:_path), "\n"))
   AssertEqual 1, data.version
   AssertEqual ['panel'], keys(data.rooms[g:_repo])
-  AssertEqual 'room/panel', data.rooms[g:_repo].panel.branch
+  AssertEqual 'panel', data.rooms[g:_repo].panel.branch
   Assert !has_key(data.rooms[g:_repo].panel, 'missing'),
         \ 'runtime-only fields are not written'
 
@@ -119,22 +118,58 @@ Execute (each workspace becomes a legacy room where it already is):
   AssertEqual '',        room.parent
   AssertEqual '',        room.base, 'it diffs against the default, as before'
   AssertEqual 1,         room.legacy
-  AssertEqual 'feature — feature', claude#room#label(room),
-        \ 'its branch is not room/<name>, so the label says it'
+  AssertEqual 'feature', claude#room#label(room),
+        \ 'its branch is its name, so the label does not repeat it'
   Assert filereadable(g:_path), 'the room store was written'
   AssertEqual before, readfile(g:_wpath),
         \ 'the workspace store is left as it was'
 
-Execute (a legacy room can hold sub-rooms, which go under .vim-workspace):
-  let wt = g:_root . '/repo-feature'
-  call system(g:_git . 'worktree add -q -b feature ' . shellescape(wt))
-  call writefile([json_encode({'version': 1, 'workspaces':
-        \ {g:_repo: {'feature': {'name': 'feature', 'branch': 'feature',
-        \   'path': wt, 'project': g:_repo, 'created': 5}}}})], g:_wpath)
+" ── sub-rooms from older builds ──────────────────────────────────────────────
+
+Execute (a stored sub-room is read as a top-level project, where it already is):
+  let p1 = g:_repo . '/.vim-workspace/panel/repo'
+  let p2 = g:_repo . '/.vim-workspace/panel/icons/repo'
+  call system(g:_git . 'worktree add -q -b room/panel ' . shellescape(p1))
+  call system(g:_git . 'worktree add -q -b room/panel--icons '
+        \ . shellescape(p2))
+  call writefile([json_encode({'version': 1, 'rooms': {g:_repo: {
+        \ 'panel': {'name': 'panel', 'parent': '', 'branch': 'room/panel',
+        \            'base': '', 'path': p1, 'project': g:_repo,
+        \            'created': 1},
+        \ 'panel/icons': {'name': 'icons', 'parent': 'panel',
+        \            'branch': 'room/panel--icons', 'base': 'room/panel',
+        \            'path': p2, 'project': g:_repo, 'created': 2}}}})],
+        \ g:_path)
   call claude#room#_reset()
-  let sub = claude#room#create_sub('feature', 'try')
-  AssertEqual 'feature', sub.base
-  AssertEqual g:_repo . '/.vim-workspace/feature/try/repo', sub.path
+
+  AssertEqual ['root', 'panel', 'panel/icons'],
+        \ map(claude#room#list(), {_, r -> r.id}), 'the id is kept'
+  let sub = claude#room#get('panel/icons')
+  AssertEqual '',            sub.parent, 'no longer anybody''s child'
+  AssertEqual 'panel-icons', sub.name, 'named apart from its former room'
+  AssertEqual p2,            sub.path, 'nothing on disk moved'
+  AssertEqual 'room/panel',  sub.base, 'and it still diffs against its room'
+  AssertEqual [], claude#room#children('panel')
+  AssertEqual 'panel', claude#room#label(claude#room#get('panel')),
+        \ 'an older room/<name> branch is not repeated in the label'
+
+Execute (a former room is deleted on its own, its old sub-room untouched):
+  let p1 = g:_repo . '/.vim-workspace/panel/repo'
+  let p2 = g:_repo . '/.vim-workspace/panel/icons/repo'
+  call system(g:_git . 'worktree add -q -b room/panel ' . shellescape(p1))
+  call system(g:_git . 'worktree add -q -b room/panel--icons '
+        \ . shellescape(p2))
+  call writefile([json_encode({'version': 1, 'rooms': {g:_repo: {
+        \ 'panel': {'name': 'panel', 'branch': 'room/panel', 'path': p1,
+        \            'project': g:_repo, 'created': 1},
+        \ 'panel/icons': {'name': 'icons', 'parent': 'panel',
+        \            'branch': 'room/panel--icons', 'path': p2,
+        \            'project': g:_repo, 'created': 2}}}})], g:_path)
+  call claude#room#_reset()
+  Assert claude#room#remove('panel'), 'no sub-room holds it back any more'
+  Assert !isdirectory(p1)
+  Assert isdirectory(p2), 'the sibling directory is never touched'
+  AssertEqual ['root', 'panel/icons'], map(claude#room#list(), {_, r -> r.id})
 
 Execute (migration happens once: a room store that exists is not rebuilt):
   call claude#room#create('panel', '')

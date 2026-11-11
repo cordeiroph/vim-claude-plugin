@@ -1,29 +1,35 @@
-" ── rooms ────────────────────────────────────────────────────────────────────
+" ── projects ─────────────────────────────────────────────────────────────────
 "
-" A room is a git worktree that sessions belong to: its own checkout, on its
-" own branch, inside the project at .vim-workspace/<room>/<project>/. A room
-" may hold sub-rooms, each a worktree of its own cut from the room's branch,
-" at .vim-workspace/<room>/<sub>/<project>/. The project's main checkout is a
-" room too, with the reserved id 'root': materialised on every list, never
-" stored, its branch read live. See doc/design/rooms.md.
+" A project is a git worktree that sessions belong to: its own checkout, on a
+" branch named after it, inside the repository at
+" .vim-workspace/<project>/<repo>/, and diffed against a baseline branch. The
+" repository's main checkout is a project too, with the reserved id 'root':
+" materialised on every list, never stored, its branch read live. See
+" doc/design/projects.md.
+"
+" Projects were called rooms, and rooms could hold sub-rooms. Sub-rooms are
+" gone: a stored one is read as a top-level project of its own, keeping its id
+" and its directory, so nothing on disk moves. The internal API keeps the
+" claude#room# prefix so sessions and stores written by older builds still
+" resolve.
 "
 " A record is:
-"   id       'root', '<room>' or '<room>/<sub>' — unique per project
-"   name     display name: the last segment of the id
-"   parent   '' for a room, the room's id for a sub-room
+"   id       'root' or '<project>' (a migrated sub-room keeps '<room>/<sub>')
+"   name     display name
+"   parent   always '' — kept so older stores and callers still read
 "   branch   branch checked out in the worktree
-"   base     what the diff tree compares the branch against; '' = the default
+"   base     the baseline: what the project diffs against and merges from;
+"            '' = the repository's default branch
 "   path     absolute worktree directory
 "   project  main repository root, shared by every worktree of one repo
 "   created  unix time
-"   order    creation sequence within the project, which breaks a tie
-"            between two rooms made in the same second
+"   order    creation sequence within the repository, which breaks a tie
+"            between two projects made in the same second
 "   legacy   1 for a migrated workspace living outside .vim-workspace
-"   missing  1 (never stored) for a room whose directory is gone but whose
-"            sub-rooms are still there
+"   missing  always 0 — kept for callers that still test it
 "
-" Records live in their own JSON store keyed by repository root. Which room is
-" *selected* is deliberately not persisted: it is a property of this Vim
+" Records live in their own JSON store keyed by repository root. Which project
+" is *selected* is deliberately not persisted: it is a property of this Vim
 " session, like the diff tree's session-wide base.
 "
 " This module is git and bookkeeping only — no terminal, no panel rendering —
@@ -244,11 +250,19 @@ function! s:migrate(path) abort
   call claude#store#save_at(a:path, {'rooms': l:rooms}, 'room store')
 endfunction
 
+" A sub-room written by an older build is flattened into a project of its own:
+" same id, same directory, named '<room>-<sub>' so it reads apart from its
+" former room.
 function! s:normalise(id, rec) abort
+  let l:name   = get(a:rec, 'name', matchstr(a:id, '[^/]*$'))
+  let l:parent = get(a:rec, 'parent', '')
+  if !empty(l:parent) && l:name !~# '^' . escape(l:parent, '\.*$^~[]') . '-'
+    let l:name = l:parent . '-' . l:name
+  endif
   return {
         \ 'id':      a:id,
-        \ 'name':    get(a:rec, 'name', matchstr(a:id, '[^/]*$')),
-        \ 'parent':  get(a:rec, 'parent', ''),
+        \ 'name':    l:name,
+        \ 'parent':  '',
         \ 'branch':  get(a:rec, 'branch', ''),
         \ 'base':    get(a:rec, 'base', ''),
         \ 'path':    get(a:rec, 'path', ''),
@@ -334,39 +348,23 @@ function! s:cmp(a, b) abort
   return a:a.name ==# a:b.name ? 0 : (a:a.name < a:b.name ? -1 : 1)
 endfunction
 
-" Every room of {root} but the root checkout: each room followed by its
-" sub-rooms, oldest first, so a new room lands at the bottom of the list
-" rather than reshuffling it.
+" Every project of {root} but the root checkout, oldest first, so a new
+" project lands at the bottom of the list rather than reshuffling it.
 "
-" A room removed behind our back (`git worktree remove`, or an rm -rf) leaves
-" a record pointing at nothing, so the list prunes those and writes the
-" survivors back. The one exception is a room whose sub-rooms are still there:
-" it is kept, marked missing, so they still have a parent to be listed under.
+" A project removed behind our back (`git worktree remove`, or an rm -rf)
+" leaves a record pointing at nothing, so the list prunes those and writes the
+" survivors back.
 function! s:rooms(root) abort
   let l:data = s:load()
   let l:mine = get(l:data.rooms, a:root, {})
-  let l:recs = []
-  for l:id in keys(l:mine)
-    if type(l:mine[l:id]) == v:t_dict
-      call add(l:recs, s:normalise(l:id, l:mine[l:id]))
-    endif
-  endfor
-
-  let l:alive = {}
-  for l:rec in l:recs
-    if isdirectory(l:rec.path)
-      let l:alive[l:rec.id] = 1
-    endif
-  endfor
-
   let l:kept  = []
   let l:stale = 0
-  for l:rec in l:recs
-    if has_key(l:alive, l:rec.id)
-      call add(l:kept, l:rec)
-    elseif empty(l:rec.parent) && !empty(filter(copy(l:recs),
-          \ {_, r -> r.parent ==# l:rec.id && has_key(l:alive, r.id)}))
-      let l:rec.missing = 1
+  for l:id in keys(l:mine)
+    if type(l:mine[l:id]) != v:t_dict
+      continue
+    endif
+    let l:rec = s:normalise(l:id, l:mine[l:id])
+    if isdirectory(l:rec.path)
       call add(l:kept, l:rec)
     else
       let l:stale = 1
@@ -381,33 +379,11 @@ function! s:rooms(root) abort
     let l:data.rooms[a:root] = l:keep
     call s:save(l:data)
   endif
-
-  let l:tops = sort(filter(copy(l:kept), {_, r -> empty(r.parent)}),
-        \ function('s:cmp'))
-  let l:ids  = {}
-  for l:top in l:tops
-    let l:ids[l:top.id] = 1
-  endfor
-  " A sub-room whose room record was deleted outright still needs a parent row.
-  for l:sub in l:kept
-    if !empty(l:sub.parent) && !has_key(l:ids, l:sub.parent)
-      let l:ids[l:sub.parent] = 1
-      call add(l:tops, extend(s:normalise(l:sub.parent, {'project': a:root}),
-            \ {'missing': 1}))
-    endif
-  endfor
-
-  let l:out = []
-  for l:top in l:tops
-    call add(l:out, l:top)
-    call extend(l:out, sort(filter(copy(l:kept),
-          \ {_, r -> r.parent ==# l:top.id}), function('s:cmp')))
-  endfor
-  return l:out
+  return sort(l:kept, function('s:cmp'))
 endfunction
 
-" Every room of {project} (default: the one Vim is in): the root checkout
-" first, then each room followed by its sub-rooms.
+" Every project of {repo} (default: the one Vim is in), the root checkout
+" first.
 function! claude#room#list(...) abort
   let l:root = a:0 > 0 && !empty(a:1) ? a:1 : claude#room#project_root()
   if empty(l:root)
@@ -437,13 +413,9 @@ function! claude#room#get(id, ...) abort
   return {}
 endfunction
 
-" A room's sub-rooms.
+" Sub-rooms are gone; kept so older callers get the honest answer.
 function! claude#room#children(id, ...) abort
-  let l:root = a:0 > 0 && !empty(a:1) ? a:1 : claude#room#project_root()
-  if empty(l:root) || empty(a:id) || a:id ==# 'root'
-    return []
-  endif
-  return filter(s:rooms(l:root), {_, r -> r.parent ==# a:id})
+  return []
 endfunction
 
 " The id of the room whose worktree is {path}, or ''.
@@ -485,11 +457,11 @@ function! claude#room#for_session(id) abort
         \ : claude#room#get(get(l:rec, 'room', ''), get(l:rec, 'project', ''))
 endfunction
 
-" How a room is named in the pickers and the panel.
+" How a project is named in the pickers and the panel.
 "
 "   root      claude.vim (root) — main
-"   room      panel, or panel — feature/x when the branch is not room/panel
-"   sub-room  icons
+"   project   panel, or panel — feature/x when the branch is not the one the
+"             project was given (panel, or room/panel for an older one)
 "   gone      panel — (missing)
 function! claude#room#label(rec) abort
   if empty(a:rec)
@@ -502,7 +474,7 @@ function! claude#room#label(rec) abort
   if get(a:rec, 'missing', 0)
     return a:rec.name . ' — (missing)'
   endif
-  if empty(a:rec.parent) && !empty(a:rec.branch)
+  if !empty(a:rec.branch) && a:rec.branch !=# s:branch_for(a:rec.name)
         \ && a:rec.branch !=# 'room/' . a:rec.name
     return a:rec.name . ' — ' . a:rec.branch
   endif
@@ -554,55 +526,51 @@ function! s:base_dir(root) abort
   return a:root . '/' . substitute(l:dir, '/\+$', '', '')
 endfunction
 
-" The worktree directory: <base>/<room>/<project> or <base>/<room>/<sub>/<project>.
-" The worktree sits one level down so a room's sub-rooms are its siblings, not
-" untracked directories inside its checkout.
-function! s:dir_for(root, parent, name) abort
-  return s:base_dir(a:root) . '/'
-        \ . (empty(a:parent) ? a:name : a:parent . '/' . a:name)
-        \ . '/' . fnamemodify(a:root, ':t')
+" The worktree directory: <base>/<project>/<repo>. The worktree sits one level
+" down so the checkout keeps the repository's own name, which is what tools
+" that name things after their directory show.
+function! s:dir_for(root, name) abort
+  return s:base_dir(a:root) . '/' . a:name . '/' . fnamemodify(a:root, ':t')
 endfunction
 
-" room/<room> or room/<room>--<sub>. Not room/<room>/<sub>: git cannot hold
-" both refs/heads/room/a and refs/heads/room/a/b, a ref being a file.
-function! s:branch_for(parent, name) abort
-  return 'room/' . (empty(a:parent) ? a:name : a:parent . '--' . a:name)
+" A project's branch is named after it, behind g:claude_project_branch_prefix
+" when one is set (e.g. 'feature/').
+function! s:branch_for(name) abort
+  return get(g:, 'claude_project_branch_prefix', '') . a:name
 endfunction
 
-function! s:taken(root, parent, name) abort
-  if empty(a:parent) && a:name ==# 'root'
+function! s:taken(root, name) abort
+  if a:name ==# 'root'
     return 1
   endif
-  let l:id = empty(a:parent) ? a:name : a:parent . '/' . a:name
   let l:data = s:load()
-  if has_key(get(l:data.rooms, a:root, {}), l:id)
+  if has_key(get(l:data.rooms, a:root, {}), a:name)
     return 1
   endif
-  let l:dir = s:dir_for(a:root, a:parent, a:name)
+  let l:dir = s:dir_for(a:root, a:name)
   if isdirectory(l:dir) || filereadable(l:dir)
     return 1
   endif
-  " A leftover branch from a removed room is somebody's earlier work: a new
-  " room takes a fresh name rather than silently checking that out.
+  " An existing branch is somebody's work: a new project takes a fresh name
+  " rather than silently checking that out.
   return s:git_ok(a:root, 'show-ref --verify --quiet '
-        \ . shellescape('refs/heads/' . s:branch_for(a:parent, a:name)))
+        \ . shellescape('refs/heads/' . s:branch_for(a:name)))
 endfunction
 
-" {base}, or base-1, base-2, … until no room, directory or branch holds it.
+" {base}, or base-1, base-2, … until no project, directory or branch holds it.
 "
-" a:1 parent room id ('' for a room), a:2 project root.
+" a:1 is ignored (it was the parent room); a:2 the repository root.
 function! claude#room#unique_name(base, ...) abort
-  let l:parent = a:0 > 0 ? a:1 : ''
-  let l:root   = a:0 > 1 && !empty(a:2) ? a:2 : claude#room#project_root()
-  let l:base   = s:slug(a:base)
+  let l:root = a:0 > 1 && !empty(a:2) ? a:2 : claude#room#project_root()
+  let l:base = s:slug(a:base)
   if empty(l:base)
-    let l:base = empty(l:parent) ? 'room' : 'sub'
+    let l:base = 'project'
   endif
-  if !s:taken(l:root, l:parent, l:base)
+  if !s:taken(l:root, l:base)
     return l:base
   endif
   let l:n = 1
-  while s:taken(l:root, l:parent, l:base . '-' . l:n)
+  while s:taken(l:root, l:base . '-' . l:n)
     let l:n += 1
   endwhile
   return l:base . '-' . l:n
@@ -661,7 +629,7 @@ function! s:latest(root) abort
     endif
     if s:ref_exists(a:root, 'refs/remotes/' . l:ref)
       if !empty(l:failed)
-        call s:warn(l:failed . 'cutting the room from ' . l:ref
+        call s:warn(l:failed . 'cutting the project from ' . l:ref
               \ . ' as last fetched')
       endif
       return l:ref
@@ -669,21 +637,21 @@ function! s:latest(root) abort
   endif
   if s:ref_exists(a:root, 'refs/heads/' . l:def.branch)
     if !empty(l:failed)
-      call s:warn(l:failed . 'cutting the room from local ' . l:def.branch)
+      call s:warn(l:failed . 'cutting the project from local ' . l:def.branch)
     endif
     return l:def.branch
   endif
   return ''
 endfunction
 
-" A new room named {name}, cut from {base} — or, when {base} is blank, from the
-" latest default branch. The room diffs against what it was cut from. Returns
-" the record, or {} when nothing was created; every failure is reported to the
-" user and none is fatal to the caller.
+" A new project named {name} with baseline {base}: a branch named after the
+" project, cut from the baseline, checked out in a worktree of its own. A
+" blank {base} means the default branch as the remote has it now (fetched
+" first, see s:latest()) — origin/main on most repositories.
 function! claude#room#create(name, base) abort
   let l:root = claude#room#project_root()
   if empty(l:root)
-    call s:warn('not inside a git repository; no room created')
+    call s:warn('not inside a git repository; no project created')
     return {}
   endif
 
@@ -691,56 +659,36 @@ function! claude#room#create(name, base) abort
   if empty(l:base)
     let l:start = s:latest(l:root)
     if empty(l:start)
-      call s:warn('no default branch found; name a base branch for the room')
+      call s:warn('no default branch found; name a baseline for the project')
       return {}
     endif
   else
     if !s:ref_exists(l:root, l:base)
-      call s:warn('unknown base branch: ' . l:base . '; no room created')
+      call s:warn('unknown baseline: ' . l:base . '; no project created')
       return {}
     endif
     let l:start = l:base
   endif
 
   let l:name = claude#room#unique_name(a:name, '', l:root)
-  return s:add(l:root, '', l:name, l:start)
+  return s:add(l:root, l:name, l:start)
 endfunction
 
-" A new sub-room of room {parent}, named {name}, cut from the room's branch
-" tip and diffing against that branch. Uncommitted work in the room is not
-" carried over: a worktree is a checkout of a commit.
-function! claude#room#create_sub(parent, name) abort
-  let l:root = claude#room#project_root()
-  if empty(l:root)
-    call s:warn('not inside a git repository; no sub-room created')
-    return {}
-  endif
-  let l:room = claude#room#get(a:parent, l:root)
-  if empty(l:room) || get(l:room, 'root', 0) || !empty(l:room.parent)
-        \ || l:room.missing
-    call s:warn('sub-rooms belong to a room, and ' . a:parent
-          \ . ' is not one; no sub-room created')
-    return {}
-  endif
-  let l:name = claude#room#unique_name(a:name, l:room.id, l:root)
-  return s:add(l:root, l:room.id, l:name, l:room.branch)
-endfunction
-
-function! s:add(root, parent, name, start) abort
-  let l:dir    = s:dir_for(a:root, a:parent, a:name)
-  let l:branch = s:branch_for(a:parent, a:name)
+function! s:add(root, name, start) abort
+  let l:dir    = s:dir_for(a:root, a:name)
+  let l:branch = s:branch_for(a:name)
   let l:holder = fnamemodify(l:dir, ':h')
   try
     call mkdir(l:holder, 'p')
   catch
-    call s:warn('cannot create ' . l:holder . '; no room created')
+    call s:warn('cannot create ' . l:holder . '; no project created')
     return {}
   endtry
   " Before the worktree exists, so git status never shows it even once.
   call claude#room#ensure_excluded(a:root)
 
   " --no-track: cut from a remote branch, the new branch would otherwise take
-  " it as its upstream, and a `git pull` in the room would pull main into it.
+  " it as its upstream, and a `git push` would push to the baseline.
   let [l:ok, l:msg] = s:git_run(a:root, 'worktree add --no-track -b '
         \ . shellescape(l:branch) . ' ' . shellescape(l:dir) . ' '
         \ . shellescape(a:start))
@@ -751,9 +699,9 @@ function! s:add(root, parent, name, start) abort
   endif
 
   let l:rec = {
-        \ 'id':      empty(a:parent) ? a:name : a:parent . '/' . a:name,
+        \ 'id':      a:name,
         \ 'name':    a:name,
-        \ 'parent':  a:parent,
+        \ 'parent':  '',
         \ 'branch':  l:branch,
         \ 'base':    a:start,
         \ 'path':    l:dir,
@@ -782,18 +730,11 @@ endfunction
 
 " ── removing ─────────────────────────────────────────────────────────────────
 
-" Remove {id}'s worktree. The branch is kept: removing a room never loses a
-" commit. A room with sub-rooms is refused rather than removed with them, so
-" one key never discards several agents' uncommitted work.
+" Remove {id}'s worktree. The branch is kept: deleting a project never loses
+" a commit.
 function! s:remove(id, force) abort
   let l:rec = claude#room#get(a:id)
   if empty(l:rec) || get(l:rec, 'root', 0)
-    return 0
-  endif
-  let l:subs = claude#room#children(l:rec.id)
-  if !empty(l:subs)
-    call s:warn(l:rec.name . ' has ' . len(l:subs) . ' sub-room'
-          \ . (len(l:subs) == 1 ? '' : 's') . '; remove them first')
     return 0
   endif
 
@@ -809,7 +750,7 @@ function! s:remove(id, force) abort
   call s:drop(l:rec)
 
   " The directory holding the worktree, left empty now. delete(.., 'd') only
-  " ever removes an empty directory, so a sub-room's sibling is never touched.
+  " ever removes an empty directory, so nothing else in it is ever touched.
   if !l:rec.legacy
     call delete(fnamemodify(l:rec.path, ':h'), 'd')
   endif
@@ -829,6 +770,167 @@ endfunction
 " uncommitted changes.
 function! claude#room#force_remove(id) abort
   return s:remove(a:id, 1)
+endfunction
+
+" ── baseline ─────────────────────────────────────────────────────────────────
+
+function! s:remotes(root) abort
+  return s:git(a:root, 'remote')
+endfunction
+
+" [remote, branch] when {ref} names a remote-tracking branch, else ['', ref].
+function! s:split_remote(root, ref) abort
+  for l:remote in s:remotes(a:root)
+    if stridx(a:ref, l:remote . '/') == 0
+      return [l:remote, a:ref[len(l:remote) + 1 :]]
+    endif
+  endfor
+  return ['', a:ref]
+endfunction
+
+" {ref} without its remote: origin/main is main. Only a configured remote of
+" {root} is stripped, so a local feature/x keeps its whole name.
+function! claude#room#branch_name(root, ref) abort
+  return s:split_remote(a:root, a:ref)[1]
+endfunction
+
+" What {rec}'s baseline is as the user set it: the project's own base, the
+" diff tree's setting for the root checkout's branch, else the default branch
+" — origin/main on most repositories.
+function! s:base_setting(rec) abort
+  let l:base = get(a:rec, 'root', 0)
+        \ ? claude#difftree#base_for(a:rec.branch) : get(a:rec, 'base', '')
+  if !empty(l:base)
+    return l:base
+  endif
+  let l:def = claude#room#default_branch(a:rec.project)
+  if empty(l:def.branch)
+    return ''
+  endif
+  return empty(l:def.remote) ? l:def.branch : l:def.remote . '/' . l:def.branch
+endfunction
+
+" The ref {rec} diffs against and merges from. A baseline named by its local
+" branch is read off the remote when the remote has it — the baseline is what
+" the work will land on, and that is the remote's copy — and only falls back
+" to the local branch when there is no remote one. '' when nothing resolves.
+function! claude#room#baseline(rec) abort
+  if empty(a:rec)
+    return ''
+  endif
+  let l:base = s:base_setting(a:rec)
+  if empty(l:base)
+    return ''
+  endif
+  let l:root = a:rec.project
+  let [l:remote, l:_] = s:split_remote(l:root, l:base)
+  if empty(l:remote) && stridx(l:base, 'refs/') != 0
+    let l:def = claude#room#default_branch(l:root)
+    let l:name = empty(l:def.remote) ? 'origin' : l:def.remote
+    if s:ref_exists(l:root, 'refs/remotes/' . l:name . '/' . l:base)
+      return l:name . '/' . l:base
+    endif
+  endif
+  return l:base
+endfunction
+
+" What {rec}'s local work is compared with: the branch's upstream when it has
+" one, else the remote's branch of the same name. '' when the branch was never
+" pushed.
+function! claude#room#upstream(rec) abort
+  if empty(a:rec) || empty(a:rec.branch) || a:rec.branch[0] ==# '('
+    return ''
+  endif
+  let l:dir = isdirectory(a:rec.path) ? a:rec.path : a:rec.project
+  let l:up = s:git(l:dir, 'rev-parse --abbrev-ref '
+        \ . shellescape(a:rec.branch . '@{upstream}'))
+  if !empty(l:up)
+    return l:up[0]
+  endif
+  let l:def  = claude#room#default_branch(a:rec.project)
+  let l:name = empty(l:def.remote) ? 'origin' : l:def.remote
+  return s:ref_exists(l:dir, 'refs/remotes/' . l:name . '/' . a:rec.branch)
+        \ ? l:name . '/' . a:rec.branch : ''
+endfunction
+
+" Make {base} {id}'s baseline. The root checkout keeps its baseline where the
+" diff tree does, as that branch's base; a project keeps it on its record, and
+" any diff-tree override on its branch is cleared so the two never disagree.
+function! claude#room#set_base(id, base, ...) abort
+  let l:root = a:0 > 0 && !empty(a:1) ? a:1 : claude#room#project_root()
+  let l:rec  = claude#room#get(a:id, l:root)
+  if empty(l:rec)
+    call s:warn('unknown project: ' . a:id)
+    return 0
+  endif
+  let l:base = trim(a:base)
+  if !empty(l:base) && !s:ref_exists(l:root, l:base)
+    call s:warn('unknown baseline: ' . l:base . '; baseline unchanged')
+    return 0
+  endif
+  if get(l:rec, 'root', 0)
+    call claude#difftree#set_branch_base(l:rec.branch, l:base)
+    return 1
+  endif
+  let l:rec.base = l:base
+  call s:put(l:rec)
+  if claude#difftree#has_own_base(l:rec.branch)
+    call claude#difftree#set_branch_base(l:rec.branch, '')
+  else
+    call claude#difftree#refresh()
+  endif
+  return 1
+endfunction
+
+" u — bring {id} up to date with its baseline: fetch the baseline from its
+" remote, then merge it into the project's branch. Refused on a worktree with
+" uncommitted changes, which a merge could not be undone from cleanly. A merge
+" that stops on conflicts is left in progress for the user to resolve.
+" Returns 1 when the branch now contains the baseline.
+function! claude#room#update(id, ...) abort
+  let l:root = a:0 > 0 && !empty(a:1) ? a:1 : claude#room#project_root()
+  let l:rec  = claude#room#get(a:id, l:root)
+  if empty(l:rec) || !isdirectory(l:rec.path)
+    call s:warn('unknown project: ' . a:id)
+    return 0
+  endif
+  let l:base = claude#room#baseline(l:rec)
+  if empty(l:base)
+    call s:warn(l:rec.name . ' has no baseline to update from')
+    return 0
+  endif
+  if claude#room#is_dirty(l:rec)
+    call s:warn(l:rec.name . ' has uncommitted changes; commit or stash them'
+          \ . ' before updating from ' . l:base)
+    return 0
+  endif
+
+  let [l:remote, l:branch] = s:split_remote(l:root, l:base)
+  if !empty(l:remote)
+    let [l:ok, l:msg] = s:git_run(l:rec.path, 'fetch --quiet '
+          \ . shellescape(l:remote) . ' ' . shellescape(l:branch), 1)
+    if !l:ok
+      call s:warn('git fetch failed (' . l:msg . '); merging ' . l:base
+            \ . ' as last fetched')
+    endif
+  endif
+
+  let [l:ok, l:msg] = s:git_run(l:rec.path, 'merge --no-edit '
+        \ . shellescape(l:base))
+  call claude#difftree#refresh()
+  if l:ok
+    echomsg 'claude.vim: ' . l:rec.name . ' is up to date with ' . l:base
+    return 1
+  endif
+  let l:conflicts = s:git(l:rec.path, 'diff --name-only --diff-filter=U')
+  if empty(l:conflicts)
+    call s:warn('git merge ' . l:base . ' failed: ' . l:msg)
+  else
+    call s:warn('merging ' . l:base . ' into ' . l:rec.name . ' stopped on '
+          \ . len(l:conflicts) . ' conflicted file'
+          \ . (len(l:conflicts) == 1 ? '' : 's') . '; resolve them and commit')
+  endif
+  return 0
 endfunction
 
 " ── the selected room ────────────────────────────────────────────────────────
@@ -888,20 +990,19 @@ function! s:inputlist(menu) abort
   return [1, l:choice]
 endfunction
 
-" Which room a new session goes in, asked as one menu. Returns [1, answer] or
-" [0, {}] when the user pressed CTRL-C. The answer is one of
+" Which project a new session goes in, asked as one menu. Returns [1, answer]
+" or [0, {}] when the user pressed CTRL-C. The answer is one of
 "
-"   {'room': id}                          an existing room ('' outside git)
-"   {'new': 'room', 'name': n, 'base': b} a room to create
-"   {'new': 'sub', 'parent': id, 'name': n}
+"   {'room': id}                          an existing project ('' outside git)
+"   {'new': 'room', 'name': n, 'base': b} a project to create
 "
-" Nothing is created here: the caller creates the room only once every
+" Nothing is created here: the caller creates the project only once every
 " question has been answered, so cancelling a later one leaves nothing behind.
 "
 " inputlist() rather than a popup, because the questions after this one are
 " input() prompts and a popup would hand the rest of the chain to a callback.
-" Only CTRL-C cancels; a blank answer keeps the selected room, the cheap path
-" for the common case of another session in the same place.
+" Only CTRL-C cancels; a blank answer keeps the selected project, the cheap
+" path for the common case of another session in the same place.
 function! claude#room#ask() abort
   let l:root = claude#room#project_root()
   if empty(l:root)
@@ -911,27 +1012,15 @@ function! claude#room#ask() abort
 
   let l:items   = []
   let l:answers = []
-  let l:has_rooms = 0
   for l:rec in claude#room#list(l:root)
-    if l:rec.missing
-      continue
-    endif
-    if !get(l:rec, 'root', 0) && empty(l:rec.parent)
-      let l:has_rooms = 1
-    endif
     call add(l:items, (l:rec.id ==# l:cur ? '* ' : '  ')
-          \ . (empty(l:rec.parent) ? '' : '  ') . claude#room#label(l:rec)
-          \ . (l:rec.legacy ? '  (legacy)' : ''))
+          \ . claude#room#label(l:rec) . (l:rec.legacy ? '  (legacy)' : ''))
     call add(l:answers, {'room': l:rec.id})
   endfor
-  call add(l:items, '  + New room…')
+  call add(l:items, '  + New project…')
   call add(l:answers, {'new': 'room'})
-  if l:has_rooms
-    call add(l:items, '  + New sub-room…')
-    call add(l:answers, {'new': 'sub'})
-  endif
 
-  let l:menu = ['Room for the new session (blank keeps *):']
+  let l:menu = ['Project for the new session (blank keeps *):']
   let l:i = 1
   for l:item in l:items
     call add(l:menu, printf('%d. %s', l:i, l:item))
@@ -946,78 +1035,48 @@ function! claude#room#ask() abort
   endif
 
   let l:pick = l:answers[l:choice - 1]
-  if has_key(l:pick, 'room')
-    return [1, l:pick]
-  endif
-  return l:pick.new ==# 'room' ? s:ask_room(l:root) : s:ask_sub(l:root, l:cur)
+  return has_key(l:pick, 'room') ? [1, l:pick] : claude#room#ask_new()
 endfunction
 
-function! s:ask_room(root) abort
-  let [l:ok, l:name] = s:input('Room name: ')
+" The two questions a new project needs: its name, and its baseline — with
+" branch completion, blank for the default branch as the remote has it.
+" Returns [1, {'new': 'room', 'name': n, 'base': b}] or [0, {}].
+function! claude#room#ask_new() abort
+  let l:root = claude#room#project_root()
+  if empty(l:root)
+    call s:warn('not inside a git repository')
+    return [0, {}]
+  endif
+  let [l:ok, l:name] = s:input('Project name: ')
   if !l:ok
     return [0, {}]
   endif
   if empty(s:slug(l:name))
-    call s:warn('a room needs a name; nothing created')
+    call s:warn('a project needs a name; nothing created')
     return [0, {}]
   endif
-  let l:def = claude#room#default_branch(a:root).branch
-  let [l:ok, l:base] = s:input('Base branch (blank for latest '
-        \ . (empty(l:def) ? 'default' : l:def) . '): ',
+  let l:def = claude#room#default_branch(l:root)
+  let l:shown = empty(l:def.branch) ? 'default'
+        \ : (empty(l:def.remote) ? '' : l:def.remote . '/') . l:def.branch
+  let [l:ok, l:base] = s:input('Baseline (blank for ' . l:shown . '): ',
         \ 'customlist,claude#difftree#complete_branch')
   if !l:ok
     return [0, {}]
   endif
-  if empty(l:base) && empty(l:def)
-    call s:warn('no default branch found; name a base branch for the room')
+  if empty(l:base) && empty(l:def.branch)
+    call s:warn('no default branch found; name a baseline for the project')
     return [0, {}]
   endif
-  if !empty(l:base) && !s:ref_exists(a:root, l:base)
-    call s:warn('unknown base branch: ' . l:base . '; nothing created')
+  if !empty(l:base) && !s:ref_exists(l:root, l:base)
+    call s:warn('unknown baseline: ' . l:base . '; nothing created')
     return [0, {}]
   endif
   return [1, {'new': 'room', 'name': l:name, 'base': l:base}]
 endfunction
 
-" The parent is the selected room — or the room the selected sub-room is in —
-" and is only asked for when nothing is selected.
-function! s:ask_sub(root, cur) abort
-  let l:parent = matchstr(a:cur, '^[^/]*')
-  if l:parent ==# 'root' || empty(claude#room#get(l:parent, a:root))
-    let l:tops = filter(claude#room#list(a:root), {_, r ->
-          \ !get(r, 'root', 0) && empty(r.parent) && !r.missing})
-    let l:menu = ['Sub-room of which room?']
-    let l:i = 1
-    for l:rec in l:tops
-      call add(l:menu, printf('%d. %s', l:i, claude#room#label(l:rec)))
-      let l:i += 1
-    endfor
-    let [l:ok, l:choice] = s:inputlist(l:menu)
-    if !l:ok || l:choice < 1 || l:choice > len(l:tops)
-      return [0, {}]
-    endif
-    let l:parent = l:tops[l:choice - 1].id
-  endif
-
-  let l:room = claude#room#get(l:parent, a:root)
-  if claude#room#is_dirty(l:room)
-    call s:warn(l:room.branch . ' has uncommitted changes;'
-          \ . ' the sub-room starts from its last commit')
-  endif
-  let [l:ok, l:name] = s:input('Sub-room name (in ' . l:room.name . '): ')
-  if !l:ok
-    return [0, {}]
-  endif
-  if empty(s:slug(l:name))
-    call s:warn('a sub-room needs a name; nothing created')
-    return [0, {}]
-  endif
-  return [1, {'new': 'sub', 'parent': l:parent, 'name': l:name}]
-endfunction
-
-" The room an answer from claude#room#ask() means, creating it when the answer
-" asked for a new one. {} when there is none — outside a repository, or after
-" a creation failure that has already been reported.
+" The project an answer from claude#room#ask() means, creating it when the
+" answer asked for a new one. {} when there is none — outside a repository, or
+" after a creation failure that has already been reported.
 function! claude#room#realise(answer) abort
   if has_key(a:answer, 'room')
     return claude#room#get(a:answer.room)
@@ -1025,38 +1084,25 @@ function! claude#room#realise(answer) abort
   if get(a:answer, 'new', '') ==# 'room'
     return claude#room#create(a:answer.name, get(a:answer, 'base', ''))
   endif
-  if get(a:answer, 'new', '') ==# 'sub'
-    return claude#room#create_sub(a:answer.parent, a:answer.name)
-  endif
   return {}
 endfunction
 
-" The answer a `room:` prefix on :ClaudeNew/:PiNew stands for, in the shape
+" The answer a `project:` prefix on :ClaudeNew/:PiNew stands for, in the shape
 " claude#room#ask() returns, so claude#room#realise() takes it from there.
-" `root` is the root checkout; a room or sub-room that exists is used as it
-" is; `name` that does not is a new room cut from the default branch, and
-" `room/name` a new sub-room of a room that does exist. {} when the text
-" names nothing that can be made — a sub-room of an unknown room, or a name
-" with nothing left after slugging.
+" `root` is the root checkout; a project that exists is used as it is; a name
+" that does not is a new project with the default baseline. {} when the text
+" names nothing that can be made.
 function! claude#room#answer_for(text) abort
   let l:text = trim(a:text)
-  let l:id   = join(map(split(l:text, '/', 1), {_, p -> s:slug(p)}), '/')
+  " A migrated sub-room keeps its '<room>/<sub>' id, and is still found by it.
+  let l:id = join(map(split(l:text, '/', 1), {_, p -> s:slug(p)}), '/')
   if l:id ==# 'root' || !empty(claude#room#get(l:id))
     return {'room': l:id}
   endif
-  let l:parts = split(l:id, '/', 1)
-  if len(l:parts) == 1 && !empty(l:parts[0])
+  if !empty(s:slug(l:text)) && l:text !~# '/'
     return {'new': 'room', 'name': l:text, 'base': ''}
   endif
-  if len(l:parts) == 2 && !empty(l:parts[1])
-    let l:parent = claude#room#get(l:parts[0])
-    if !empty(l:parent) && empty(l:parent.parent) && !get(l:parent, 'root', 0)
-      return {'new': 'sub', 'parent': l:parent.id,
-            \ 'name': split(l:text, '/', 1)[1]}
-    endif
-  endif
-  call s:warn('no room to make from "' . l:text . '"'
-        \ . (len(l:parts) == 2 ? ': ' . l:parts[0] . ' is not a room' : ''))
+  call s:warn('no project to make from "' . l:text . '"')
   return {}
 endfunction
 
@@ -1068,7 +1114,7 @@ function! s:use_popup() abort
   return has('popupwin') && !get(g:, 'claude_no_popup', 0)
 endfunction
 
-" :ClaudeRooms — choose the room to work in. Selecting one re-roots NERDTree
+" :ClaudeProjects — choose the project to work in. Selecting one re-roots NERDTree
 " onto it, so the file tree shows that checkout and nothing else.
 function! claude#room#pick() abort
   let l:root = claude#room#project_root()
@@ -1081,17 +1127,14 @@ function! claude#room#pick() abort
   let l:ids   = []
   let l:items = []
   for l:rec in claude#room#list(l:root)
-    if l:rec.missing
-      continue
-    endif
     call add(l:ids, l:rec.id)
     call add(l:items, (l:rec.id ==# l:cur ? '* ' : '  ')
-          \ . (empty(l:rec.parent) ? '' : '  ') . claude#room#label(l:rec))
+          \ . claude#room#label(l:rec))
   endfor
 
   if s:use_popup()
     call popup_menu(l:items, {
-          \ 'title':    ' Rooms ',
+          \ 'title':    ' Projects ',
           \ 'callback': {_, idx -> s:picked(l:ids, idx)},
           \ 'filter':   'popup_filter_menu',
           \ 'padding':  [0, 1, 0, 1],
@@ -1100,7 +1143,7 @@ function! claude#room#pick() abort
     return
   endif
 
-  let l:menu = ['Room:']
+  let l:menu = ['Project:']
   let l:i = 1
   for l:item in l:items
     call add(l:menu, printf('%d. %s', l:i, l:item))
@@ -1122,7 +1165,7 @@ endfunction
 " the root checkout again.
 function! claude#room#select(id) abort
   if !claude#room#set_current(a:id)
-    call s:warn('unknown room: ' . a:id)
+    call s:warn('unknown project: ' . a:id)
     return
   endif
   let l:rec = claude#room#current()
@@ -1133,7 +1176,7 @@ endfunction
 " window the user was in.
 function! s:reroot(dir) abort
   if !claude#sidebar#nerdtree_available()
-    call s:warn('NERDTree is not installed; room selected anyway')
+    call s:warn('NERDTree is not installed; project selected anyway')
     return
   endif
   if empty(a:dir) || !isdirectory(a:dir)

@@ -11,6 +11,7 @@ Before:
   call mkdir(g:_dir, 'p')
   let g:claude_session_store = g:_dir . '/sessions.json'
   execute 'cd ' . fnameescape(g:_dir)
+  call claude#panel#_grouping('state')
 
 After:
   execute 'cd ' . fnameescape(g:_saved_cwd)
@@ -98,13 +99,13 @@ Execute (the hide rule stands down for a row asked for by name):
   Assert join(claude#panel#_lines(), "\n") =~# 'rework the diff tree',
         \ 'you asked for it by name, so burying it would be perverse'
 
-Execute (the place view filters the same way, pruning what is left empty):
+Execute (the projects view filters the same way, pruning what is left empty):
   call claude#session#_inject({'name': 'diff tree work', 'status': 'active',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
   call claude#session#_inject({'name': 'panel rework', 'status': 'active',
         \ 'project': '/w/beta', 'worktree': '/w/beta', 'branch': 'main'})
   call claude#panel#open()
-  call claude#panel#_grouping('place')
+  call claude#panel#_grouping('projects')
   call claude#panel#_filter('diff')
   let text = join(claude#panel#_lines(), "\n")
   Assert text =~# 'alpha', 'the project holding the match stays: ' . text

@@ -1,4 +1,4 @@
-" Tests for claude#room#create() and the rest of a room's life: where it is
+" Tests for claude#room#create() and the rest of a project's life: where it is
 " cut from, where it lands on disk, removing it and selecting it. Uses a real
 " fixture repository, and a bare clone standing in for its remote; no
 " terminal, no Claude process.
@@ -87,20 +87,30 @@ Execute (the root checkout heads the list, with its branch read live):
 
 " ── creating ─────────────────────────────────────────────────────────────────
 
-Execute (a room is a worktree under .vim-workspace on its own branch):
+Execute (a project is a worktree under .vim-workspace on a branch named after it):
   let room = claude#room#create('panel', '')
   Assert !empty(room), 'a room should have been created'
   AssertEqual 'panel',       room.id
   AssertEqual 'panel',       room.name
   AssertEqual '',            room.parent
-  AssertEqual 'room/panel',  room.branch
+  AssertEqual 'panel',       room.branch
   AssertEqual g:_repo,       room.project
   AssertEqual g:_repo . '/.vim-workspace/panel/repo', room.path
   Assert filereadable(room.path . '/file.txt'),
         \ 'the worktree should hold the project'
-  AssertEqual 'room/panel', Head(room.path)
+  AssertEqual 'panel', Head(room.path)
   AssertEqual 'panel', claude#room#label(room),
-        \ 'a branch that is just room/<name> is not repeated in the label'
+        \ 'a branch that is just the name is not repeated in the label'
+
+Execute (g:claude_project_branch_prefix goes in front of the branch):
+  let g:claude_project_branch_prefix = 'work/'
+  try
+    let room = claude#room#create('panel', '')
+    AssertEqual 'work/panel', room.branch
+    AssertEqual 'panel', claude#room#label(room)
+  finally
+    let g:claude_project_branch_prefix = ''
+  endtry
 
 Execute (with no remote, a room is cut from the local default branch):
   let room = claude#room#create('panel', '')
@@ -129,7 +139,7 @@ Execute (a room is cut from the remote's default branch after a fetch):
 Execute (a room has no upstream, so git pull never pulls main into it):
   call WithRemote()
   let room = claude#room#create('panel', '')
-  AssertEqual '', system(g:_git . 'config --get branch.room/panel.merge')
+  AssertEqual '', system(g:_git . 'config --get branch.panel.merge')
 
 Execute (with fetching turned off, the room is cut from what was last fetched):
   call WithRemote()
@@ -155,7 +165,7 @@ Execute (a named base branch is cut from as it is, and becomes the base):
   let room = claude#room#create('review', 'feature')
   AssertEqual 'feature', room.base
   Assert filereadable(room.path . '/feature.txt')
-  AssertEqual 'room/review', room.branch, 'the room still has its own branch'
+  AssertEqual 'review', room.branch, 'the project still has its own branch'
 
 Execute (an unknown base branch creates nothing):
   AssertEqual {}, claude#room#create('panel', 'no-such-branch')
@@ -178,9 +188,10 @@ Execute (a taken name gains a number, and keeps counting):
   AssertEqual ['root', 'panel', 'panel-1'],
         \ map(claude#room#list(), {_, r -> r.id}), 'oldest first, root ahead'
 
-Execute (a leftover branch from an earlier room is not taken over):
-  call system(g:_git . 'branch room/old')
+Execute (an existing branch is not taken over):
+  call system(g:_git . 'branch old')
   AssertEqual 'old-1', claude#room#unique_name('old')
+  AssertEqual 'feature-1', claude#room#unique_name('feature')
 
 Execute (root is reserved):
   AssertEqual 'root-1', claude#room#unique_name('root')
@@ -188,9 +199,8 @@ Execute (root is reserved):
 Execute (names become one directory- and ref-safe segment):
   AssertEqual 'topic-deep', claude#room#unique_name('topic/deep')
   AssertEqual 'two-words',  claude#room#unique_name('two words')
-  AssertEqual 'a-b',        claude#room#unique_name('a--b'),
-        \ 'a double dash is what joins a room to a sub-room in a branch name'
-  AssertEqual 'room',       claude#room#unique_name('///')
+  AssertEqual 'a-b',        claude#room#unique_name('a--b')
+  AssertEqual 'project',    claude#room#unique_name('///')
 
 " ── where rooms live ─────────────────────────────────────────────────────────
 
@@ -216,8 +226,8 @@ Execute (removing a room drops its worktree and its directory, not its branch):
   Assert !isdirectory(g:_repo . '/.vim-workspace/panel'),
         \ 'and the empty directory that held it'
   AssertEqual {}, claude#room#get('panel')
-  AssertEqual 'room/panel', systemlist(g:_git
-        \ . "for-each-ref --format='%(refname:short)' refs/heads/room")[0],
+  AssertEqual ['panel'], systemlist(g:_git
+        \ . "for-each-ref --format='%(refname:short)' refs/heads/panel"),
         \ 'the branch, and every commit on it, is kept'
 
 Execute (removing an unknown room, or the root checkout, does nothing):

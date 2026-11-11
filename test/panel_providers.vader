@@ -114,10 +114,11 @@ Execute (n on a row that names no session uses the configured default):
 
 " ── asking ───────────────────────────────────────────────────────────────────
 
-Execute (N is the key that asks, n the one that does not):
+Execute (n starts a session, N a project):
+  " Which agent n asks for off a session row, when more than one is
+  " installed, is an inputlist() reached through a mapping, which feedkeys()
+  " cannot answer; with the prompts off it is the default, as above.
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
-  Assert maparg('N', 'n', 0, 1).rhs =~# 'new_asking',
-        \ 'N should be the deliberate one'
-  Assert maparg('n', 'n', 0, 1).rhs =~# 'new()',
-        \ 'n should start one without asking which agent'
+  Assert maparg('n', 'n', 0, 1).rhs =~# 'new()', 'n starts a session'
+  Assert maparg('N', 'n', 0, 1).rhs =~# 'new_project()', 'N makes a project'

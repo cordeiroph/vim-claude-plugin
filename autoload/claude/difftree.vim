@@ -88,8 +88,8 @@ endfunction
 "
 "   its own override (:ClaudeDiffBase)  ->  its room's  ->  the default above
 "
-" A room diffs against what it was cut from and a sub-room against its room,
-" so the room's base is looked up here rather than written as an override:
+" A project diffs against its baseline — what it was cut from, unless b moved
+" it — so the project's base is looked up here rather than written as an override:
 " clearing an override falls back to the room's base, not to main.
 function! claude#difftree#base_for(branch) abort
   let l:own = get(s:branch_bases(), a:branch, '')
@@ -365,13 +365,22 @@ function! s:files_for(src) abort
   " committed changes.
   let l:dir = a:src.has_worktree ? a:src.worktree : s:repo_root()
   let l:rev = a:src.has_worktree ? 'HEAD' : a:src.branch
-  let l:against = s:compare_against(a:src)
+  let l:list = s:collect(l:dir, l:rev, s:compare_against(a:src),
+        \ a:src.has_worktree, a:src)
+  let s:cache[l:key] = l:list
+  return l:list
+endfunction
 
+" Every file that differs in {dir}: committed on {rev} since it left
+" {against} ('' skips that half), and — when {live} — what the working tree
+" has changed on top, untracked files included. {src} supplies the worktree
+" and branch every record carries.
+function! s:collect(dir, rev, against, live, src) abort
   let l:files = {}
 
-  if !empty(l:against)
-    for l:line in s:git(l:dir, 'diff --name-status '
-          \ . shellescape(l:against) . '...' . shellescape(l:rev))
+  if !empty(a:against)
+    for l:line in s:git(a:dir, 'diff --name-status '
+          \ . shellescape(a:against) . '...' . shellescape(a:rev))
       let [l:st, l:path] = s:parse_status(l:line)
       if empty(l:path)
         continue
@@ -382,8 +391,8 @@ function! s:files_for(src) abort
     endfor
   endif
 
-  if a:src.has_worktree
-    for l:line in s:git(l:dir, 'diff --name-status HEAD')
+  if a:live
+    for l:line in s:git(a:dir, 'diff --name-status HEAD')
       let [l:st, l:path] = s:parse_status(l:line)
       if empty(l:path)
         continue
@@ -394,7 +403,7 @@ function! s:files_for(src) abort
     endfor
 
     if get(g:, 'claude_difftree_show_untracked', 1)
-      for l:path in s:git(l:dir, 'ls-files --others --exclude-standard')
+      for l:path in s:git(a:dir, 'ls-files --others --exclude-standard')
         if empty(l:path)
           continue
         endif
@@ -407,8 +416,49 @@ function! s:files_for(src) abort
 
   let l:list = values(l:files)
   call sort(l:list, {a, b -> a.path ==# b.path ? 0 : (a.path < b.path ? -1 : 1)})
-  let s:cache[l:key] = l:list
   return l:list
+endfunction
+
+" ── for the projects panel ───────────────────────────────────────────────────
+"
+" The panel draws a project's diffs inline with this module's engine, so a
+" file looks and opens the same in both places. Results share the cache, and
+" so are dropped by the same refreshes.
+
+" Every changed file in the worktree {dir}: committed since it left {against}
+" ('' for none), plus uncommitted and untracked work. Records carry {dir} as
+" their worktree, so claude#difftree#open_file() opens them.
+function! claude#difftree#changes(dir, against) abort
+  let l:key = 'x|' . a:dir . '|' . a:against
+  if !has_key(s:cache, l:key)
+    let s:cache[l:key] = isdirectory(a:dir)
+          \ ? s:collect(a:dir, 'HEAD', a:against, 1,
+          \             {'worktree': a:dir, 'branch': ''})
+          \ : []
+  endif
+  return s:cache[l:key]
+endfunction
+
+" {files} folded into the directory tree the diff tree draws, unfiltered:
+" {'name', 'dirs': [...], 'files': [records]}.
+function! claude#difftree#dir_tree(files) abort
+  let l:saved  = s:filter
+  let s:filter = ''
+  try
+    return s:build_dirs(a:files)
+  finally
+    let s:filter = l:saved
+  endtry
+endfunction
+
+" The bracketed indicator field a file row starts with.
+function! claude#difftree#field(rec) abort
+  return s:field(a:rec)
+endfunction
+
+" Whether {branch} has a base of its own set in the diff tree.
+function! claude#difftree#has_own_base(branch) abort
+  return !empty(get(s:branch_bases(), a:branch, ''))
 endfunction
 
 " 'committed', 'uncommitted' or 'both'.
@@ -905,7 +955,7 @@ function! s:build() abort
           \ ' t tab     R refresh  b base',
           \ ' / filter  <Esc> clear filter',
           \ ' <Space> fold   q hide   ? help',
-          \ ' d remove room  D force-remove room',
+          \ ' d delete project  D force-delete',
           \ ]
       call s:add(l:lines, l:nodes, l:h, s:node('help', '', '', l:h, ''))
     endfor
@@ -1149,17 +1199,20 @@ function! claude#difftree#close() abort
 endfunction
 
 " Re-run git and rebuild. Safe to call when the panel is closed.
+" The projects panel draws from the same cache, so it is redrawn too.
 function! claude#difftree#refresh() abort
   call s:invalidate()
   if claude#difftree#is_open()
     call s:render()
   endif
+  call claude#panel#refresh()
 endfunction
 
 " BufWritePost hook: a save is the one event that reliably changes the dirty
 " set, and it is cheap enough to act on because it is rare.
 function! claude#difftree#_on_write() abort
-  if get(g:, 'claude_difftree_auto_refresh', 1) && claude#difftree#is_open()
+  if get(g:, 'claude_difftree_auto_refresh', 1)
+        \ && (claude#difftree#is_open() || claude#panel#is_open())
     call claude#difftree#refresh()
   endif
 endfunction
@@ -1258,10 +1311,9 @@ function! s:prompt_default_base() abort
   endif
 endfunction
 
-" d/D: remove the room on the row under the cursor — a room row, or the
+" d/D: delete the project on the row under the cursor — a project row, or the
 " worktree folder row under it. Silently does nothing on the root checkout, a
-" branch with no worktree, or a worktree the plugin did not make. A room with
-" sub-rooms is refused before anything is asked.
+" branch with no worktree, or a worktree the plugin did not make.
 function! s:remove_worktree(force) abort
   let l:node = s:current()
   if empty(l:node) || index(['branch', 'room'], l:node.kind) < 0
@@ -1277,16 +1329,7 @@ function! s:remove_worktree(force) abort
     return
   endif
   let l:rec  = claude#room#get(l:id, l:proj)
-  let l:subs = claude#room#children(l:id, l:proj)
-  if !empty(l:subs)
-    echohl WarningMsg
-    echomsg 'claude.vim: ' . l:rec.name . ' has ' . len(l:subs) . ' sub-room'
-          \ . (len(l:subs) == 1 ? '' : 's') . '; remove them first'
-    echohl None
-    return
-  endif
-
-  let l:what = 'room "' . l:rec.name . '" (' . l:rec.branch . ' is kept)'
+  let l:what = 'project "' . l:rec.name . '" (' . l:rec.branch . ' is kept)'
   if a:force
     let l:msg = 'Force-remove ' . l:what
           \ . '? Uncommitted changes will be lost.'

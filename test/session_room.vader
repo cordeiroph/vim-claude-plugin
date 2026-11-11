@@ -1,9 +1,9 @@
-" End-to-end tests for the room/name prompts and the room a session ends up
-" running in. Real git worktrees, real terminal jobs, prompts answered with
-" feedkeys(); the CLI itself is stood in for.
+" End-to-end tests for the project/name prompts and the project a session
+" ends up running in. Real git worktrees, real terminal jobs, prompts answered
+" with feedkeys(); the CLI itself is stood in for.
 "
-" The room menu lists the root checkout, then each room and its sub-rooms,
-" then "+ New room…" and, once there is a room, "+ New sub-room…".
+" The project menu lists the root checkout, then each project, then
+" "+ New project…".
 
 Before:
   call claude#session#_reset()
@@ -71,7 +71,7 @@ Execute (a new room: the worktree is made and the session runs in it):
   AssertEqual 'panel', rec.room
   AssertEqual 'panel', rec.name, 'an unnamed session in a new room takes its name'
   AssertEqual g:_repo . '/.vim-workspace/panel/repo', rec.cwd
-  AssertEqual 'room/panel', rec.branch
+  AssertEqual 'panel', rec.branch, 'a branch named after the project'
   AssertEqual g:_repo, rec.project, 'grouped under the main repo'
   AssertEqual 'run', job_status(term_getjob(rec.bufnr))
 
@@ -113,17 +113,17 @@ Execute (picking an existing room joins it: nothing is created):
   AssertEqual room.path, rec.cwd
   AssertEqual 2, len(claude#room#list()), 'still just the root and panel'
 
-Execute (a new sub-room of the selected room):
+Execute (a new project is the last entry, after every existing one):
   call claude#room#create('panel', '')
   call claude#room#set_current('panel')
-  " root, panel, + New room, + New sub-room
-  call feedkeys("4\<CR>icons\<CR>\<CR>", 't')
+  " root, panel, + New project — there is no sub-room entry any more
+  call feedkeys("3\<CR>icons\<CR>\<CR>\<CR>", 't')
   let id = claude#session#new('', '')
   let rec = claude#session#get(id)
-  AssertEqual 'panel/icons',       rec.room
-  AssertEqual 'icons',             rec.name
-  AssertEqual 'room/panel--icons', rec.branch
-  AssertEqual g:_repo . '/.vim-workspace/panel/icons/repo', rec.cwd
+  AssertEqual 'icons', rec.room
+  AssertEqual 'icons', rec.name
+  AssertEqual 'icons', rec.branch
+  AssertEqual g:_repo . '/.vim-workspace/icons/repo', rec.cwd
 
 Execute (blank answers: the root checkout, unnamed, hidden once finished):
   call feedkeys("\<CR>\<CR>", 't')
@@ -188,7 +188,7 @@ Execute (a name passed as an argument skips the questions):
   AssertEqual 'from the command line', claude#session#get(id).name
   AssertEqual 'root', claude#session#get(id).room
 
-" ── :ClaudeNew/:PiNew's `room:` prefix ────────────────────────────────────────
+" ── :ClaudeNew/:PiNew's `project:` prefix ─────────────────────────────────────
 
 Execute (a multi-word name with no colon still just names the session):
   " :ClaudeNew fix the bug, unquoted, must keep meaning "name the session
@@ -205,8 +205,8 @@ Execute (a `room:` prefix makes the room and names the session):
         \ {_, r -> r.name ==# 'Fix the fleet config'})
   AssertEqual 1, len(recs)
   let room = claude#room#get(recs[0].room)
-  AssertEqual 'panel',      room.id
-  AssertEqual 'room/panel', room.branch
+  AssertEqual 'panel', room.id
+  AssertEqual 'panel', room.branch
   AssertEqual room.path, recs[0].cwd
 
 Execute (`room:` with nothing after names the session after the room):
@@ -222,19 +222,12 @@ Execute (a `room:` prefix naming an existing room joins it):
   AssertEqual 'panel', recs[0].room
   AssertEqual ['root', 'panel'], map(claude#room#list(), {_, r -> r.id})
 
-Execute (`room/sub:` makes a sub-room of an existing room):
-  call claude#room#create('panel', '')
-  call claude#new('panel/icons: draw them')
-  let recs = filter(claude#session#all(), {_, r -> r.name ==# 'draw them'})
-  AssertEqual 'panel/icons', recs[0].room
-  AssertEqual 'room/panel--icons', claude#room#get('panel/icons').branch
-
 Execute (`root:` runs in the root checkout):
   call claude#new('root: at home')
   let recs = filter(claude#session#all(), {_, r -> r.name ==# 'at home'})
   AssertEqual 'root', recs[0].room
 
-Execute (a sub-room of an unknown room starts nothing):
+Execute (a slashed name that is no project starts nothing):
   call claude#new('nope/icons: lost')
   AssertEqual [], filter(claude#session#all(), {_, r -> r.name ==# 'lost'})
   AssertEqual ['root'], map(claude#room#list(), {_, r -> r.id})
@@ -342,14 +335,18 @@ Execute (helper):
     return {}
   endfunction
 
-  function! PressN(pattern) abort
+  " a:1 — rows to move down from the match, to press n inside a project.
+  function! PressN(pattern, ...) abort
     call claude#panel#open()
-    call claude#panel#_grouping('place')
+    call claude#panel#_grouping('projects')
     call win_gotoid(bufwinid(claude#panel#bufnr()))
     call cursor(1, 1)
     if !empty(a:pattern)
       call search(a:pattern, 'W')
       Assert getline('.') =~# a:pattern, 'expected the row: ' . getline('.')
+    endif
+    if a:0 > 0
+      call cursor(line('.') + a:1, 1)
     endif
     let before = LiveIds()
     let g:claude_session_prompt_name = 0
@@ -358,19 +355,20 @@ Execute (helper):
     return Newcomer(before)
   endfunction
 
-Execute (n on a room row starts a session in that room):
+Execute (n on a project row starts a session in that project):
   call claude#room#create('panel', '')
   let other = claude#room#create('other', '')
-  let new = PressN('^  ▾ other$')
+  let new = PressN('^▾ other \[')
   AssertEqual 'other',    new.room
   AssertEqual other.path, new.cwd
 
-Execute (n on a sub-room row starts a session in the sub-room):
+Execute (n on any row inside a project starts a session there):
   call claude#room#create('panel', '')
-  let sub = claude#room#create_sub('panel', 'icons')
-  let new = PressN('^    ▾ icons$')
-  AssertEqual 'panel/icons', new.room
-  AssertEqual sub.path,      new.cwd
+  let other = claude#room#create('other', '')
+  " The project row, then main Diff, Local Diff, Files.
+  let new = PressN('^▾ other \[', 3)
+  AssertEqual 'other',    new.room
+  AssertEqual other.path, new.cwd
 
 Execute (n on a session row starts a session beside it):
   let room = claude#room#create('panel', '')
@@ -379,14 +377,14 @@ Execute (n on a session row starts a session beside it):
   let new = PressN('first one')
   AssertEqual 'panel', new.room
 
-Execute (n on the project row starts a session in the root checkout):
+Execute (n on the root checkout's row starts a session there):
   call claude#room#create('panel', '')
   call claude#room#set_current('panel')
-  let new = PressN('^▾ repo$')
+  let new = PressN('^▾ repo (root) \[')
   AssertEqual 'root',  new.room
-  AssertEqual g:_repo, new.cwd, 'whatever room is selected'
+  AssertEqual g:_repo, new.cwd, 'whatever project is selected'
 
-Execute (n on a room row in the state view starts a session there):
+Execute (n on a project row in the state view starts a session there):
   call claude#room#create('panel', '')
   call claude#session#spawn({'room': 'panel', 'name': 'busy',
         \ 'placement': 'new'})
@@ -402,26 +400,22 @@ Execute (n on a room row in the state view starts a session there):
   AssertEqual 'panel', Newcomer(before).room
 
 " confirm() cannot be answered from a test, so the removal itself is covered
-" by test/room_create.vader; these are the cases d settles without asking.
-Execute (d on the root checkout's row does nothing):
+" by test/room_create.vader; these are the cases D settles without asking.
+Execute (D on the root checkout's row deletes nothing):
   call claude#room#create('panel', '')
   call claude#panel#open()
-  call claude#panel#_grouping('place')
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   call cursor(1, 1)
-  call search('^  ▾ repo (root)', 'W')
-  normal d
+  call search('^▾ repo (root)', 'W')
+  silent! normal D
   Assert isdirectory(g:_repo)
   AssertEqual ['root', 'panel'], map(claude#room#list(), {_, r -> r.id})
 
-Execute (d on a room with sub-rooms is refused):
+Execute (D outside any project deletes nothing):
   let room = claude#room#create('panel', '')
-  call claude#room#create_sub('panel', 'icons')
   call claude#panel#open()
-  call claude#panel#_grouping('place')
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   call cursor(1, 1)
-  call search('^  ▾ panel$', 'W')
-  " Refused before anything is asked, so there is no confirmation to answer.
-  normal d
-  Assert isdirectory(room.path), 'the room is kept'
+  silent! normal D
+  Assert isdirectory(room.path), 'the project is kept'
+  AssertEqual ['root', 'panel'], map(claude#room#list(), {_, r -> r.id})

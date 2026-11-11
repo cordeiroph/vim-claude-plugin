@@ -20,7 +20,7 @@ Execute (<leader>pn starts a session on Pi, not on the default agent):
 Execute (the rest of the default set is still mapped):
   for [key, cmd] in [['\ct', ':ClaudeToggle<CR>'], ['\cx', ':ClaudeClose<CR>'],
         \ ['\cf', ':ClaudeFocus<CR>'], ['\cs', ':ClaudeSessions<CR>'],
-        \ ['\cd', ':ClaudeDiff<CR>'], ['\cw', ':ClaudeRooms<CR>'],
+        \ ['\cd', ':ClaudeDiff<CR>'], ['\cw', ':ClaudeProjects<CR>'],
         \ ['\cm', ':ClaudeModel<CR>'], ['\cr', ':ClaudeResume<CR>'],
         \ ['\ci', ':ClaudeInput<CR>']]
     AssertEqual cmd, maparg(key, 'n'), key . ' should be mapped'

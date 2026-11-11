@@ -1,0 +1,268 @@
+" Tests for a project's baseline — what it diffs against, how b moves it and
+" how u merges it in — for its upstream, which Local Diff compares with, and
+" for claude#room#ask(), the question a new session starts with. Real fixture
+" repository and a bare clone standing in for its remote; no terminal, no
+" Claude process.
+
+Before:
+  call claude#room#_reset()
+  call claude#store#_reset()
+  call claude#difftree#_reset()
+  let g:_saved_cwd     = getcwd()
+  let g:_saved_store   = get(g:, 'claude_room_store', '')
+  let g:_saved_wstore  = get(g:, 'claude_workspace_store', '')
+  let g:_saved_dir     = get(g:, 'claude_room_dir', '')
+  let g:_saved_dtstore = get(g:, 'claude_difftree_store', '')
+  let g:_saved_base    = get(g:, 'claude_difftree_base', '')
+
+  let g:_root = tempname()
+  call mkdir(g:_root, 'p')
+  let g:_root = resolve(g:_root)
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo, 'p')
+  let g:_git  = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_git . 'init -q -b main')
+  call system(g:_git . 'config user.email t@t')
+  call system(g:_git . 'config user.name test')
+  call writefile(['hello'], g:_repo . '/file.txt')
+  call system(g:_git . 'add -A')
+  call system(g:_git . 'commit -qm first')
+
+  let g:claude_room_store      = g:_root . '/rooms.json'
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  let g:claude_room_dir        = ''
+  let g:claude_difftree_store  = g:_root . '/bases.json'
+  let g:claude_difftree_base   = ''
+  execute 'cd ' . fnameescape(g:_repo)
+
+  function! Commit(dir, file) abort
+    call writefile([a:file], a:dir . '/' . a:file)
+    call system('git -C ' . shellescape(a:dir) . ' add -A')
+    call system('git -C ' . shellescape(a:dir) . ' commit -qm ' . a:file)
+  endfunction
+
+  " A remote the fixture tracks, its main pushed and its HEAD set: what a
+  " clone from GitHub looks like.
+  function! WithRemote() abort
+    let remote = g:_root . '/remote.git'
+    call system('git clone -q --bare ' . shellescape(g:_repo) . ' '
+          \ . shellescape(remote))
+    call system(g:_git . 'remote add origin ' . shellescape(remote))
+    call system(g:_git . 'fetch -q origin')
+    call system(g:_git . 'remote set-head origin main')
+    return remote
+  endfunction
+
+  " A commit on the remote's main the fixture has not fetched yet.
+  function! PushUpstream(file) abort
+    let other = g:_root . '/other'
+    if !isdirectory(other)
+      call system('git clone -q ' . shellescape(g:_root . '/remote.git') . ' '
+            \ . shellescape(other))
+      call system('git -C ' . shellescape(other) . ' config user.email t@t')
+      call system('git -C ' . shellescape(other) . ' config user.name test')
+    endif
+    call Commit(other, a:file)
+    call system('git -C ' . shellescape(other) . ' push -q origin main')
+  endfunction
+
+  function! Head(dir) abort
+    return systemlist('git -C ' . shellescape(a:dir)
+          \ . ' rev-parse --abbrev-ref HEAD')[0]
+  endfunction
+
+  function! Ids() abort
+    return map(claude#room#list(), {_, r -> r.id})
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_saved_cwd)
+  let g:claude_room_store      = g:_saved_store
+  let g:claude_workspace_store = g:_saved_wstore
+  let g:claude_room_dir        = g:_saved_dir
+  let g:claude_difftree_store  = g:_saved_dtstore
+  let g:claude_difftree_base   = g:_saved_base
+  call claude#room#_reset()
+  call claude#store#_reset()
+  call claude#difftree#_reset()
+  call delete(g:_root, 'rf')
+
+" ── the baseline ─────────────────────────────────────────────────────────────
+
+Execute (a new project's baseline is what it was cut from):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  AssertEqual 'origin/main', room.base
+  AssertEqual 'origin/main', claude#room#baseline(room)
+
+Execute (a baseline named by its local branch is read off the remote):
+  call WithRemote()
+  let room = claude#room#create('panel', 'main')
+  AssertEqual 'main',        room.base
+  AssertEqual 'origin/main', claude#room#baseline(room),
+        \ 'the remote copy is what the work lands on'
+
+Execute (without a remote, the local branch is the baseline):
+  let room = claude#room#create('panel', '')
+  AssertEqual 'main', claude#room#baseline(room)
+
+Execute (the root checkout's baseline is the default branch):
+  call WithRemote()
+  AssertEqual 'origin/main', claude#room#baseline(claude#room#root())
+
+Execute (b moves a project's baseline, and blank goes back to the default):
+  call WithRemote()
+  call system(g:_git . 'branch feature')
+  let room = claude#room#create('panel', '')
+  Assert claude#room#set_base('panel', 'feature')
+  AssertEqual 'feature', claude#room#get('panel').base
+  AssertEqual 'feature', claude#room#baseline(claude#room#get('panel'))
+  AssertEqual 'feature', claude#difftree#base_for('panel'),
+        \ 'the diff tree reads the same baseline'
+  Assert claude#room#set_base('panel', '')
+  AssertEqual 'origin/main', claude#room#baseline(claude#room#get('panel'))
+
+Execute (an unknown baseline is refused and changes nothing):
+  let room = claude#room#create('panel', '')
+  Assert !claude#room#set_base('panel', 'no-such-branch')
+  AssertEqual 'main', claude#room#get('panel').base
+
+Execute (a project's baseline replaces a diff-tree override on its branch):
+  call system(g:_git . 'branch feature')
+  call claude#room#create('panel', '')
+  call claude#difftree#set_branch_base('panel', 'feature')
+  Assert claude#room#set_base('panel', 'main')
+  Assert !claude#difftree#has_own_base('panel'),
+        \ 'one baseline, not two that disagree'
+  AssertEqual 'main', claude#difftree#base_for('panel')
+
+Execute (the root checkout keeps its baseline where the diff tree does):
+  call system(g:_git . 'branch feature')
+  Assert claude#room#set_base('root', 'feature')
+  AssertEqual 'feature', claude#difftree#base_for('main')
+  AssertEqual 'feature', claude#room#baseline(claude#room#root())
+
+" ── the upstream ─────────────────────────────────────────────────────────────
+
+Execute (a project that was never pushed has no upstream):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  AssertEqual '', claude#room#upstream(room)
+
+Execute (a pushed project compares with its remote branch):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  call system('git -C ' . shellescape(room.path) . ' push -q origin panel')
+  AssertEqual 'origin/panel', claude#room#upstream(room),
+        \ 'the remote branch of the same name, even with no tracking set'
+  call system('git -C ' . shellescape(room.path)
+        \ . ' branch -q --set-upstream-to origin/panel')
+  AssertEqual 'origin/panel', claude#room#upstream(room)
+
+Execute (Local Diff lists what is not on the remote branch yet):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  call system('git -C ' . shellescape(room.path) . ' push -q origin panel')
+  call Commit(room.path, 'unpushed.txt')
+  call writefile(['dirty'], room.path . '/file.txt')
+  let files = claude#difftree#changes(room.path, claude#room#upstream(room))
+  AssertEqual ['file.txt', 'unpushed.txt'], map(copy(files), {_, f -> f.path})
+  AssertEqual 'A', files[1].committed
+  AssertEqual 'M', files[0].dirty
+
+" ── updating from the baseline ───────────────────────────────────────────────
+
+Execute (u fetches the baseline and merges it into the project):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  call Commit(room.path, 'mine.txt')
+  call PushUpstream('theirs.txt')
+  Assert claude#room#update('panel'), 'the merge should succeed'
+  Assert filereadable(room.path . '/theirs.txt'),
+        \ 'the remote commit is in the project now'
+  Assert filereadable(room.path . '/mine.txt'), 'and the project''s own work'
+  AssertEqual 'panel', Head(room.path), 'still on its own branch'
+
+Execute (u is refused while the project has uncommitted changes):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  call PushUpstream('theirs.txt')
+  call writefile(['dirty'], room.path . '/file.txt')
+  Assert !claude#room#update('panel')
+  Assert !filereadable(room.path . '/theirs.txt'), 'nothing was merged'
+
+Execute (a conflicting merge is left in progress to resolve):
+  call WithRemote()
+  let room = claude#room#create('panel', '')
+  call writefile(['ours'], room.path . '/file.txt')
+  call system('git -C ' . shellescape(room.path) . ' commit -qam ours')
+  call PushUpstream('file.txt')
+  Assert !claude#room#update('panel')
+  AssertEqual ['file.txt'], systemlist('git -C ' . shellescape(room.path)
+        \ . ' diff --name-only --diff-filter=U')
+
+" ── looking projects up ──────────────────────────────────────────────────────
+
+Execute (a worktree path names its project):
+  let room = claude#room#create('panel', '')
+  AssertEqual 'panel', claude#room#of_path(room.path)
+  AssertEqual 'root',  claude#room#of_path(g:_repo)
+  AssertEqual '',      claude#room#of_path(g:_root)
+
+Execute (a branch names the base its project diffs against):
+  call claude#room#create('panel', '')
+  AssertEqual 'main', claude#room#base_of_branch('panel')
+  AssertEqual '',     claude#room#base_of_branch('main')
+
+Execute (a project base that no longer resolves falls back to the default):
+  call system(g:_git . 'branch feature')
+  call claude#room#create('panel', 'feature')
+  call system(g:_git . 'branch -m feature renamed')
+  call claude#difftree#refresh()
+  AssertEqual 'main', claude#difftree#base_for('panel')
+
+" ── asking where a new session goes ──────────────────────────────────────────
+"
+" The menu is the root checkout, then each project, then "+ New project…".
+
+Execute (an existing project is picked by its number):
+  call claude#room#create('panel', '')
+  call claude#room#create('other', '')
+  call feedkeys("3\<CR>", 't')
+  AssertEqual [1, {'room': 'other'}], claude#room#ask()
+
+Execute (a blank answer keeps the selected project):
+  call claude#room#create('panel', '')
+  call feedkeys("\<CR>", 't')
+  AssertEqual [1, {'room': 'root'}], claude#room#ask()
+  call claude#room#set_current('panel')
+  call feedkeys("\<CR>", 't')
+  AssertEqual [1, {'room': 'panel'}], claude#room#ask()
+
+Execute (a new project asks for a name and a baseline, and creates nothing yet):
+  call feedkeys("2\<CR>panel\<CR>\<CR>", 't')
+  AssertEqual [1, {'new': 'room', 'name': 'panel', 'base': ''}],
+        \ claude#room#ask()
+  AssertEqual ['root'], Ids(), 'creation waits for every answer'
+
+Execute (the new-project questions can be asked on their own):
+  call feedkeys("panel\<CR>main\<CR>", 't')
+  AssertEqual [1, {'new': 'room', 'name': 'panel', 'base': 'main'}],
+        \ claude#room#ask_new()
+
+Execute (an unknown baseline is refused at the prompt):
+  call feedkeys("2\<CR>panel\<CR>no-such-branch\<CR>", 't')
+  AssertEqual [0, {}], claude#room#ask()
+
+Execute (there is no sub-room entry any more):
+  call claude#room#create('panel', '')
+  " root, panel, + New project — a fourth entry is out of range, which keeps
+  " the selection
+  call feedkeys("4\<CR>", 't')
+  AssertEqual [1, {'room': 'root'}], claude#room#ask()
+
+Execute (the answer is realised into a project):
+  let room = claude#room#realise({'new': 'room', 'name': 'panel', 'base': ''})
+  AssertEqual 'panel', room.id
+  AssertEqual 'panel', claude#room#realise({'room': 'panel'}).id
+  AssertEqual {}, claude#room#realise({'room': ''})

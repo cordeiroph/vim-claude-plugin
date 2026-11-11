@@ -1,7 +1,8 @@
-" Tests for the panel's rendering: the Project > Room tree, rooms in the
-" state view, the status
-" glyphs, duplicate-name disambiguation and folding. Records are fabricated,
-" so no Claude process is ever started.
+" Tests for the panel's rendering: projects in both views, the status glyphs,
+" duplicate-name disambiguation and folding. Records are fabricated, so no
+" Claude process is ever started. Most of these are about session rows, so
+" they run in the state view; the projects view is set where it is the point.
+" The cwd is not a repository, so every session there sits under Elsewhere.
 
 Before:
   call claude#session#_reset()
@@ -18,6 +19,7 @@ Before:
   call mkdir(g:_empty, 'p')
   execute 'cd ' . fnameescape(g:_empty)
   let g:_saved_ascii = get(g:, 'claude_panel_ascii', 0)
+  call claude#panel#_grouping('state')
 
 After:
   call claude#panel#_reset()
@@ -42,31 +44,39 @@ Execute (an empty registry renders the placeholder, not an empty buffer):
 
 " ── grouping ─────────────────────────────────────────────────────────────────
 
-Execute (sessions in the main checkout nest Project > Root):
-  " The place view: g swaps to it, and these are its rows. A session that ran
-  " in the project root belongs to the root room; one that ran in a worktree
-  " the plugin does not know belongs to no room and sits under the project.
+Execute (the projects view opens on a repository's projects):
+  call claude#panel#_reset()
+  call claude#panel#open()
+  AssertEqual 'projects', claude#panel#_grouping(), 'the default view'
+  let lines = claude#panel#_lines()
+  Assert lines[0] =~# '^Projects', 'expected the projects header'
+  Assert index(lines, '  (not a git repository)') >= 0,
+        \ 'outside git there are no projects: ' . string(lines)
+
+Execute (sessions of no project here sit under Elsewhere, by their project):
+  " A session that ran in the repository root belongs to the root checkout;
+  " one that ran in a worktree the plugin does not know belongs to none and
+  " sits directly under the group.
   call claude#session#_inject({'name': 'panel design', 'status': 'active',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
   call claude#session#_inject({'name': 'registry spike', 'status': 'idle',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'feature'})
   call claude#session#_inject({'name': 'E947 repro', 'status': 'closed',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha-wt', 'branch': 'hotfix'})
+  call claude#panel#_grouping('projects')
   call claude#panel#open()
-  call claude#panel#_grouping('place')
   let lines = claude#panel#_lines()
   let text  = join(lines, "\n")
-  Assert text =~# '\n▾ alpha\n',            'project node missing: ' . text
-  Assert text =~# '\n  ▾ alpha (root)\n',   'root room missing: ' . text
-  Assert text =~# '    ● panel design',     'active session missing'
-  Assert text =~# '    ○ registry spike',   'idle session missing'
-  Assert text =~# '\n  ✗ E947 repro',       'roomless session missing: ' . text
-  Assert index(lines, '  ▾ alpha (root)') < match(lines, 'E947'),
-        \ 'rooms come before the sessions that are in none'
+  Assert text =~# '\n▾ Elsewhere (3)\n',       'the group: ' . text
+  Assert text =~# '\n  ▾ alpha (root)\n',  'its project: ' . text
+  Assert text =~# '    ● panel design',       'active session missing'
+  Assert text =~# '    ○ registry spike',     'idle session missing'
+  Assert text =~# '\n  ✗ E947 repro',         'projectless session: ' . text
 
-Execute (a session in a room the store no longer knows gets a missing row):
-  " No real room to look up from this (non-git) cwd, so the tree makes up a
-  " row for the room the record names rather than losing the session.
+Execute (a session in a project the store no longer knows gets a missing row):
+  " No real project to look up from this (non-git) cwd, so the panel makes up
+  " a row for the one the record names rather than losing the session. A
+  " session from a sub-room of an older build is in a project of its own.
   call claude#session#_inject({'name': 'codereview', 'status': 'active',
         \ 'project': '/w/datadog-agent',
         \ 'worktree': '/w/datadog-agent/.vim-workspace/fleet/datadog-agent',
@@ -75,24 +85,20 @@ Execute (a session in a room the store no longer knows gets a missing row):
         \ 'project': '/w/datadog-agent',
         \ 'worktree': '/w/datadog-agent/.vim-workspace/fleet/ui/datadog-agent',
         \ 'branch': 'room/fleet--ui', 'room': 'fleet/ui'})
+  call claude#panel#_grouping('projects')
   call claude#panel#open()
-  call claude#panel#_grouping('place')
   let lines = claude#panel#_lines()
-  let at = index(lines, '▾ datadog-agent')
+  let at = match(lines, 'fleet — (missing)')
   Assert at >= 0, 'project missing: ' . string(lines)
-  AssertEqual '  ▾ fleet — (missing)', lines[at + 1]
-  Assert lines[at + 2] =~# '^    ● codereview', 'room session: ' . lines[at + 2]
-  AssertEqual '    ▾ ui — (missing)', lines[at + 3]
-  Assert lines[at + 4] =~# '^      ○ icons', 'sub-room session: ' . lines[at + 4]
+  Assert lines[at + 1] =~# '^    ● codereview', 'its session: ' . lines[at + 1]
+  Assert lines[at + 2] =~# 'fleet/ui — (missing)$', 'a project of its own: '
+        \ . lines[at + 2]
+  Assert lines[at + 3] =~# '^    ○ icons', 'and its session: ' . lines[at + 3]
 
-Execute (the state view groups each status by room, sub-rooms tagged):
+Execute (the state view groups each status by project):
   call claude#session#_inject({'name': 'prototype', 'status': 'waiting',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha/.vim-workspace/panel/alpha',
-        \ 'branch': 'room/panel', 'room': 'panel'})
-  call claude#session#_inject({'name': 'icon set', 'status': 'waiting',
-        \ 'project': '/w/alpha',
-        \ 'worktree': '/w/alpha/.vim-workspace/panel/icons/alpha',
-        \ 'branch': 'room/panel--icons', 'room': 'panel/icons'})
+        \ 'branch': 'panel', 'room': 'panel'})
   call claude#session#_inject({'name': 'on main', 'status': 'waiting',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
   call claude#session#_inject({'name': 'loose', 'status': 'waiting',
@@ -101,29 +107,12 @@ Execute (the state view groups each status by room, sub-rooms tagged):
   let lines = claude#panel#_lines()
   let at = match(lines, 'Needs you')
   Assert lines[at + 1] =~# '^  ⚠\? \=.*loose\|^  \S loose',
-        \ 'a session in no room sits directly under the group: '
+        \ 'a session in no project sits directly under the group: '
         \ . string(lines)
   let panel = index(lines, '  ▾ panel — (missing)')
-  Assert panel > at, 'room row missing: ' . string(lines)
-  let under = lines[panel + 1 : panel + 2]
-  Assert match(under, '^    \S prototype ') >= 0, 'room session: ' . string(lines)
-  Assert match(under, '^    \S icon set \[icons\] ') >= 0,
-        \ 'sub-room session, tagged, with its room: ' . string(lines)
+  Assert panel > at, 'project row missing: ' . string(lines)
+  Assert lines[panel + 1] =~# '^    \S prototype ', 'its session: ' . string(lines)
   Assert index(lines, '  ▾ alpha (root)') > at, 'root row: ' . string(lines)
-
-Execute (the sub-room tag survives a name that has to be cut):
-  let g:_saved_width = get(g:, 'claude_panel_width', 35)
-  let g:claude_panel_width = 30
-  call claude#session#_inject({'name': 'a very long session name indeed',
-        \ 'status': 'idle', 'project': '/w/alpha', 'created': 0,
-        \ 'worktree': '/w/alpha/.vim-workspace/panel/icons/alpha',
-        \ 'branch': 'room/panel--icons', 'room': 'panel/icons'})
-  call claude#panel#open()
-  let rows = filter(claude#panel#_lines(), {_, l -> l =~# 'a very'})
-  AssertEqual 1, len(rows)
-  Assert rows[0] =~# '… \[icons\]$', 'the label is cut, not the tag: ' . rows[0]
-  Assert strchars(rows[0]) <= 30, 'and the row still fits: ' . rows[0]
-  let g:claude_panel_width = g:_saved_width
 
 Execute (folding a room in one status group leaves it open in another):
   call claude#session#_inject({'name': 'asking', 'status': 'waiting',
@@ -139,17 +128,16 @@ Execute (folding a room in one status group leaves it open in another):
   Assert text !~# 'asking', 'the folded room hides its session'
   Assert text =~# 'busy',   'the same room under Working stays open'
 
-Execute (two worktrees of one repo share a single project node):
+Execute (sessions of one checkout share a single project row):
   call claude#session#_inject({'name': 'a', 'status': 'active',
         \ 'project': '/w/repo', 'worktree': '/w/repo',    'branch': 'main'})
   call claude#session#_inject({'name': 'b', 'status': 'active',
-        \ 'project': '/w/repo', 'worktree': '/w/repo-wt', 'branch': 'topic'})
+        \ 'project': '/w/repo', 'worktree': '/w/repo', 'branch': 'topic'})
   call claude#panel#open()
-  call claude#panel#_grouping('place')
   let lines = claude#panel#_lines()
-  let projects = filter(copy(lines), {_, l -> l =~# '^[▾▸] '})
+  let projects = filter(copy(lines), {_, l -> l =~# '^  [▾▸] '})
   AssertEqual 1, len(projects),
-        \ 'worktrees of one repo must share a project node: ' . string(projects)
+        \ 'both are in the one root checkout: ' . string(projects)
 
 Execute (the header counts live sessions only):
   call claude#session#_inject({'name': 'a', 'status': 'active',
@@ -228,17 +216,19 @@ Execute (show_closed=0 removes closed rows from the tree):
 
 " ── folding ──────────────────────────────────────────────────────────────────
 
-Execute (folding a project hides its children and persists across redraws):
+Execute (folding a group hides its children and persists across redraws):
   call claude#session#_inject({'name': 'hidden me', 'status': 'active',
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main'})
+  call claude#panel#_grouping('projects')
   call claude#panel#open()
-  call claude#panel#_grouping('place')
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
   Assert join(claude#panel#_lines(), "\n") =~# 'hidden me'
-  " Put the cursor on the project node and fold it.
-  call cursor(3, 1)
+  " Put the cursor on the Elsewhere group and fold it.
+  call cursor(1, 1)
+  call search('^▾ Elsewhere', 'W')
   normal za
   let text = join(claude#panel#_lines(), "\n")
-  Assert text =~# '▸ alpha',   'the project should be marked collapsed'
+  Assert text =~# '▸ Elsewhere', 'the group should be marked collapsed'
   Assert text !~# 'hidden me', 'collapsed children must not render'
   " A rebuild keeps the fold shut.
   call claude#panel#refresh()
@@ -310,8 +300,8 @@ Execute (every panel element is highlighted):
   call claude#session#_inject({'name': 'gone', 'status': 'closed',
         \ 'project': '/w/x', 'worktree': '/w/x-wt', 'branch': 'main',
         \ 'room': 'gone-room'})
+  call claude#panel#_grouping('projects')
   call claude#panel#open()
-  call claude#panel#_grouping('place')
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   let seen = {}
   for l in range(1, line('$'))

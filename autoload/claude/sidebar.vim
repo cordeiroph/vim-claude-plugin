@@ -233,48 +233,20 @@ function! claude#sidebar#nerdtree_available() abort
   return exists(':NERDTree') == 2
 endfunction
 
-function! s:nerdtree_available() abort
-  return claude#sidebar#nerdtree_available()
-endfunction
-
-function! s:nerdtree_open() abort
-  return claude#sidebar#nerdtree_winid() > 0
-endfunction
-
-" Every sidebar that could be open, is.
-function! s:all_open() abort
-  if !claude#panel#is_open() || !claude#difftree#is_open()
-    return v:false
-  endif
-  return !s:nerdtree_available() || s:nerdtree_open()
-endfunction
-
-" Raise or dismiss the entire sidebar column with one key.
+" Raise or dismiss the projects panel with one key.
 "
-" Opening is the common case, so anything already up is left alone and only
-" the missing sidebars are added; the column is closed outright only once all
-" three are showing, which makes the key a true toggle without ever tearing
-" down a panel the user had just opened on its own.
+" It is the only sidebar the key drives: the panel carries each project's
+" diffs and files itself, so the diff tree and NERDTree stay out of the way
+" until they are asked for on their own (:ClaudeDiff, :NERDTree), and are
+" still stacked into the panel's column when they are.
 function! claude#sidebar#toggle_all() abort
   let l:cur = win_getid()
   try
-    if s:all_open()
+    if claude#panel#is_open()
       call claude#panel#close()
-      call claude#difftree#close()
-      if s:nerdtree_open()
-        silent! NERDTreeClose
-      endif
       return
     endif
-    if !claude#panel#is_open()
-      call claude#panel#open()
-    endif
-    if !claude#difftree#is_open()
-      call claude#difftree#open()
-    endif
-    if s:nerdtree_available() && !s:nerdtree_open()
-      silent! NERDTree
-    endif
+    call claude#panel#open()
     call claude#sidebar#stack()
   finally
     " Opening a sidebar focuses it; the key must leave the cursor where it was.

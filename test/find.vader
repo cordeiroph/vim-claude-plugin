@@ -1,0 +1,143 @@
+" Tests for :ClaudeProjectFiles and :ClaudeProjectRg: which project they ask
+" about, and that the search they hand to fzf.vim is rooted at the one picked.
+" fzf and fzf.vim are stood in for by stubs that record what they were given.
+
+Before:
+  call claude#room#_reset()
+  call claude#store#_reset()
+  let g:_cwd  = getcwd()
+  let g:_root = resolve(tempname())
+  call mkdir(g:_root, 'p')
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo, 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['one'], g:_repo . '/file.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  let g:_saved = [get(g:, 'claude_room_store', ''),
+        \ get(g:, 'claude_workspace_store', '')]
+  let g:claude_room_store      = g:_root . '/rooms.json'
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  execute 'cd ' . fnameescape(g:_repo)
+
+  " What the stubs saw, newest last.
+  let g:_calls = []
+  " The line the stubbed fzf picker hands its sink: a pattern to match.
+  let g:_pick = ''
+  " Stubs for fzf and fzf.vim, as autoload scripts: Vim only lets a
+  " function named fzf#... be defined in autoload/fzf.vim.
+  let g:_stubs = fnamemodify(g:_root, ':p') . 'stubs'
+  call mkdir(g:_stubs . '/autoload/fzf', 'p')
+  call writefile([
+        \ 'function! fzf#wrap(spec) abort',
+        \ '  return a:spec',
+        \ 'endfunction',
+        \ 'function! fzf#run(spec) abort',
+        \ '  call add(g:_calls, [''run'', a:spec])',
+        \ '  let hit = filter(copy(a:spec.source), {_, l -> l =~# g:_pick})',
+        \ '  if !empty(g:_pick) && !empty(hit)',
+        \ '    call a:spec.sink(hit[0])',
+        \ '  endif',
+        \ 'endfunction',
+        \ ], g:_stubs . '/autoload/fzf.vim')
+  call writefile([
+        \ 'function! fzf#vim#with_preview(...) abort',
+        \ '  return {''preview'': 1}',
+        \ 'endfunction',
+        \ 'function! fzf#vim#files(dir, ...) abort',
+        \ '  call add(g:_calls, [''files'', a:dir] + a:000)',
+        \ 'endfunction',
+        \ 'function! fzf#vim#grep(cmd, ...) abort',
+        \ '  call add(g:_calls, [''grep'', a:cmd] + a:000)',
+        \ 'endfunction',
+        \ ], g:_stubs . '/autoload/fzf/vim.vim')
+  execute 'set rtp+=' . fnameescape(g:_stubs)
+
+  function! Kinds() abort
+    return map(copy(g:_calls), {_, c -> c[0]})
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  let [g:claude_room_store, g:claude_workspace_store] = g:_saved
+  execute 'set rtp-=' . fnameescape(g:_stubs)
+  silent! delfunction fzf#run
+  silent! delfunction fzf#wrap
+  silent! delfunction fzf#vim#with_preview
+  silent! delfunction fzf#vim#files
+  silent! delfunction fzf#vim#grep
+  unlet! g:claude_no_popup
+  call claude#room#_reset()
+  call claude#store#_reset()
+  call delete(g:_root, 'rf')
+
+" ── nothing to choose between ────────────────────────────────────────────────
+
+Execute (with the root checkout alone, files are searched there unasked):
+  ClaudeProjectFiles
+  AssertEqual ['files'], Kinds(), 'no picker: ' . string(g:_calls)
+  AssertEqual g:_repo, g:_calls[0][1]
+  AssertEqual {'preview': 1}, g:_calls[0][2]
+
+Execute (with the root checkout alone, content is searched there unasked):
+  ClaudeProjectRg
+  AssertEqual ['grep'], Kinds()
+  AssertEqual g:_repo, g:_calls[0][2].dir
+  AssertEqual '--delimiter : --nth 4..', g:_calls[0][2].options
+
+Execute (outside git, the directory Vim is in is searched):
+  let plain = g:_root . '/plain'
+  call mkdir(plain, 'p')
+  execute 'cd ' . fnameescape(plain)
+  call claude#room#_reset()
+  ClaudeProjectFiles
+  AssertEqual [['files', plain, {'preview': 1}, 0]], g:_calls
+
+" ── asking ───────────────────────────────────────────────────────────────────
+
+Execute (with projects, the picker lists the root checkout, then each one):
+  call claude#room#create('panel', '')
+  call claude#room#create('other', '')
+  ClaudeProjectFiles
+  AssertEqual ['run'], Kinds(), 'nothing searched until one is picked'
+  let source = g:_calls[0][1].source
+  AssertEqual 3, len(source)
+  Assert source[0] =~# '^\* repo (root)', 'root first, selected: ' . source[0]
+  Assert source[1] =~# '^  panel\t', 'then each project: ' . source[1]
+  Assert source[2] =~# '^  other\t'
+
+Execute (the picked project's worktree is where files are searched):
+  let room = claude#room#create('panel', '')
+  let g:_pick = '^  panel\t'
+  ClaudeProjectFiles!
+  AssertEqual ['run', 'files'], Kinds()
+  AssertEqual room.path, g:_calls[1][1]
+  AssertEqual 1, g:_calls[1][3], 'the bang reaches fzf.vim'
+
+Execute (the picked project's worktree is where content is searched):
+  let room = claude#room#create('panel', '')
+  let g:_pick = '^  panel\t'
+  ClaudeProjectRg needle here
+  AssertEqual ['run', 'grep'], Kinds()
+  AssertEqual room.path, g:_calls[1][2].dir
+  Assert g:_calls[1][1] =~# '^rg --column --line-number --no-heading'
+        \ . ' --color=always --smart-case ',
+        \ 'the vimrc''s own rg command: ' . g:_calls[1][1]
+  Assert g:_calls[1][1] =~# shellescape('needle here') . '$',
+        \ 'and the query, quoted: ' . g:_calls[1][1]
+
+Execute (dismissing the picker searches nothing):
+  call claude#room#create('panel', '')
+  ClaudeProjectRg
+  AssertEqual ['run'], Kinds()
+
+Execute (without fzf the question is a numbered list):
+  let g:claude_no_popup = 1
+  let room = claude#room#create('panel', '')
+  call feedkeys("2\<CR>", 't')
+  ClaudeProjectFiles
+  AssertEqual ['files'], Kinds()
+  AssertEqual room.path, g:_calls[0][1]

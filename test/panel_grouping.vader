@@ -1,5 +1,6 @@
-" Tests for g, the key that swaps the panel's top level between what sessions
-" are doing and where they live, and for the fold state each view keeps.
+" Tests for g, the key that swaps the panel's top level between the projects
+" and what sessions are doing, and for the fold state each view keeps. The cwd
+" is not a repository, so in the projects view sessions sit under Elsewhere.
 
 Before:
   call claude#session#_reset()
@@ -33,29 +34,29 @@ Execute (helper):
 
 Execute (g swaps the top level, and back again):
   call Panel()
-  Assert join(claude#panel#_lines(), "\n") =~# '▾ Working',
-        \ 'the panel opens on the state view'
-
-  normal g
-  AssertEqual 'place', claude#panel#_grouping()
-  let text = join(claude#panel#_lines(), "\n")
-  Assert text =~# '▾ alpha',      'now it is the place view: ' . text
-  Assert text =~# '  ▾ alpha (root)',   'and its room'
-  Assert text !~# 'Working',      'and no state groups'
+  AssertEqual 'projects', claude#panel#_grouping(), 'the panel opens on projects'
+  Assert claude#panel#_lines()[0] =~# '^Projects'
 
   normal g
   AssertEqual 'state', claude#panel#_grouping()
-  Assert join(claude#panel#_lines(), "\n") =~# '▾ Working'
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▾ Working',          'now it is the state view: ' . text
+  Assert text =~# '  ▾ alpha (root)',   'with the project under the group'
+  Assert claude#panel#_lines()[0] =~# '^Claude Sessions'
 
-Execute (the same session sits under its room in both views):
+  normal g
+  AssertEqual 'projects', claude#panel#_grouping()
+  Assert join(claude#panel#_lines(), "\n") !~# 'Working'
+
+Execute (the same session sits under its project in both views):
   call Panel()
+  let proj = filter(claude#panel#_lines(), {_, l -> l =~# 'panel rework'})[0]
+  normal g
   let lines = claude#panel#_lines()
   let state = filter(copy(lines), {_, l -> l =~# 'panel rework'})[0]
-  Assert index(lines, '  ▾ alpha (root)') >= 0, 'a room row: ' . string(lines)
-  normal g
-  let place = filter(claude#panel#_lines(), {_, l -> l =~# 'panel rework'})[0]
-  Assert state =~# '^    ●', 'under the room in the state view: ' . state
-  Assert place =~# '^    ●', 'and in the place view: ' . place
+  Assert index(lines, '  ▾ alpha (root)') >= 0, 'a project row: ' . string(lines)
+  Assert state =~# '^    ●', 'under the project in the state view: ' . state
+  Assert proj =~# '^    ●',  'and in the projects view: ' . proj
 
 Execute (the header follows you across):
   call claude#session#_inject({'name': 'asking', 'status': 'waiting'})
@@ -71,19 +72,20 @@ Execute (the header follows you across):
 Execute (each view keeps its own folds across a swap):
   call Panel()
   " Fold the Working group in the state view.
+  normal g
   call cursor(1, 1)
   call search('Working', 'W')
   normal za
   Assert join(claude#panel#_lines(), "\n") !~# 'panel rework'
 
-  " The place view is unaffected: its keys are its own.
+  " The projects view is unaffected: its keys are its own.
   normal g
   Assert join(claude#panel#_lines(), "\n") =~# 'panel rework',
         \ 'a state fold must not fold a project'
 
-  " Fold the project too.
+  " Fold Elsewhere too.
   call cursor(1, 1)
-  call search('alpha', 'W')
+  call search('Elsewhere', 'W')
   normal za
   Assert join(claude#panel#_lines(), "\n") !~# 'panel rework'
 
@@ -97,7 +99,7 @@ Execute (each view keeps its own folds across a swap):
   Assert join(claude#panel#_lines(), "\n") =~# 'panel rework'
   normal g
   Assert join(claude#panel#_lines(), "\n") !~# 'panel rework',
-        \ 'and so did the project fold'
+        \ 'and so did the projects fold'
 
 " ── what a reset restores ────────────────────────────────────────────────────
 
@@ -105,27 +107,28 @@ Execute (a reset puts the view, the folds and the tail back):
   call Panel()
   normal g
   call cursor(1, 1)
-  call search('alpha', 'W')
+  call search('Working', 'W')
   normal za
-  AssertEqual 'place', claude#panel#_grouping()
+  AssertEqual 'state', claude#panel#_grouping()
 
   call claude#panel#_reset()
   call claude#panel#open()
-  AssertEqual 'state', claude#panel#_grouping(), 'the default view is back'
+  AssertEqual 'projects', claude#panel#_grouping(), 'the default view is back'
+  call claude#panel#_grouping('state')
   call claude#session#_inject({'name': 'finished', 'status': 'closed'})
   call claude#panel#refresh()
-  Assert join(claude#panel#_lines(), "\n") =~# '▸ Done',
-        \ 'and Done is shut again'
+  let text = join(claude#panel#_lines(), "\n")
+  Assert text =~# '▸ Done',    'Done is shut again'
+  Assert text =~# '▾ Working', 'and Working open again'
 
 Execute (the help block names the key):
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   normal ?
   let text = join(claude#panel#_lines(), "\n")
-  Assert text =~# 'g by place', 'the help should offer the swap: ' . text
-  Assert text =~# '/ filter',   'and the filter'
+  Assert text =~# 'g by status', 'the help should offer the swap: ' . text
+  Assert text =~# '/ filter',    'and the filter'
+  Assert text =~# 'N new project', 'and the project keys'
   normal g
-  normal ?
-  normal ?
-  Assert join(claude#panel#_lines(), "\n") =~# 'g by state',
+  Assert join(claude#panel#_lines(), "\n") =~# 'g projects',
         \ 'and say where it would take you from here'

@@ -138,6 +138,7 @@ Execute (the panel window is never replaced by a session):
 Execute (<CR> on a group node folds it rather than opening anything):
   call claude#session#_inject({'name': 'child', 'status': 'active',
         \ 'project': '/w/beta', 'worktree': '/w/beta', 'branch': 'main'})
+  call claude#panel#_grouping('state')
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   call cursor(3, 1)
@@ -175,8 +176,9 @@ Execute (I lists the sessions nobody named, and hides them again):
         \ 'status': 'closed', 'project': '/w/beta', 'worktree': '/w/beta',
         \ 'branch': 'main'})
   call claude#panel#open()
-  " The place view, where nothing is folded away to start with.
-  call claude#panel#_grouping('place')
+  " The projects view, where sessions of another repository sit open under
+  " Elsewhere.
+  call claude#panel#_grouping('projects')
   call win_gotoid(bufwinid(claude#panel#bufnr()))
 
   let lines = join(claude#panel#_lines(), "\n")
@@ -249,14 +251,23 @@ Execute (with the prompts turned off n asks nothing at all):
     let g:claude_session_prompt_name = saved
   endtry
 
-Execute (N is the one that asks):
-  " What it asks, and what each answer does, is test/session_room.vader.
+Execute (N creates a project, and n starts a session):
+  " What N asks, and what each answer does, is test/room_project.vader.
   call claude#panel#open()
   call win_gotoid(bufwinid(claude#panel#bufnr()))
   let m = maparg('N', 'n', 0, 1)
-  Assert m.rhs =~# 'new_asking', 'N should run the prompting path'
+  Assert m.rhs =~# 'new_project', 'N should create a project'
   Assert maparg('n', 'n', 0, 1).rhs =~# 'new()',
-        \ 'and n the one that asks nothing'
+        \ 'and n start a session'
+
+Execute (the project keys are mapped):
+  call claude#panel#open()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  Assert maparg('m', 'n', 0, 1).rhs =~# 'menu()',           'm opens the menu'
+  Assert maparg('D', 'n', 0, 1).rhs =~# 'delete_project()', 'D deletes'
+  Assert maparg('b', 'n', 0, 1).rhs =~# 'change_base()',    'b moves the baseline'
+  Assert maparg('u', 'n', 0, 1).rhs =~# 'update_base()',    'u merges it in'
+  Assert maparg('X', 'n', 0, 1).rhs =~# 'purge()',          'X purges a session'
 
 Execute (the new session is the one the panel then opens):
   let saved = g:claude_session_prompt_name

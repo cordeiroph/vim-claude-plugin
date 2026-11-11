@@ -727,14 +727,12 @@ function! claude#session#groups(...) abort
   return l:out
 endfunction
 
-" Where a record sits in the room hierarchy, as [project, room, sub-room]:
-" the top-level room id ('root' for the main checkout, '' for none) and, for a
-" session in a sub-room, the sub-room's name. Both views group by this.
+" Where a record sits, as [repository, project id, '']: the project id is
+" 'root' for the main checkout and '' for none. The third slot was the
+" sub-room, and is always empty now that sub-rooms are flattened into
+" projects of their own — a migrated one keeps its '<room>/<sub>' id whole.
 function! claude#session#place_of(rec) abort
-  let l:room = get(a:rec, 'room', '')
-  let l:top  = matchstr(l:room, '^[^/]*')
-  let l:sub  = l:room =~# '/' ? matchstr(l:room, '[^/]*$') : ''
-  return [get(a:rec, 'project', ''), l:top, l:sub]
+  return [get(a:rec, 'project', ''), get(a:rec, 'room', ''), '']
 endfunction
 
 " A row for a room the store does not know: a session names it, but its record
@@ -742,8 +740,8 @@ endfunction
 function! s:missing_room(project, id) abort
   return {
         \ 'id':      a:id,
-        \ 'name':    matchstr(a:id, '[^/]*$'),
-        \ 'parent':  a:id =~# '/' ? matchstr(a:id, '^[^/]*') : '',
+        \ 'name':    a:id,
+        \ 'parent':  '',
         \ 'branch':  '',
         \ 'base':    '',
         \ 'path':    '',
@@ -900,7 +898,7 @@ function! s:spawn_dir(rec) abort
   let l:room = claude#room#get(l:id, get(a:rec, 'project', ''))
   if empty(l:room) || l:room.missing
     call s:warn_once('room-gone-' . l:id,
-          \ 'room ' . l:id . ' is gone; opening in ' . a:rec.cwd)
+          \ 'project ' . l:id . ' is gone; opening in ' . a:rec.cwd)
     return a:rec.cwd
   endif
   return l:room.path

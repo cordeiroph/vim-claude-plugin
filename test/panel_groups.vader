@@ -1,5 +1,5 @@
-" Tests for the state view: the four groups the panel draws by default, what
-" each row says, and how the Done tail folds, caps and hides.
+" Tests for the state view: the four groups g swaps the panel to, what each
+" row says, and how the Done tail folds, caps and hides.
 "
 " No terminal and no jobs: every record here is fabricated.
 
@@ -16,6 +16,7 @@ Before:
   " Somewhere with no transcripts of its own: refresh() scans the directory
   " Vim is in, and this file is about fabricated records only.
   execute 'cd ' . fnameescape(g:_dir)
+  call claude#panel#_grouping('state')
 
 After:
   execute 'cd ' . fnameescape(g:_saved_cwd)
@@ -29,8 +30,12 @@ After:
 
 " ── the groups ───────────────────────────────────────────────────────────────
 
-Execute (the state view is what the panel opens on):
+Execute (the panel opens on the projects view, and g gives the state view):
+  call claude#panel#_reset()
   call claude#panel#open()
+  AssertEqual 'projects', claude#panel#_grouping()
+  call win_gotoid(bufwinid(claude#panel#bufnr()))
+  normal g
   AssertEqual 'state', claude#panel#_grouping()
 
 Execute (sessions are grouped by what they are doing, in a fixed order):
@@ -117,7 +122,7 @@ Execute (under a room row the row drops where it ran, which the room already say
         \ 'project': '/w/alpha', 'worktree': '/w/alpha', 'branch': 'main',
         \ 'created': localtime() - 7200})
   call claude#panel#open()
-  call claude#panel#_grouping('place')
+  call claude#panel#_grouping('projects')
   let row = filter(claude#panel#_lines(), {_, l -> l =~# 'panel design'})[0]
   Assert row =~# '2h$',    'the age stays: ' . row
   Assert row !~# 'alpha ', 'where it ran does not: ' . row

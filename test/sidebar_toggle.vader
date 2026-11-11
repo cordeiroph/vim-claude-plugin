@@ -1,6 +1,6 @@
-" Tests for the one-key sidebar column: <C-a> (:ClaudeSidebars) raises the
-" session panel, the diff tree and NERDTree together, and dismisses all three
-" once they are all showing.
+" Tests for the one-key panel: <C-a> (:ClaudeSidebars) raises the projects
+" panel alone — never the diff tree or NERDTree — and dismisses it again.
+" Those two still share its column when they are opened on their own.
 "
 " NERDTree cannot be driven from a scripted Vim, so it is stood in for by a
 " pair of stub commands opening a structurally identical window — a
@@ -146,47 +146,63 @@ Execute (zeroing the percentage restores the line count):
 
 Execute (the diff tree sizes itself by percentage when it is not the bottom):
   call StubNerd()
-  call claude#sidebar#toggle_all()
+  call claude#panel#open()
+  call claude#difftree#open()
+  NERDTree
+  call claude#sidebar#stack()
   AssertEqual Pct(40), winheight(win_id2win(claude#difftree#winid()))
   AssertEqual 1, getwinvar(win_id2win(claude#difftree#winid()), '&winfixheight')
 
 Execute (NERDTree absorbs the remaining quarter and is never fixed):
   call StubNerd()
-  call claude#sidebar#toggle_all()
+  call claude#panel#open()
+  call claude#difftree#open()
+  NERDTree
+  call claude#sidebar#stack()
   let nerd = claude#sidebar#nerdtree_winid()
   Assert winheight(win_id2win(nerd)) > 0,
         \ 'the bottom sidebar absorbs the remaining lines'
   AssertEqual 0, getwinvar(win_id2win(nerd), '&winfixheight')
 
-" ── toggling the column ──────────────────────────────────────────────────────
-
-Execute (one call raises all three, stacked in priority order):
+Execute (sidebars opened on their own still stack in priority order):
   call StubNerd()
-  call claude#sidebar#toggle_all()
+  NERDTree
+  call claude#difftree#open()
+  call claude#panel#open()
+  call claude#sidebar#stack()
   AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
 
-Execute (a second call dismisses all three):
+" ── toggling the panel ───────────────────────────────────────────────────────
+
+Execute (one call raises the projects panel and nothing else):
   call StubNerd()
   call claude#sidebar#toggle_all()
-  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  AssertEqual ['SESS'], Order()
+  Assert claude#panel#is_open()
+  Assert !claude#difftree#is_open(), 'the diff tree stays out of the way'
+  AssertEqual -1, claude#sidebar#nerdtree_winid(), 'and so does NERDTree'
+
+Execute (a second call dismisses it):
+  call StubNerd()
+  call claude#sidebar#toggle_all()
   call claude#sidebar#toggle_all()
   AssertEqual [], Order()
-  Assert !claude#panel#is_open(),   'the session panel must be closed'
-  Assert !claude#difftree#is_open(), 'the diff tree must be closed'
+  Assert !claude#panel#is_open(), 'the panel must be closed'
 
-Execute (a sidebar already open is joined rather than torn down):
+Execute (dismissing the panel leaves sidebars opened on their own alone):
   call StubNerd()
-  call claude#panel#open()
-  let sess = claude#panel#winid()
+  call claude#difftree#open()
+  NERDTree
   call claude#sidebar#toggle_all()
-  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
-  AssertEqual sess, claude#panel#winid(),
-        \ 'the panel that was already up must survive untouched'
+  AssertEqual ['SESS', 'DIFF', 'NERD'], Order(),
+        \ 'the panel joins the column above them'
+  call claude#sidebar#toggle_all()
+  AssertEqual ['DIFF', 'NERD'], Order()
 
 Execute (the command drives the same toggle):
   call StubNerd()
   ClaudeSidebars
-  AssertEqual ['SESS', 'DIFF', 'NERD'], Order()
+  AssertEqual ['SESS'], Order()
   ClaudeSidebars
   AssertEqual [], Order()
 
@@ -194,21 +210,15 @@ Execute (the cursor is left where it started):
   call StubNerd()
   let here = win_getid()
   call claude#sidebar#toggle_all()
-  AssertEqual here, win_getid(), 'opening the column must not steal focus'
+  AssertEqual here, win_getid(), 'opening the panel must not steal focus'
   call claude#sidebar#toggle_all()
   AssertEqual here, win_getid(), 'closing it must not either'
 
 " ── without NERDTree installed ───────────────────────────────────────────────
 
-Execute (the two Claude sidebars share the column on their own):
+Execute (the toggle works with NERDTree absent):
   call NoNerd()
   call claude#sidebar#toggle_all()
-  AssertEqual ['SESS', 'DIFF'], Order()
-  Assert claude#panel#is_open() && claude#difftree#is_open()
-
-Execute (the toggle still closes with NERDTree absent):
-  call NoNerd()
-  call claude#sidebar#toggle_all()
-  AssertEqual ['SESS', 'DIFF'], Order()
+  AssertEqual ['SESS'], Order()
   call claude#sidebar#toggle_all()
   AssertEqual [], Order()

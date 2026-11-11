@@ -1,6 +1,6 @@
-" Tests for rooms in the diff tree: each room drawn the way it is laid out on
-" disk — room, its worktree folder, its sub-rooms — with a room diffed
-" against what it was cut from and a sub-room against its room.
+" Tests for projects in the diff tree: each project drawn the way it is laid
+" out on disk — project, then its worktree folder — diffed against its
+" baseline.
 
 Before:
   call claude#difftree#_reset()
@@ -57,39 +57,24 @@ After:
   call delete(g:_root, 'rf')
   silent! only
 
-Execute (a room, its worktree folder, and a sub-room's, laid out as on disk):
+Execute (a project and its worktree folder, laid out as on disk):
   let room = claude#room#create('panel', '')
   call Commit(room.path, 'room.txt')
-  let sub = claude#room#create_sub('panel', 'icons')
-  call Commit(sub.path, 'sub.txt')
   let lines = Lines()
   let at = index(lines, '  ▾ panel/')
-  Assert at >= 0, 'the room row: ' . string(lines)
-  AssertEqual '    ▾ repo/',   lines[at + 1], 'the room''s own worktree'
+  Assert at >= 0, 'the project row: ' . string(lines)
+  AssertEqual '    ▾ repo/',   lines[at + 1], 'the project''s own worktree'
   Assert lines[at + 2] =~# '^      .* room\.txt$', 'its file: ' . lines[at + 2]
-  AssertEqual '    ▾ icons/',  lines[at + 3], 'the sub-room'
-  AssertEqual '      ▾ repo/', lines[at + 4], 'and its worktree'
-  Assert lines[at + 5] =~# '^        .* sub\.txt$', 'its file: ' . lines[at + 5]
 
-Execute (a sub-room shows only its own work, not its room's):
-  let room = claude#room#create('panel', '')
+Execute (each project shows only its own work):
+  let room  = claude#room#create('panel', '')
   call Commit(room.path, 'room.txt')
-  let sub = claude#room#create_sub('panel', 'icons')
-  call Commit(sub.path, 'sub.txt')
+  let other = claude#room#create('other', '')
+  call Commit(other.path, 'other.txt')
   call claude#difftree#refresh()
-  let g:_sub = sub.path
-  let files = filter(claude#difftree#files(), {_, f -> f.worktree ==# g:_sub})
-  AssertEqual ['sub.txt'], map(files, {_, f -> f.path})
-
-Execute (a room with no changes of its own is drawn for a sub-room that has):
-  call claude#room#create('panel', '')
-  let sub = claude#room#create_sub('panel', 'icons')
-  call Commit(sub.path, 'sub.txt')
-  let lines = Lines()
-  let at = index(lines, '  ▾ panel/')
-  Assert at >= 0, 'the room row: ' . string(lines)
-  AssertEqual '    ▾ icons/', lines[at + 1],
-        \ 'no folder row for the room itself: ' . string(lines)
+  let g:_other = other.path
+  let files = filter(claude#difftree#files(), {_, f -> f.worktree ==# g:_other})
+  AssertEqual ['other.txt'], map(files, {_, f -> f.path})
 
 Execute (a room with nothing changed anywhere is not drawn):
   call claude#room#create('panel', '')
@@ -97,34 +82,19 @@ Execute (a room with nothing changed anywhere is not drawn):
   let lines = Lines()
   Assert index(lines, '  ▾ panel/') < 0, 'no empty room rows: ' . string(lines)
 
-Execute (folding a room folds its sub-rooms with it):
+Execute (folding a project folds its worktree with it):
   let room = claude#room#create('panel', '')
   call Commit(room.path, 'room.txt')
-  let sub = claude#room#create_sub('panel', 'icons')
-  call Commit(sub.path, 'sub.txt')
   call Lines()
   call win_gotoid(claude#difftree#winid())
   call cursor(1, 1)
   call search('^  ▾ panel/$', 'W')
   normal za
   let text = join(claude#difftree#_lines(), "\n")
-  Assert text =~# '  ▸ panel/', 'the room is shut: ' . text
-  Assert text !~# 'icons', 'and its sub-rooms are hidden: ' . text
+  Assert text =~# '  ▸ panel/', 'the project is shut: ' . text
+  Assert text !~# 'room\.txt', 'and its files are hidden: ' . text
 
-Execute (d on a room with sub-rooms is refused before anything is asked):
-  let room = claude#room#create('panel', '')
-  call Commit(room.path, 'room.txt')
-  let sub = claude#room#create_sub('panel', 'icons')
-  call Commit(sub.path, 'sub.txt')
-  call Lines()
-  call win_gotoid(claude#difftree#winid())
-  call cursor(1, 1)
-  call search('^  ▾ panel/$', 'W')
-  normal d
-  Assert isdirectory(room.path)
-  Assert isdirectory(sub.path)
-
-Execute (:ClaudeDiffBase on a room row sets that room's base):
+Execute (:ClaudeDiffBase on a project row sets that project's base):
   let room = claude#room#create('panel', '')
   call Commit(room.path, 'room.txt')
   call Lines()
@@ -133,11 +103,11 @@ Execute (:ClaudeDiffBase on a room row sets that room's base):
   call search('^  ▾ panel/$', 'W')
   ClaudeDiffBase main
   Assert join(claude#difftree#_lines(), "\n") !~# '\[main\]',
-        \ 'main is already the room''s base, so it is no override'
+        \ 'main is already the project''s base, so it is no override'
   call cursor(1, 1)
   call search('^  ▾ panel/$', 'W')
   call system(g:_g . 'branch other')
   ClaudeDiffBase other
-  AssertEqual 'other', claude#difftree#base_for('room/panel')
+  AssertEqual 'other', claude#difftree#base_for('panel')
   Assert join(claude#difftree#_lines(), "\n") =~# '\[other\] repo/',
         \ 'an override is shown on the folder row'

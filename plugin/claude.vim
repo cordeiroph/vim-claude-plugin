@@ -182,7 +182,7 @@ if !exists('g:claude_session_store')
 endif
 
 " g:claude_session_prompt_name — 0 skips both prompts for new sessions: the
-" session runs in the selected room (the root checkout unless <leader>cw chose
+" session runs in the selected project (the root checkout unless <leader>cw chose
 " another) and has no name — Claude names the conversation itself, which
 " leaves the session hidden from the panel until I reveals it.
 if !exists('g:claude_session_prompt_name')
@@ -197,23 +197,42 @@ if !exists('g:claude_session_flags')
   let g:claude_session_flags = -1
 endif
 
-" ── room configuration ───────────────────────────────────────────────────────
+" ── project configuration ────────────────────────────────────────────────────
+"
+" Projects were called rooms, and the settings keep their room names. Each
+" g:claude_project_* below, when set, wins over the g:claude_room_* it names.
+for s:opt in ['dir', 'fetch', 'store']
+  if exists('g:claude_project_' . s:opt)
+    let g:claude_room_{s:opt} = g:claude_project_{s:opt}
+  endif
+endfor
+unlet s:opt
 
-" g:claude_room_dir — where rooms (git worktrees) are checked out. Empty
-" (default) means '.vim-workspace' inside the project, kept out of git status
-" through .git/info/exclude. An absolute path, e.g. '~/src/rooms', puts them
-" outside the project instead, under <path>/<project>/.
+" g:claude_project_branch_prefix — put in front of the branch a new project
+" is given, e.g. 'feature/'. Empty (default) names the branch after the
+" project alone.
+if !exists('g:claude_project_branch_prefix')
+  let g:claude_project_branch_prefix = ''
+endif
+
+" g:claude_room_dir (g:claude_project_dir) — where projects (git worktrees)
+" are checked out. Empty (default) means '.vim-workspace' inside the
+" repository, kept out of git status through .git/info/exclude. An absolute
+" path, e.g. '~/src/projects', puts them outside it instead, under
+" <path>/<repo>/.
 if !exists('g:claude_room_dir')
   let g:claude_room_dir = ''
 endif
 
-" g:claude_room_fetch — 0 skips the `git fetch` that makes a new room start
-" from the latest default branch; it is then cut from the last fetched one.
+" g:claude_room_fetch (g:claude_project_fetch) — 0 skips the `git fetch` that
+" makes a new project start from the latest default branch; it is then cut
+" from the last fetched one.
 if !exists('g:claude_room_fetch')
   let g:claude_room_fetch = 1
 endif
 
-" g:claude_room_store — where rooms are persisted, with the same
+" g:claude_room_store (g:claude_project_store) — where projects are
+" persisted, with the same
 " override-or-plugin-dir rule (and reinstall caveat) as
 " |g:claude_session_store|.
 if !exists('g:claude_room_store')
@@ -274,8 +293,8 @@ endif
 
 " ── sidebar column configuration ─────────────────────────────────────────────
 
-" g:claude_sidebar_toggle_key — key that raises or dismisses the whole sidebar
-" column (|:ClaudeSidebars|). An empty string leaves the key unmapped.
+" g:claude_sidebar_toggle_key — key that raises or dismisses the projects
+" panel (|:ClaudeSidebars|). An empty string leaves the key unmapped.
 "
 " The default shadows Vim's built-in CTRL-A increment-number command in
 " normal mode.
@@ -312,14 +331,24 @@ command! -nargs=? -complete=customlist,claude#hooks#complete
 " this file still sources no autoload script.
 command! -nargs=? PiNew call claude#new(<q-args>, 'pi')
 
-" Rooms: the git worktrees sessions run in. :ClaudeWorkspaces is the name this
-" had before rooms, kept so existing mappings keep working.
+" Projects: the git worktrees sessions run in. :ClaudeRooms and
+" :ClaudeWorkspaces are the names this had before, kept so existing mappings
+" keep working.
+command! ClaudeProjects   call claude#room#pick()
 command! ClaudeRooms      call claude#room#pick()
 command! ClaudeWorkspaces call claude#room#pick()
 
-" Git diff tree.
-" The whole sidebar column: sessions, diff tree and NERDTree together.
+" fzf.vim's file finder and a ripgrep search, asking which project first.
+command! -bang -nargs=0 ClaudeProjectFiles call claude#find#files(<bang>0)
+command! -bang -nargs=* ClaudeProjectRg    call claude#find#grep(<q-args>, <bang>0)
+
+" Reveal the current file in the projects panel, like :NERDTreeFind.
+command! -nargs=? -complete=file ClaudeReveal call claude#panel#reveal(<q-args>)
+
+" The projects panel, raised or dismissed without moving the cursor.
 command! ClaudeSidebars call claude#sidebar#toggle_all()
+
+" Git diff tree.
 
 command! ClaudeDiff        call claude#difftree#toggle()
 command! ClaudeDiffOpen    call claude#difftree#open()
@@ -400,10 +429,10 @@ if !exists('g:claude_no_default_mappings')
   " Toggle the git diff tree.
   nnoremap <silent> <leader>cd :ClaudeDiff<CR>
 
-  " Pick the room to work in; NERDTree follows the choice.
-  nnoremap <silent> <leader>cw :ClaudeRooms<CR>
+  " Pick the project to work in; NERDTree follows the choice.
+  nnoremap <silent> <leader>cw :ClaudeProjects<CR>
 
-  " Raise or dismiss the whole sidebar column. Normal mode only: <C-a> must
+  " Raise or dismiss the projects panel. Normal mode only: <C-a> must
   " keep incrementing a number under the cursor elsewhere (insert mode,
   " visual mode, etc).
   if !empty(g:claude_sidebar_toggle_key)

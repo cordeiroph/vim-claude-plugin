@@ -1,0 +1,325 @@
+" Tests for the projects view: each project of the repository with its
+" baseline, and under it main Diff, Local Diff, Files and Sessions.
+" Real fixture repository with a bare clone for its remote; no terminal.
+
+Before:
+  call claude#session#_reset()
+  call claude#panel#_reset()
+  call claude#difftree#_reset()
+  call claude#room#_reset()
+  call claude#store#_reset()
+  let g:_cwd  = getcwd()
+  let g:_root = resolve(tempname())
+  call mkdir(g:_root, 'p')
+  let g:_repo = g:_root . '/repo'
+  call mkdir(g:_repo . '/src/deep', 'p')
+  let g:_g = 'git -C ' . shellescape(g:_repo) . ' '
+  call system(g:_g . 'init -q -b main')
+  call system(g:_g . 'config user.email t@t')
+  call system(g:_g . 'config user.name test')
+  call writefile(['one'], g:_repo . '/tracked.txt')
+  call writefile(['deep'], g:_repo . '/src/deep/inner.txt')
+  call writefile(['ignored/'], g:_repo . '/.gitignore')
+  call mkdir(g:_repo . '/ignored', 'p')
+  call writefile(['x'], g:_repo . '/ignored/secret.txt')
+  call system(g:_g . 'add -A')
+  call system(g:_g . 'commit -qm base')
+  let g:_remote = g:_root . '/remote.git'
+  call system('git clone -q --bare ' . shellescape(g:_repo) . ' '
+        \ . shellescape(g:_remote))
+  call system(g:_g . 'remote add origin ' . shellescape(g:_remote))
+  call system(g:_g . 'fetch -q origin')
+  call system(g:_g . 'remote set-head origin main')
+
+  let g:_saved = [get(g:, 'claude_difftree_store', ''),
+        \ get(g:, 'claude_room_store', ''),
+        \ get(g:, 'claude_workspace_store', ''),
+        \ get(g:, 'claude_session_store', ''),
+        \ get(g:, 'claude_panel_closed_limit', 10)]
+  let g:claude_difftree_store  = g:_root . '/bases.json'
+  let g:claude_room_store      = g:_root . '/rooms.json'
+  let g:claude_workspace_store = g:_root . '/workspaces.json'
+  let g:claude_session_store   = g:_root . '/sessions.json'
+  let g:claude_panel_closed_limit = 0
+  execute 'cd ' . fnameescape(g:_repo)
+
+  function! Open() abort
+    call claude#panel#open()
+    call win_gotoid(bufwinid(claude#panel#bufnr()))
+    return claude#panel#_lines()
+  endfunction
+
+  " Put the cursor on the first row matching {pattern} after the row of
+  " project {name}, and press {keys}.
+  function! Press(name, pattern, keys) abort
+    call win_gotoid(bufwinid(claude#panel#bufnr()))
+    call cursor(1, 1)
+    call search('^[▾▸] ' . a:name . ' ', 'W')
+    call search(a:pattern, 'W')
+    Assert getline('.') =~# a:pattern, 'expected the row: ' . getline('.')
+    execute 'normal ' . a:keys
+    return claude#panel#_lines()
+  endfunction
+
+After:
+  execute 'cd ' . fnameescape(g:_cwd)
+  let [g:claude_difftree_store, g:claude_room_store,
+        \ g:claude_workspace_store, g:claude_session_store,
+        \ g:claude_panel_closed_limit] = g:_saved
+  call claude#panel#_reset()
+  call claude#difftree#_reset()
+  call claude#session#_reset()
+  call claude#room#_reset()
+  call claude#store#_reset()
+  call delete(g:_root, 'rf')
+  silent! only
+
+" ── the rows ─────────────────────────────────────────────────────────────────
+
+Execute (every project is listed with its baseline and four sections):
+  let room = claude#room#create('panel', '')
+  let lines = Open()
+  AssertEqual 'Projects', matchstr(lines[0], '^\S\+')
+  let at = index(lines, '▾ panel [origin/main]')
+  Assert at >= 0, 'the project row: ' . string(lines)
+  AssertEqual ['  ▸ main Diff', '  ▸ Local Diff', '  ▸ Files',
+        \ '  ▾ Sessions (0)'], lines[at + 1 : at + 4]
+  Assert index(lines, '▾ repo (root) [origin/main]') >= 0,
+        \ 'the root checkout heads the list'
+  Assert index(lines, '▾ repo (root) [origin/main]') < at
+
+Execute (a baseline moved with b is what the row shows):
+  call system(g:_g . 'branch feature')
+  call claude#room#create('panel', '')
+  call claude#room#set_base('panel', 'feature')
+  Assert index(Open(), '▾ panel [feature]') >= 0
+
+Execute (the first diff is named after the baseline, and keeps its fold):
+  call system(g:_g . 'branch feature')
+  call claude#room#create('panel', '')
+  call Open()
+  call Press('panel', '^  ▸ main Diff$', 'o')
+  call claude#room#set_base('panel', 'feature')
+  let lines = claude#panel#_lines()
+  let at = index(lines, '▾ panel [feature]')
+  AssertEqual '  ▾ feature Diff', lines[at + 1], 'renamed, and still open'
+
+Execute (a local slashed baseline keeps its whole name):
+  call system(g:_g . 'branch feature/x')
+  call claude#room#create('panel', '')
+  call claude#room#set_base('panel', 'feature/x')
+  Assert index(Open(), '  ▸ feature/x Diff') >= 0
+
+Execute (folding a project hides its sections):
+  call claude#room#create('panel', '')
+  call Open()
+  let lines = Press('panel', '^▾ panel ', 'za')
+  Assert index(lines, '▸ panel [origin/main]') >= 0
+  Assert join(lines, "\n") !~# 'panel \[origin/main\]\n  ▸ Diff'
+
+" ── main Diff ──────────────────────────────────────────────────────────
+
+Execute (main Diff lists committed and uncommitted work, as a tree):
+  let room = claude#room#create('panel', '')
+  call writefile(['committed'], room.path . '/src/deep/new.txt')
+  call system('git -C ' . shellescape(room.path) . ' add -A')
+  call system('git -C ' . shellescape(room.path) . ' commit -qm new')
+  call writefile(['dirty'], room.path . '/tracked.txt')
+  call Open()
+  let lines = Press('panel', 'main Diff', 'o')
+  let at = index(lines, '  ▾ main Diff')
+  Assert at >= 0, 'the section opened: ' . string(lines)
+  AssertEqual '    ▾ src/deep', lines[at + 1], 'single-child directories merge'
+  Assert lines[at + 2] =~# '^      \[.\] new\.txt$', 'committed: ' . lines[at + 2]
+  Assert lines[at + 3] =~# '^    \[ |.\] tracked\.txt$',
+        \ 'uncommitted: ' . lines[at + 3]
+
+Execute (a project with nothing changed says so):
+  call claude#room#create('panel', '')
+  call Open()
+  let lines = Press('panel', 'main Diff', 'o')
+  let at = index(lines, '  ▾ main Diff')
+  AssertEqual '    (no changes vs origin/main)', lines[at + 1]
+
+Execute (a file in a diff opens in the main area):
+  let room = claude#room#create('panel', '')
+  call writefile(['dirty'], room.path . '/tracked.txt')
+  new
+  let main = win_getid()
+  call Open()
+  call Press('panel', 'main Diff', 'o')
+  call search('tracked\.txt', 'W')
+  execute "normal \<CR>"
+  AssertEqual room.path . '/tracked.txt', expand('%:p')
+  Assert !claude#sidebar#is_sidebar(win_getid()), 'not inside the sidebar'
+
+" ── Local Diff ─────────────────────────────────────────────────────────────
+
+Execute (Local Diff says when the branch was never pushed):
+  call claude#room#create('panel', '')
+  call Open()
+  let lines = Press('panel', 'Local Diff', 'o')
+  let at = index(lines, '  ▾ Local Diff')
+  AssertEqual '    (not pushed)', lines[at + 1]
+
+Execute (Local Diff lists what the remote branch does not have):
+  let room = claude#room#create('panel', '')
+  call system('git -C ' . shellescape(room.path) . ' push -q origin panel')
+  call writefile(['later'], room.path . '/later.txt')
+  call system('git -C ' . shellescape(room.path) . ' add -A')
+  call system('git -C ' . shellescape(room.path) . ' commit -qm later')
+  call Open()
+  let lines = Press('panel', 'Local Diff', 'o')
+  let at = index(lines, '  ▾ Local Diff')
+  Assert lines[at + 1] =~# '^    \[.\] later\.txt$', 'unpushed: ' . string(lines)
+
+" ── Files ────────────────────────────────────────────────────────────────────
+
+Execute (Files is the worktree as a tree, directories shut, ignores honoured):
+  call claude#room#create('panel', '')
+  call Open()
+  let lines = Press('panel', '^  ▸ Files', 'o')
+  let at = index(lines, '  ▾ Files')
+  AssertEqual ['    ▸ src/', '      .gitignore', '      tracked.txt'],
+        \ lines[at + 1 : at + 3]
+  Assert join(lines, "\n") !~# 'ignored', '.gitignore is honoured'
+
+Execute (a directory opens one level at a time, and closes again):
+  call claude#room#create('panel', '')
+  call Open()
+  call Press('panel', '^  ▸ Files', 'o')
+  let lines = Press('panel', '^    ▸ src/', 'o')
+  let at = index(lines, '    ▾ src/')
+  AssertEqual '      ▸ deep/', lines[at + 1], 'one level only'
+  let lines = Press('panel', '^      ▸ deep/', 'o')
+  AssertEqual '          inner.txt', lines[index(lines, '      ▾ deep/') + 1]
+  let lines = Press('panel', '^    ▾ src/', 'za')
+  Assert join(lines, "\n") !~# 'deep', 'closing src hides what is in it'
+
+Execute (a file opens in the main area, splits with s):
+  let room = claude#room#create('panel', '')
+  new
+  call Open()
+  call Press('panel', '^  ▸ Files', 'o')
+  call Press('panel', 'tracked\.txt$', 'o')
+  AssertEqual room.path . '/tracked.txt', expand('%:p')
+  let wins = winnr('$')
+  call Open()
+  call Press('panel', 'tracked\.txt$', 's')
+  AssertEqual wins + 1, winnr('$'), 's adds a window'
+
+Execute (a file added on disk shows when Files is opened again):
+  let room = claude#room#create('panel', '')
+  call Open()
+  call Press('panel', '^  ▸ Files', 'o')
+  call writefile(['new'], room.path . '/fresh.txt')
+  call Press('panel', '^  ▾ Files', 'o')
+  let lines = Press('panel', '^  ▸ Files', 'o')
+  Assert join(lines, "\n") =~# 'fresh\.txt', 'the index was rebuilt'
+
+" ── the m menu ───────────────────────────────────────────────────────────────
+
+Execute (m on a project offers its actions, each with its key):
+  let g:claude_no_popup = 1
+  call claude#room#create('panel', '')
+  call Open()
+  call search('^▾ panel ', 'W')
+  " Cancel the menu: what matters is what it lists.
+  let out = execute('call feedkeys("m\<CR>", "xt")')
+  for key in ['(n)', '(b)', '(u)', '(D)', '(N)', '(g)', '(R)']
+    Assert out =~# '\V' . key, key . ' should be offered: ' . out
+  endfor
+  unlet g:claude_no_popup
+
+Execute (m on the root checkout does not offer to delete it):
+  let g:claude_no_popup = 1
+  call Open()
+  call search('^▾ repo (root) ', 'W')
+  let out = execute('call feedkeys("m\<CR>", "xt")')
+  Assert out =~# '\V(b)', 'its baseline can still move: ' . out
+  Assert out !~# '\V(D)', 'but it cannot be deleted: ' . out
+  unlet g:claude_no_popup
+
+Execute (the menu's entry runs the same action as its key):
+  let g:claude_no_popup = 1
+  call Open()
+  call search('^▾ repo (root) ', 'W')
+  " (n) (b) (u) (N) (g) (R) — no (D) on the root: g is the fifth entry.
+  call feedkeys("m5\<CR>", 'xt')
+  AssertEqual 'state', claude#panel#_grouping()
+  unlet g:claude_no_popup
+
+" ── <C-a> ────────────────────────────────────────────────────────────────────
+
+Execute (<C-a> raises the projects panel alone):
+  call claude#sidebar#toggle_all()
+  Assert claude#panel#is_open()
+  Assert !claude#difftree#is_open(), 'the diff tree is not raised with it'
+  AssertEqual 'projects', claude#panel#_grouping()
+  call claude#sidebar#toggle_all()
+  Assert !claude#panel#is_open()
+
+" ── revealing the current file ───────────────────────────────────────────────
+
+Execute (:ClaudeReveal opens the project, its Files and the path to the file):
+  let room = claude#room#create('panel', '')
+  execute 'edit ' . fnameescape(room.path . '/src/deep/inner.txt')
+  ClaudeReveal
+  AssertEqual claude#panel#winid(), win_getid(), 'the cursor is in the panel'
+  AssertEqual '          inner.txt', getline('.')
+  let lines = claude#panel#_lines()
+  let at = index(lines, '▾ panel [origin/main]')
+  Assert at >= 0 && at < line('.'), 'under its own project: ' . string(lines)
+  Assert index(lines, '  ▾ Files') > at
+  Assert index(lines, '    ▾ src/') > at
+  Assert index(lines, '      ▾ deep/') > at
+
+Execute (a file of the root checkout is revealed under the root, not a project):
+  call claude#room#create('panel', '')
+  execute 'edit ' . fnameescape(g:_repo . '/tracked.txt')
+  ClaudeReveal
+  AssertEqual '      tracked.txt', getline('.')
+  let lines = claude#panel#_lines()
+  Assert index(lines, '▾ repo (root) [origin/main]') < line('.')
+  Assert index(lines, '▾ panel [origin/main]') > line('.'),
+        \ 'the file sits above the next project'
+
+Execute (a file created since the tree was read is still found):
+  let room = claude#room#create('panel', '')
+  call Open()
+  call Press('panel', '^  ▸ Files', 'o')
+  call writefile(['new'], room.path . '/fresh.txt')
+  wincmd p
+  execute 'edit ' . fnameescape(room.path . '/fresh.txt')
+  ClaudeReveal
+  AssertEqual '      fresh.txt', getline('.')
+
+Execute (the Files row is chosen over the same file in an open diff):
+  let room = claude#room#create('panel', '')
+  call writefile(['dirty'], room.path . '/tracked.txt')
+  call Open()
+  call Press('panel', 'main Diff', 'o')
+  wincmd p
+  execute 'edit ' . fnameescape(room.path . '/tracked.txt')
+  ClaudeReveal
+  AssertEqual '      tracked.txt', getline('.')
+
+Execute (an ignored file lands on its project, with a warning):
+  let room = claude#room#create('panel', '')
+  call mkdir(room.path . '/ignored', 'p')
+  call writefile(['x'], room.path . '/ignored/secret.txt')
+  execute 'edit ' . fnameescape(room.path . '/ignored/secret.txt')
+  silent! ClaudeReveal
+  AssertEqual '▾ panel [origin/main]', getline('.')
+
+Execute (outside any project, NERDTreeFind does what it always did):
+  let plain = g:_root . '/plain'
+  call mkdir(plain, 'p')
+  call writefile(['x'], plain . '/loose.txt')
+  execute 'edit ' . fnameescape(plain . '/loose.txt')
+  let g:_found = 0
+  command! NERDTreeFind let g:_found = 1
+  ClaudeReveal
+  delcommand NERDTreeFind
+  AssertEqual 1, g:_found
+  Assert !claude#panel#is_open(), 'the panel is left alone'

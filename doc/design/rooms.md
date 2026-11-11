@@ -1,6 +1,6 @@
 # Design: rooms
 
-Status: implemented — §14 lists where the build departs from this text
+Status: superseded by doc/design/projects.md (implemented; §14 lists where the build departed from this text)
 Target: `claude.vim`
 Last updated: 2026-11-05
 

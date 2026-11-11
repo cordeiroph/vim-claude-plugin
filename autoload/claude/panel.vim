@@ -1,19 +1,26 @@
-" ── agent session panel ──────────────────────────────────────────────────────
+" ── projects panel ───────────────────────────────────────────────────────────
 "
-" A NERDTree-style side panel listing every Claude session. It has two views,
+" A NERDTree-style side panel: the one sidebar <C-a> raises. It has two views,
 " swapped with g:
 "
-"   state   what each session is doing — Needs you, Working, Idle, Done —
-"           and, inside each, which room it is in. The default, because with
-"           several agents running the question is almost always "which one
-"           is waiting for me?"
-"   place   Project > Room > Sub-room, for when the question really is
-"           "what is happening in that room?" Every room is listed, with or
-"           without sessions, so this view doubles as the room list.
+"   projects  every project of the repository — a git worktree on a branch of
+"             its own, diffed against a baseline — and under each:
 "
-" The panel owns presentation only: it never starts, stops or inspects a
-" process directly — autoload/claude/session.vim is the single source of
-" truth, reached through claude#session#groups() and claude#session#tree().
+"               ▾ panel [origin/main]
+"                 ▸ main Diff         what the project changed vs its baseline,
+"                                     named after the baseline branch
+"                 ▸ Local Diff        what is not on the remote branch yet
+"                 ▸ Files             the worktree's files, as a tree
+"                 ▾ Sessions (2)      the agents working in it
+"
+"             The default: it is the one place to see and act on each line of
+"             work without juggling a diff tree and a file tree beside it.
+"   state     what each session is doing — Needs you, Working, Idle, Done —
+"             and, inside each, which project it is in.
+"
+" The panel owns presentation only: sessions come from
+" autoload/claude/session.vim, projects and their git from room.vim, and diffs
+" from difftree.vim's engine, so a changed file reads the same everywhere.
 "
 " Hiding the panel only closes its window. Sessions keep running.
 
@@ -22,16 +29,23 @@ let s:timer      = -1
 let s:prev_winid = -1
 let s:show_help  = 0
 let s:rendered   = []     " session ids in the order last drawn
-let s:grouping   = 'state'
+let s:grouping   = 'projects'
+let s:known      = []     " every listed session id at the last full render
+let s:findex     = {}     " worktree -> {dir -> {'dirs', 'files'}}, see Files
 let s:filter     = ''     " while set, only matching sessions are drawn
 let s:mixed      = 0      " 1 while the drawn rows run more than one agent
 let s:done_all   = 0      " 1 once the Done group has been asked to show all
 
 " Group key -> 1 while that node is folded shut. The two views use different
-" key prefixes — 'st:' here, 'p:' / 'r:' in the tree — so switching
-" views with g preserves both sets of folds. Done starts shut: it is the tail,
-" and the tail is what nobody wants to scroll past.
+" key prefixes — 'st:' in the state view, 'pp:' / 'ps:' / … in the projects
+" view — so switching views with g preserves both sets of folds. Done starts
+" shut: it is the tail, and the tail is what nobody wants to scroll past.
 let s:collapsed = {'st:done': 1}
+
+" Keys starting 'x:' are the other way round: shut until opened, and listed
+" here while open. A project's diffs and files cost git to draw, and a file
+" tree opened by default would bury every project under the first one.
+let s:opened = {}
 
 " This panel is the top sidebar; autoload/claude/sidebar.vim keeps the column
 " ordered and owns everything the panels share.
@@ -63,8 +77,24 @@ function! s:done_rows() abort
   return get(g:, 'claude_panel_done_rows', 10)
 endfunction
 
+function! s:is_shut(key) abort
+  if a:key =~# '^x:'
+    return !has_key(s:opened, a:key)
+  endif
+  return has_key(s:collapsed, a:key)
+endfunction
+
+function! s:toggle_key(key) abort
+  let l:dict = a:key =~# '^x:' ? s:opened : s:collapsed
+  if has_key(l:dict, a:key)
+    call remove(l:dict, a:key)
+  else
+    let l:dict[a:key] = 1
+  endif
+endfunction
+
 function! s:marker(key) abort
-  return claude#sidebar#marker(empty(a:key) || !has_key(s:collapsed, a:key))
+  return claude#sidebar#marker(empty(a:key) || !s:is_shut(a:key))
 endfunction
 
 " ── window ───────────────────────────────────────────────────────────────────
@@ -193,6 +223,9 @@ let s:highlights = [
       \ ['ClaudeSessionClosed',     '',                 'Comment'],
       \ ['ClaudeSessionNameClosed', '',                 'NonText'],
       \ ['ClaudeSessionHelp',       'NERDTreeHelp',     'String'],
+      \ ['ClaudeSessionBaseTag',    '',                 'Identifier'],
+      \ ['ClaudeSessionDiffField',  '',                 'Special'],
+      \ ['ClaudeSessionNote',       '',                 'Comment'],
       \ ]
 
 function! claude#panel#_relink() abort
@@ -205,10 +238,13 @@ function! s:setup_syntax() abort
   let l:m = claude#sidebar#marker_class()
 
   " Tree nodes, identified by their indent: projects and status groups at
-  " the margin, rooms and sub-rooms below them. A room's branch, when it is
-  " not the one its name implies, follows an em dash.
+  " the margin, sections, directories and state-view projects below them. A
+  " project's branch, when it is not the one its name implies, follows an em
+  " dash.
   execute 'syntax match ClaudeSessionProject  /^' . l:m
-        \ . ' .*$/ contains=ClaudeSessionMarker'
+        \ . ' .*$/ contains=ClaudeSessionMarker,ClaudeSessionBaseTag'
+  " A project row ends with its baseline in brackets.
+  syntax match ClaudeSessionBaseTag / \[[^]]*\]$/ contained
   execute 'syntax match ClaudeSessionWorktree /^ \{2,}' . l:m
         \ . ' .*$/ contains=ClaudeSessionMarker,ClaudeSessionBranch'
   syntax match ClaudeSessionBranch / — .*$/ contained
@@ -236,7 +272,12 @@ function! s:setup_syntax() abort
   " the sub-room named after them.
   syntax match ClaudeSessionRoomTag /\[[^]]\+\]\%( \|$\)/ contained
 
-  syntax match ClaudeSessionHeader /\%1lClaude Sessions.*/
+  " A diff row starts with the diff tree's indicator field.
+  syntax match ClaudeSessionDiffField /^ \{2,}\[[^]]*\] /
+  " '(not pushed)', '(no changes vs origin/main)': notes, not rows.
+  syntax match ClaudeSessionNote /^ \{2,}(.*)$/
+
+  syntax match ClaudeSessionHeader /\%1l\%(Projects\|Claude Sessions\).*/
   " The footer, and the inline help block, whose lines are the only ones
   " indented by a single space.
   syntax match ClaudeSessionHelp /^? help$/
@@ -456,7 +497,7 @@ function! s:build_states(lines, nodes) abort
           \ l:group.label . ' (' . len(l:sessions) . ')')
     " A fold that hides a match makes the filter a lie, so an active filter
     " opens every group it matched in.
-    if has_key(s:collapsed, l:group.key) && empty(s:filter)
+    if s:is_shut(l:group.key) && empty(s:filter)
       continue
     endif
 
@@ -532,7 +573,7 @@ function! s:add_by_room(lines, nodes, gkey, shown) abort
     let l:key = a:gkey . '|r:' . l:b.project . '|' . l:b.room
     call s:add_group(a:lines, a:nodes, 'room', l:key, '  ', l:label)
     call s:tag_room(a:nodes[-1], l:b.project, l:rec)
-    if has_key(s:collapsed, l:key) && empty(s:filter)
+    if s:is_shut(l:key) && empty(s:filter)
       continue
     endif
     for [l:rec, l:label, l:sub] in l:b.items
@@ -574,80 +615,247 @@ function! s:tag_room(node, project, rec) abort
   let a:node.path    = get(a:rec, 'missing', 0) ? '' : get(a:rec, 'path', '')
 endfunction
 
-" ── the place view ───────────────────────────────────────────────────────────
+" ── the projects view ────────────────────────────────────────────────────────
 
-function! s:count_room(room) abort
-  let l:n = len(s:keep(a:room.sessions))
-  for l:sub in a:room.subs
-    let l:n += s:count_room(l:sub)
-  endfor
-  return l:n
+function! s:git(dir, args) abort
+  let l:out = systemlist('git -c core.quotepath=false -C '
+        \ . shellescape(a:dir) . ' ' . a:args . ' 2>/dev/null')
+  return v:shell_error == 0 ? l:out : []
 endfunction
 
-function! s:build_tree(lines, nodes) abort
-  let l:tree  = claude#session#tree(!empty(s:filter))
-  let l:drawn = 0
+" A project row: its name, then the baseline it diffs against in brackets.
+function! s:project_label(rec) abort
+  let l:name = get(a:rec, 'root', 0) ? a:rec.name . ' (root)'
+        \ : claude#room#label(a:rec)
+  let l:base = claude#room#baseline(a:rec)
+  return l:name . ' [' . (empty(l:base) ? 'no baseline' : l:base) . ']'
+endfunction
 
-  for l:proj in l:tree
-    let l:count = len(s:keep(l:proj.loose))
-    for l:room in l:proj.rooms
-      let l:count += s:count_room(l:room)
+" Whether {rec} — a session — runs in project {room} of repository {root}.
+function! s:in_project(rec, root, room) abort
+  return get(a:rec, 'project', '') ==# a:root
+        \ && get(a:rec, 'room', '') ==# a:room.id
+endfunction
+
+function! s:build_projects(lines, nodes) abort
+  let l:root     = claude#room#project_root()
+  let l:sessions = s:keep(!empty(s:filter) ? claude#session#all()
+        \                                  : claude#session#list())
+  let l:claimed  = {}
+
+  if empty(l:root)
+    call s:add_note(a:lines, a:nodes, '  ', '(not a git repository)')
+  else
+    for l:rec in claude#room#list(l:root)
+      let l:mine = filter(copy(l:sessions),
+            \ {_, r -> s:in_project(r, l:root, l:rec)})
+      for l:s in l:mine
+        let l:claimed[l:s.id] = 1
+      endfor
+      call s:add_project(a:lines, a:nodes, l:rec, l:mine)
     endfor
-    " A project whose every session was filtered out is not drawn at all.
-    if l:count == 0 && !empty(s:filter)
-      continue
-    endif
-    let l:drawn += l:count
+  endif
 
-    call s:add_group(a:lines, a:nodes, 'project', l:proj.key, '', l:proj.label,
-          \ 1)
-    let a:nodes[-1].path    = l:proj.path
-    let a:nodes[-1].project = l:proj.project
-    if has_key(s:collapsed, l:proj.key) && empty(s:filter)
-      continue
+  " Sessions in no project of this repository — another repository, outside
+  " git, a worktree the plugin did not make — stay reachable here.
+  let l:rest = filter(copy(l:sessions), {_, r -> !has_key(l:claimed, r.id)})
+  if !empty(l:rest)
+    call add(a:lines, '')
+    call add(a:nodes, s:node('blank', '', '', '', '', ''))
+    call s:add_group(a:lines, a:nodes, 'group', 'pe:elsewhere', '',
+          \ 'Elsewhere (' . len(l:rest) . ')')
+    if !s:is_shut('pe:elsewhere') || !empty(s:filter)
+      call s:add_by_room(a:lines, a:nodes, 'pe:elsewhere', l:rest)
     endif
+  endif
+endfunction
 
-    for l:room in l:proj.rooms
-      call s:add_room(a:lines, a:nodes, l:proj.project, l:room, '  ')
-    endfor
-    let l:loose  = s:keep(l:proj.loose)
-    let l:labels = s:disambiguate(l:loose)
+function! s:section_key(kind, rec) abort
+  return a:kind . a:rec.project . '|' . a:rec.id
+endfunction
+
+function! s:add_project(lines, nodes, rec, sessions) abort
+  let l:key = s:section_key('pp:', a:rec)
+  call s:add_group(a:lines, a:nodes, 'project', l:key, '',
+        \ s:project_label(a:rec), 1)
+  call s:tag_room(a:nodes[-1], a:rec.project, a:rec)
+  if s:is_shut(l:key) && empty(s:filter)
+    return
+  endif
+
+  let l:ind = '    '
+  " <baseline> Diff: everything the project did since it left its baseline,
+  " named after the baseline's branch. The fold key does not carry the name,
+  " so moving the baseline with b keeps the section open or shut.
+  let l:key  = s:section_key('x:pb:', a:rec)
+  let l:base = claude#room#baseline(a:rec)
+  call s:add_section(a:lines, a:nodes, 'diff', l:key, (empty(l:base)
+        \ ? 'Baseline' : claude#room#branch_name(a:rec.project, l:base))
+        \ . ' Diff', a:rec)
+  if !s:is_shut(l:key)
+    if empty(l:base)
+      call s:add_note(a:lines, a:nodes, l:ind, '(no baseline — b to set one)')
+    else
+      call s:add_diff(a:lines, a:nodes, l:key, a:rec,
+            \ claude#difftree#changes(a:rec.path, l:base), l:ind,
+            \ '(no changes vs ' . l:base . ')')
+    endif
+  endif
+
+  " Local Diff: what this checkout has that the remote branch does not.
+  let l:key = s:section_key('x:pl:', a:rec)
+  call s:add_section(a:lines, a:nodes, 'diff', l:key, 'Local Diff', a:rec)
+  if !s:is_shut(l:key)
+    let l:up = claude#room#upstream(a:rec)
+    if empty(l:up)
+      call s:add_note(a:lines, a:nodes, l:ind, '(not pushed)')
+    else
+      call s:add_diff(a:lines, a:nodes, l:key, a:rec,
+            \ claude#difftree#changes(a:rec.path, l:up), l:ind,
+            \ '(nothing unpushed vs ' . l:up . ')')
+    endif
+  endif
+
+  " Files: the worktree itself.
+  let l:key = s:section_key('x:pf:', a:rec)
+  call s:add_section(a:lines, a:nodes, 'files', l:key, 'Files', a:rec)
+  if !s:is_shut(l:key)
+    if !isdirectory(a:rec.path)
+      call s:add_note(a:lines, a:nodes, l:ind, '(worktree missing)')
+    else
+      let l:before = len(a:lines)
+      call s:add_files(a:lines, a:nodes, a:rec.path, '', l:ind)
+      if len(a:lines) == l:before
+        call s:add_note(a:lines, a:nodes, l:ind, '(empty)')
+      endif
+    endif
+  endif
+
+  " Sessions: open by default — they are what the panel is for.
+  let l:key = s:section_key('ps:', a:rec)
+  call s:add_section(a:lines, a:nodes, 'sessions', l:key,
+        \ 'Sessions (' . len(a:sessions) . ')', a:rec)
+  if !s:is_shut(l:key) || !empty(s:filter)
+    let l:labels = s:disambiguate(a:sessions)
     let l:i = 0
-    for l:rec in l:loose
-      call s:add_session(a:lines, a:nodes, l:rec, '  ', l:labels[l:i])
+    for l:s in a:sessions
+      call s:add_session(a:lines, a:nodes, l:s, l:ind, l:labels[l:i], 1)
       let l:i += 1
     endfor
-  endfor
-
-  if l:drawn == 0
-    call s:add_note(a:lines, a:nodes, '  ',
-          \ empty(s:filter) ? '(no sessions)' : '(nothing matches)')
   endif
 endfunction
 
-" A room row, its sessions, then its sub-rooms, each the same way one level
-" further in. A filter hides a room with nothing matching in it.
-function! s:add_room(lines, nodes, project, room, indent) abort
-  if !empty(s:filter) && s:count_room(a:room) == 0
-    return
-  endif
-  call s:add_group(a:lines, a:nodes, 'room', a:room.key, a:indent,
-        \ claude#room#label(a:room.rec), 1)
-  call s:tag_room(a:nodes[-1], a:project, a:room.rec)
-  if has_key(s:collapsed, a:room.key) && empty(s:filter)
-    return
-  endif
+" A section row under a project, carrying the project for the keys.
+function! s:add_section(lines, nodes, section, key, label, rec) abort
+  call s:add_group(a:lines, a:nodes, 'section', a:key, '  ', a:label)
+  call s:tag_room(a:nodes[-1], a:rec.project, a:rec)
+  let a:nodes[-1].section = a:section
+endfunction
 
-  let l:inner    = a:indent . '  '
-  let l:sessions = s:keep(a:room.sessions)
-  let l:labels   = s:disambiguate(l:sessions)
-  let l:i = 0
-  for l:rec in l:sessions
-    call s:add_session(a:lines, a:nodes, l:rec, l:inner, l:labels[l:i], 1)
-    let l:i += 1
+" A diff, as the diff tree draws it: directories, then files with their
+" indicator field.
+function! s:add_diff(lines, nodes, key, rec, files, indent, empty) abort
+  if empty(a:files)
+    call s:add_note(a:lines, a:nodes, a:indent, a:empty)
+    return
+  endif
+  call s:emit_diff_dir(a:lines, a:nodes, claude#difftree#dir_tree(a:files),
+        \ a:key, '', a:indent)
+endfunction
+
+function! s:emit_diff_dir(lines, nodes, dir, key, prefix, indent) abort
+  for l:sub in a:dir.dirs
+    let l:path = empty(a:prefix) ? l:sub.name : a:prefix . '/' . l:sub.name
+    let l:dkey = 'pd:' . a:key . '|' . l:path
+    call s:add_group(a:lines, a:nodes, 'dir', l:dkey, a:indent, l:sub.name)
+    if !s:is_shut(l:dkey)
+      call s:emit_diff_dir(a:lines, a:nodes, l:sub, a:key, l:path,
+            \ a:indent . '  ')
+    endif
   endfor
-  for l:sub in a:room.subs
-    call s:add_room(a:lines, a:nodes, a:project, l:sub, l:inner)
+  for l:rec in a:dir.files
+    let l:name = fnamemodify(l:rec.path, ':t')
+    call add(a:lines, a:indent . claude#difftree#field(l:rec) . ' ' . l:name)
+    let l:node = s:node('file', '', '', a:indent, l:name, '')
+    let l:node.file = l:rec
+    call add(a:nodes, l:node)
+  endfor
+endfunction
+
+" ── the file tree ────────────────────────────────────────────────────────────
+"
+" Drawn by the panel itself rather than borrowed from NERDTree, which cannot
+" be put inside another buffer. Directories are listed one level at a time as
+" they are opened, from an index git builds once per worktree — so .gitignore
+" is honoured — and rebuilt on R or when the Files section is opened again.
+
+" The worktree's files, as {dir -> {'dirs': [...], 'files': [...]}} with ''
+" for the top. {} when git cannot list it, which falls back to readdir().
+function! s:file_index(wt) abort
+  if has_key(s:findex, a:wt)
+    return s:findex[a:wt]
+  endif
+  let l:index = {}
+  let l:paths = s:git(a:wt, 'ls-files --cached --others --exclude-standard')
+  if v:shell_error == 0
+    let l:index[''] = {'dirs': {}, 'files': {}}
+    for l:path in l:paths
+      if empty(l:path) || l:path =~# '^\.vim-workspace/'
+        continue
+      endif
+      let l:parts = split(l:path, '/')
+      let l:dir = ''
+      for l:part in l:parts[: -2]
+        let l:index[l:dir].dirs[l:part] = 1
+        let l:dir = empty(l:dir) ? l:part : l:dir . '/' . l:part
+        if !has_key(l:index, l:dir)
+          let l:index[l:dir] = {'dirs': {}, 'files': {}}
+        endif
+      endfor
+      let l:index[l:dir].files[l:parts[-1]] = 1
+    endfor
+  endif
+  let s:findex[a:wt] = l:index
+  return l:index
+endfunction
+
+" [dirs, files] directly inside {rel} of worktree {wt}, each sorted.
+function! s:children(wt, rel) abort
+  let l:index = s:file_index(a:wt)
+  if !empty(l:index)
+    let l:entry = get(l:index, a:rel, {'dirs': {}, 'files': {}})
+    return [sort(keys(l:entry.dirs)), sort(keys(l:entry.files))]
+  endif
+  let l:full = empty(a:rel) ? a:wt : a:wt . '/' . a:rel
+  let l:dirs  = []
+  let l:files = []
+  for l:name in (exists('*readdir') ? readdir(l:full)
+        \ : map(glob(l:full . '/*', 1, 1), {_, p -> fnamemodify(p, ':t')}))
+    if l:name ==# '.git' || l:name ==# '.vim-workspace'
+      continue
+    endif
+    call add(isdirectory(l:full . '/' . l:name) ? l:dirs : l:files, l:name)
+  endfor
+  return [sort(l:dirs), sort(l:files)]
+endfunction
+
+function! s:add_files(lines, nodes, wt, rel, indent) abort
+  let [l:dirs, l:files] = s:children(a:wt, a:rel)
+  for l:name in l:dirs
+    let l:path = empty(a:rel) ? l:name : a:rel . '/' . l:name
+    let l:key  = 'x:fd:' . a:wt . '|' . l:path
+    call s:add_group(a:lines, a:nodes, 'dir', l:key, a:indent, l:name . '/')
+    if !s:is_shut(l:key)
+      call s:add_files(a:lines, a:nodes, a:wt, l:path, a:indent . '  ')
+    endif
+  endfor
+  for l:name in l:files
+    let l:path = empty(a:rel) ? l:name : a:rel . '/' . l:name
+    call add(a:lines, a:indent . '  ' . claude#sidebar#fit(s:width(),
+          \ a:indent . '  ', l:name))
+    let l:node = s:node('file', '', '', a:indent, l:name, '')
+    let l:node.file = {'worktree': a:wt, 'path': l:path}
+    call add(a:nodes, l:node)
   endfor
 endfunction
 
@@ -666,29 +874,47 @@ function! s:header_count() abort
   return '(' . len(l:live) . ')'
 endfunction
 
+function! s:help_lines() abort
+  if s:grouping ==# 'projects'
+    return [
+          \ '',
+          \ ' <CR>/o open   i split   s vsplit',
+          \ ' t tab     N new project  m menu',
+          \ ' n new session   b baseline',
+          \ ' u merge baseline   D delete',
+          \ ' g by status  / filter  r rename',
+          \ ' d end     X purge  R refresh',
+          \ ' I ' . (claude#session#show_hidden() ? 'hide' : 'show')
+          \   . ' hidden',
+          \ ' <Space> fold   q hide   ? help',
+          \ ]
+  endif
+  return [
+        \ '',
+        \ ' <CR>/o open   i split   s vsplit',
+        \ ' t tab     n new here  N new project',
+        \ ' g projects  / filter  r rename',
+        \ ' d end     X purge  R refresh',
+        \ ' m menu    D delete project',
+        \ ' I ' . (claude#session#show_hidden() ? 'hide' : 'show')
+        \   . ' hidden',
+        \ ' <Space> fold   q hide   ? help',
+        \ ]
+endfunction
+
 function! s:build() abort
   let l:lines = []
   let l:nodes = []
   let s:mixed = s:mixed_providers(claude#session#all())
 
-  let l:title = 'Claude Sessions'
+  let l:title = s:grouping ==# 'projects' ? 'Projects' : 'Claude Sessions'
   let l:count = s:header_count()
   let l:pad   = max([1, s:width() - strchars(l:title) - strchars(l:count)])
   call add(l:lines, l:title . repeat(' ', l:pad) . l:count)
   call add(l:nodes, s:node('header', '', '', '', l:title, ''))
 
   if s:show_help
-    for l:h in [
-          \ '',
-          \ ' <CR>/o open   i split   s vsplit',
-          \ ' t tab     n new here  N new…',
-          \ ' g ' . (s:grouping ==# 'state' ? 'by place' : 'by state')
-          \   . '  / filter  r rename',
-          \ ' d end     D purge  R refresh',
-          \ ' I ' . (claude#session#show_hidden() ? 'hide' : 'show')
-          \   . ' hidden',
-          \ ' <Space> fold   q hide   ? help',
-          \ ]
+    for l:h in s:help_lines()
       call add(l:lines, l:h)
       call add(l:nodes, s:node('help', '', '', '', l:h, ''))
     endfor
@@ -700,7 +926,7 @@ function! s:build() abort
   if s:grouping ==# 'state'
     call s:build_states(l:lines, l:nodes)
   else
-    call s:build_tree(l:lines, l:nodes)
+    call s:build_projects(l:lines, l:nodes)
   endif
 
   call add(l:lines, '')
@@ -728,6 +954,7 @@ function! s:render() abort
 
   let s:rendered = map(filter(copy(l:nodes),
         \ {_, n -> n.kind ==# 'session'}), {_, n -> n.id})
+  let s:known = map(copy(claude#session#list()), {_, r -> r.id})
 
   if l:restore > 0
     call win_execute(l:win,
@@ -735,11 +962,13 @@ function! s:render() abort
   endif
 endfunction
 
-" Rebuild the tree. Safe to call when the panel is not open.
+" Rebuild the tree. Safe to call when the panel is not open. The file index is
+" dropped too: whatever made the caller refresh may have added files.
 function! claude#panel#refresh() abort
   if !claude#panel#is_open()
     return
   endif
+  let s:findex = {}
   call s:render()
 endfunction
 
@@ -777,6 +1006,10 @@ endfunction
 
 " Repaint the status column in place. Falls back to a full rebuild when the
 " set of sessions itself changed, since the tree shape may differ.
+"
+" The projects view is repainted in place for another reason too: a full
+" rebuild redraws every open diff and file tree, and a status change does not
+" touch either.
 function! s:repaint() abort
   if s:grouping ==# 'state'
     " The status *is* the row's position here: a session that starts waiting
@@ -785,9 +1018,8 @@ function! s:repaint() abort
     return
   endif
   let l:nodes = getbufvar(s:bufnr, 'claude_panel_nodes', [])
-  let l:ids   = map(filter(copy(claude#session#list()),
-        \ {_, r -> 1}), {_, r -> r.id})
-  if sort(copy(l:ids)) != sort(copy(s:rendered))
+  let l:ids   = map(copy(claude#session#list()), {_, r -> r.id})
+  if sort(copy(l:ids)) != sort(copy(s:known))
     call s:render()
     return
   endif
@@ -822,12 +1054,16 @@ function! s:setup_keys() abort
   nnoremap <buffer> <silent> s       :call <SID>open('vsplit')<CR>
   nnoremap <buffer> <silent> t       :call <SID>open('tab')<CR>
   nnoremap <buffer> <silent> n       :call <SID>new()<CR>
-  nnoremap <buffer> <silent> N       :call <SID>new_asking()<CR>
+  nnoremap <buffer> <silent> N       :call <SID>new_project()<CR>
+  nnoremap <buffer> <silent> m       :call <SID>menu()<CR>
+  nnoremap <buffer> <silent> b       :call <SID>change_base()<CR>
+  nnoremap <buffer> <silent> u       :call <SID>update_base()<CR>
+  nnoremap <buffer> <silent> D       :call <SID>delete_project()<CR>
   nnoremap <buffer> <silent> g       :call <SID>swap_grouping()<CR>
   nnoremap <buffer> <silent> /       :call <SID>prompt_filter()<CR>
   nnoremap <buffer> <silent> r       :call <SID>rename()<CR>
   nnoremap <buffer> <silent> d       :call <SID>end_session()<CR>
-  nnoremap <buffer> <silent> D       :call <SID>purge()<CR>
+  nnoremap <buffer> <silent> X       :call <SID>purge()<CR>
   nnoremap <buffer> <silent> R       :call <SID>full_refresh()<CR>
   " NERDTree's key for "show the hidden ones". Lowercase i keeps splitting.
   nnoremap <buffer> <silent> I       :call <SID>toggle_hidden()<CR>
@@ -853,6 +1089,8 @@ function! s:activate() abort
   endif
   if l:node.kind ==# 'session'
     call claude#panel#open_session(l:node.id, 'here')
+  elseif l:node.kind ==# 'file'
+    call s:open_file(l:node.file, 'here')
   elseif l:node.kind ==# 'more'
     let s:done_all = 1
     call s:render()
@@ -863,21 +1101,31 @@ endfunction
 
 function! s:open(mode) abort
   let l:node = s:current_node()
-  if empty(l:node) || l:node.kind !=# 'session'
+  if empty(l:node)
     return
   endif
-  call claude#panel#open_session(l:node.id, a:mode)
+  if l:node.kind ==# 'session'
+    call claude#panel#open_session(l:node.id, a:mode)
+  elseif l:node.kind ==# 'file'
+    call s:open_file(l:node.file, a:mode)
+  endif
 endfunction
 
+" Opening a diff or a file tree reads it afresh: what an agent changed since
+" the last look is the reason to look.
 function! s:fold() abort
   let l:node = s:current_node()
   if empty(l:node) || empty(l:node.key)
     return
   endif
-  if has_key(s:collapsed, l:node.key)
-    call remove(s:collapsed, l:node.key)
-  else
-    let s:collapsed[l:node.key] = 1
+  call s:toggle_key(l:node.key)
+  if l:node.kind ==# 'section' && !s:is_shut(l:node.key)
+    if get(l:node, 'section', '') ==# 'files'
+      silent! call remove(s:findex, l:node.path)
+    elseif get(l:node, 'section', '') ==# 'diff'
+      call claude#difftree#refresh()
+      return
+    endif
   endif
   call s:render()
 endfunction
@@ -898,12 +1146,14 @@ endfunction
 function! s:full_refresh() abort
   call claude#session#regroup()
   call claude#session#refresh()
+  let s:findex = {}
+  call claude#difftree#refresh()
   call s:render()
 endfunction
 
-" Swap the top level between what sessions are doing and where they live.
+" Swap the top level between the projects and what sessions are doing.
 function! s:swap_grouping() abort
-  let s:grouping = s:grouping ==# 'state' ? 'place' : 'state'
+  let s:grouping = s:grouping ==# 'state' ? 'projects' : 'state'
   call s:render()
 endfunction
 
@@ -919,104 +1169,132 @@ function! s:prompt_filter() abort
   call s:render()
 endfunction
 
-" Where a session started with n should run, as [room id, directory]. At most
-" one of the two is set; both empty means "wherever a session with nowhere to
-" go would have run anyway" — the selected room.
-"
-" "Where the cursor is" means the whole subtree, not just the row it is on: a
-" room row and every session row under it answer with the same room, because
-" that is the checkout you are looking at. A project row answers with its root
-" checkout.
-function! s:place_under_cursor() abort
+" ── the project under the cursor ─────────────────────────────────────────────
+
+" The project the row under the cursor belongs to — the project row itself,
+" any row inside it, or, in the state view, a project row and the sessions
+" under it — as its record, or {} when the row is in none.
+function! s:project_under_cursor() abort
   let l:nodes = get(b:, 'claude_panel_nodes', [])
-  let l:idx   = line('.') - 1
-  let l:here  = claude#room#project_root()
-
-  if l:idx >= 0 && l:idx < len(l:nodes)
-    let l:node = l:nodes[l:idx]
-    if l:node.kind ==# 'session'
-      " A session row answers for itself, in either view: it knows both the
-      " room it belongs to and the directory it ran in.
-      let l:rec = claude#session#get(l:node.id)
-      if !empty(get(l:rec, 'room', '')) && get(l:rec, 'project', '') ==# l:here
-            \ && !empty(claude#room#get(l:rec.room))
-        return [l:rec.room, '']
+  let l:i     = line('.') - 1
+  while l:i >= 0 && l:i < len(l:nodes)
+    let l:up = l:nodes[l:i]
+    if index(['project', 'room', 'section'], l:up.kind) >= 0
+          \ && !empty(get(l:up, 'room', ''))
+      if get(l:up, 'missing', 0)
+        return {}
       endif
-      let l:dir = get(l:rec, 'worktree', '')
-      return isdirectory(l:dir) ? ['', l:dir] : ['', '']
+      return claude#room#get(l:up.room, get(l:up, 'project', ''))
     endif
-
-    " Otherwise walk up the drawn rows to the nearest room or project row.
-    let l:i = l:idx
-    while l:i >= 0
-      let l:up = l:nodes[l:i]
-      if l:up.kind ==# 'room' && !get(l:up, 'missing', 0)
-        if get(l:up, 'project', '') ==# l:here
-          return [l:up.room, '']
-        endif
-        return isdirectory(l:up.path) ? ['', l:up.path] : ['', '']
-      endif
-      if l:up.kind ==# 'project'
-        if get(l:up, 'project', '') ==# l:here && !empty(l:here)
-          return ['root', '']
-        endif
-        return isdirectory(l:up.path) ? ['', l:up.path] : ['', '']
-      endif
-      if l:up.kind ==# 'group'
-        break
-      endif
-      let l:i -= 1
-    endwhile
-  endif
-  return ['', '']
+    if l:up.kind ==# 'group' || l:up.kind ==# 'header'
+      break
+    endif
+    if l:up.kind ==# 'session' && empty(l:up.indent)
+      break
+    endif
+    let l:i -= 1
+  endwhile
+  return {}
 endfunction
+
+" The project under the cursor, for a key that changes it. Only projects of
+" the repository Vim is in can be changed from here; {what} names the action
+" in the warning for the others.
+function! s:project_for(what) abort
+  let l:rec = s:project_under_cursor()
+  if empty(l:rec)
+    call s:warn('put the cursor on a project to ' . a:what)
+    return {}
+  endif
+  if l:rec.project !=# claude#room#project_root()
+    call s:warn(l:rec.name . ' belongs to another repository; open it there'
+          \ . ' to ' . a:what)
+    return {}
+  endif
+  return l:rec
+endfunction
+
+function! s:warn(msg) abort
+  echohl WarningMsg
+  echomsg 'claude.vim: ' . a:msg
+  echohl None
+endfunction
+
+" ── sessions ─────────────────────────────────────────────────────────────────
 
 " Which agent the row under the cursor is running, so n can start another like
-" it. A row that names no session — a project, a branch, the header — answers
-" with the configured default.
+" it, or '' when the row names no session.
 function! s:provider_under_cursor() abort
-  let l:nodes = get(b:, 'claude_panel_nodes', [])
-  let l:idx   = line('.') - 1
-  while l:idx >= 0 && l:idx < len(l:nodes)
-    if l:nodes[l:idx].kind ==# 'session'
-      let l:rec = claude#session#get(l:nodes[l:idx].id)
-      if !empty(l:rec)
-        return claude#provider#of(l:rec)
-      endif
+  let l:node = s:current_node()
+  if !empty(l:node) && l:node.kind ==# 'session'
+    let l:rec = claude#session#get(l:node.id)
+    if !empty(l:rec)
+      return claude#provider#of(l:rec)
     endif
-    let l:idx -= 1
-  endwhile
-  return claude#provider#default()
+  endif
+  return ''
 endfunction
 
-" n — a session here. One question, not two: the row under the cursor already
-" says which room "here" is and which agent is running there, so only the
-" name is worth asking for. Leaving it blank is still an answer — the session
-" labels itself from its first message — and g:claude_session_prompt_name = 0
-" skips the question entirely.
+" n — a session in the project under the cursor. A session row starts
+" another like it, in the same place on the same agent; any other row inside
+" a project starts one there, asking which agent when there is more than one;
+" anywhere else asks which project first (unless g:claude_session_prompt_name
+" turned the questions off). Then only the name is asked for,
+" and leaving it blank is still an answer — the session labels itself from
+" its first message.
 function! s:new() abort
-  let [l:room, l:dir] = s:place_under_cursor()
-  let l:provider      = s:provider_under_cursor()
+  let l:opts = {'ask_name': get(g:, 'claude_session_prompt_name', 1)}
+  let l:node = s:current_node()
+  let l:here = claude#room#project_root()
+
+  let l:provider = s:provider_under_cursor()
+  if !empty(l:provider)
+    let l:rec = claude#session#get(l:node.id)
+    if !empty(get(l:rec, 'room', '')) && get(l:rec, 'project', '') ==# l:here
+          \ && !empty(claude#room#get(l:rec.room))
+      let l:opts.room = l:rec.room
+    elseif isdirectory(get(l:rec, 'worktree', ''))
+      let l:opts.cwd = l:rec.worktree
+    endif
+  else
+    let l:proj = s:project_under_cursor()
+    if !empty(l:proj)
+      if l:proj.project ==# l:here
+        let l:opts.room = l:proj.id
+      else
+        let l:opts.cwd = l:proj.path
+      endif
+    elseif !empty(l:here) && get(g:, 'claude_session_prompt_name', 1)
+      " With the prompts turned off nothing is asked: the session goes in the
+      " selected project, as it does everywhere else.
+      let [l:ok, l:answer] = claude#room#ask()
+      if !l:ok
+        return
+      endif
+      let l:opts.answer = l:answer
+    endif
+    let [l:ok, l:provider] = get(g:, 'claude_session_prompt_name', 1)
+          \ ? s:ask_provider() : [1, claude#provider#default()]
+    if !l:ok
+      return
+    endif
+  endif
+  let l:opts.provider = l:provider
+
   call s:enter_main()
-  let l:id = claude#session#spawn({
-        \ 'room':      l:room,
-        \ 'cwd':       l:dir,
-        \ 'provider':  l:provider,
-        \ 'ask_name':  get(g:, 'claude_session_prompt_name', 1),
-        \ })
+  let l:id = claude#session#spawn(l:opts)
   if !empty(l:id)
     call claude#session#touch_focus(l:id)
   endif
 endfunction
 
-" Which agent a deliberate new session should run. Returns [1, provider], or
-" [0, ''] when the question was cancelled — the same contract as
-" claude#room#ask(), so CTRL-C here creates nothing at all. With only one agent
-" registered there is nothing worth asking.
+" Which agent a new session should run. Returns [1, provider], or [0, ''] when
+" the question was cancelled — the same contract as claude#room#ask(), so
+" CTRL-C here creates nothing at all. With only one agent registered there is
+" nothing worth asking.
 "
-" inputlist() rather than a popup: this is the first of three questions in a
-" row, and the other two are input() prompts. A popup would have to hand the
-" rest of the chain to a callback to ask the same thing.
+" inputlist() rather than a popup: the name question follows, and it is an
+" input() prompt. A popup would have to hand it to a callback.
 function! s:ask_provider() abort
   let l:names = claude#provider#names()
   if len(l:names) < 2
@@ -1040,19 +1318,6 @@ function! s:ask_provider() abort
   return [1, l:names[l:choice - 1]]
 endfunction
 
-" N — the deliberate one: which agent, which room, and what to call it.
-function! s:new_asking() abort
-  let [l:ok, l:provider] = s:ask_provider()
-  if !l:ok
-    return
-  endif
-  call s:enter_main()
-  let l:id = claude#session#new('', v:null, l:provider)
-  if !empty(l:id)
-    call claude#session#touch_focus(l:id)
-  endif
-endfunction
-
 function! s:rename() abort
   let l:node = s:current_node()
   if empty(l:node) || l:node.kind !=# 'session'
@@ -1066,17 +1331,10 @@ function! s:rename() abort
   endif
 endfunction
 
-" d — end the session under the cursor, or, on a room row, remove the room.
+" d — end the session under the cursor.
 function! s:end_session() abort
   let l:node = s:current_node()
-  if empty(l:node)
-    return
-  endif
-  if l:node.kind ==# 'room'
-    call s:remove_room(l:node, 0)
-    return
-  endif
-  if l:node.kind !=# 'session'
+  if empty(l:node) || l:node.kind !=# 'session'
     return
   endif
   let l:rec = claude#session#get(l:node.id)
@@ -1086,49 +1344,9 @@ function! s:end_session() abort
   endif
 endfunction
 
-" Remove the room on {node}'s row: its worktree, never its branch. {force}
-" discards uncommitted work, and says so before asking. The root checkout,
-" rooms of another project and rooms that are already gone are left alone.
-function! s:remove_room(node, force) abort
-  let l:id = get(a:node, 'room', '')
-  if empty(l:id) || l:id ==# 'root' || get(a:node, 'missing', 0)
-        \ || get(a:node, 'project', '') !=# claude#room#project_root()
-    return
-  endif
-  let l:rec = claude#room#get(l:id)
-  if empty(l:rec)
-    return
-  endif
-  " A room with sub-rooms is refused before anything is asked: a yes would
-  " only be met with a no.
-  let l:subs = claude#room#children(l:id)
-  if !empty(l:subs)
-    echohl WarningMsg
-    echomsg 'claude.vim: ' . l:rec.name . ' has ' . len(l:subs) . ' sub-room'
-          \ . (len(l:subs) == 1 ? '' : 's') . '; remove them first'
-    echohl None
-    return
-  endif
-  let l:msg = (a:force ? 'Force-remove' : 'Remove') . ' room "' . l:rec.name
-        \ . '"? Its branch ' . l:rec.branch . ' is kept.'
-        \ . (a:force ? ' Uncommitted changes will be lost.' : '')
-  if confirm(l:msg, "&Yes\n&No", 2) != 1
-    return
-  endif
-  let l:ok = a:force ? claude#room#force_remove(l:id) : claude#room#remove(l:id)
-  if l:ok
-    call s:render()
-  endif
-endfunction
-
-" D — purge the session under the cursor, or, on a room row, force-remove the
-" room.
+" X — purge the session under the cursor: end it and delete its transcript.
 function! s:purge() abort
   let l:node = s:current_node()
-  if !empty(l:node) && l:node.kind ==# 'room'
-    call s:remove_room(l:node, 1)
-    return
-  endif
   if empty(l:node) || l:node.kind !=# 'session'
     return
   endif
@@ -1142,6 +1360,294 @@ function! s:purge() abort
     return
   endif
   call claude#session#purge(l:node.id)
+endfunction
+
+" ── projects ─────────────────────────────────────────────────────────────────
+
+" N — a new project: a name, a baseline (blank for the default branch), then a
+" branch and a worktree of its own. Starts no session; n does that.
+function! s:new_project() abort
+  let [l:ok, l:answer] = claude#room#ask_new()
+  if !l:ok
+    return
+  endif
+  let l:rec = claude#room#realise(l:answer)
+  if empty(l:rec)
+    return
+  endif
+  let s:grouping = 'projects'
+  call claude#difftree#refresh()
+  call s:render()
+  call s:goto_project(l:rec)
+  echomsg 'claude.vim: project ' . l:rec.name . ' created on ' . l:rec.branch
+        \ . ' from ' . l:rec.base
+endfunction
+
+function! s:goto_project(rec) abort
+  let l:key   = s:section_key('pp:', a:rec)
+  let l:nodes = getbufvar(s:bufnr, 'claude_panel_nodes', [])
+  let l:i = 0
+  for l:node in l:nodes
+    let l:i += 1
+    if l:node.key ==# l:key
+      let l:win = bufwinid(s:bufnr)
+      if l:win != -1
+        call win_execute(l:win, 'call cursor(' . l:i . ', 1)')
+      endif
+      return
+    endif
+  endfor
+endfunction
+
+" D — delete the project under the cursor: its worktree goes, its branch is
+" kept. Asked twice when the worktree has uncommitted changes, which would be
+" lost. The root checkout is not a project that can be deleted.
+function! s:delete_project() abort
+  let l:rec = s:project_for('delete it')
+  if empty(l:rec)
+    return
+  endif
+  if get(l:rec, 'root', 0)
+    call s:warn('the root checkout cannot be deleted')
+    return
+  endif
+  let l:msg = 'Delete project "' . l:rec.name . '"? Its worktree '
+        \ . claude#sidebar#home_relative(l:rec.path) . ' is removed; branch '
+        \ . l:rec.branch . ' is kept.'
+  if confirm(l:msg, "&Yes\n&No", 2) != 1
+    return
+  endif
+  let l:force = 0
+  if claude#room#is_dirty(l:rec)
+    if confirm(l:rec.name . ' has uncommitted changes. Delete anyway and'
+          \ . ' lose them?', "&Yes\n&No", 2) != 1
+      return
+    endif
+    let l:force = 1
+  endif
+  let l:ok = l:force ? claude#room#force_remove(l:rec.id)
+        \            : claude#room#remove(l:rec.id)
+  if l:ok
+    silent! call remove(s:findex, l:rec.path)
+    call claude#difftree#refresh()
+    call s:render()
+  endif
+endfunction
+
+" b — pick a new baseline for the project under the cursor, completing branch
+" names. Blank goes back to the default branch.
+function! s:change_base() abort
+  let l:rec = s:project_for('change its baseline')
+  if empty(l:rec)
+    return
+  endif
+  try
+    let l:new = input('Baseline for ' . l:rec.name . ' (blank for default): ',
+          \ claude#room#baseline(l:rec),
+          \ 'customlist,claude#difftree#complete_branch')
+  catch /^Vim:Interrupt$/
+    redraw
+    return
+  endtry
+  redraw
+  if claude#room#set_base(l:rec.id, trim(l:new), l:rec.project)
+    call s:render()
+  endif
+endfunction
+
+" u — fetch the project's baseline and merge it into the project's branch.
+function! s:update_base() abort
+  let l:rec = s:project_for('update it')
+  if empty(l:rec)
+    return
+  endif
+  let l:base = claude#room#baseline(l:rec)
+  if empty(l:base)
+    call s:warn(l:rec.name . ' has no baseline; b sets one')
+    return
+  endif
+  if confirm('Fetch ' . l:base . ' and merge it into ' . l:rec.branch . '?',
+        \ "&Yes\n&No", 1) != 1
+    return
+  endif
+  call claude#room#update(l:rec.id, l:rec.project)
+  let s:findex = {}
+  call s:render()
+endfunction
+
+" ── the m menu ───────────────────────────────────────────────────────────────
+
+" [hotkey, label, function] for each entry m offers on the row under the
+" cursor. The hotkeys are the direct mappings, so the menu teaches them.
+function! s:menu_items() abort
+  let l:items = []
+  let l:rec   = s:project_under_cursor()
+  if !empty(l:rec)
+    call add(l:items, ['n', 'New session in ' . l:rec.name, function('s:new')])
+    if l:rec.project ==# claude#room#project_root()
+      call add(l:items, ['b', 'Change baseline…', function('s:change_base')])
+      call add(l:items, ['u', 'Update from baseline (fetch + merge)',
+            \ function('s:update_base')])
+      if !get(l:rec, 'root', 0)
+        call add(l:items, ['D', 'Delete project…',
+              \ function('s:delete_project')])
+      endif
+    endif
+  endif
+  call add(l:items, ['N', 'New project…', function('s:new_project')])
+  call add(l:items, ['g', s:grouping ==# 'projects'
+        \ ? 'Show sessions by status' : 'Show projects',
+        \ function('s:swap_grouping')])
+  call add(l:items, ['R', 'Refresh', function('s:full_refresh')])
+  return l:items
+endfunction
+
+function! s:use_popup() abort
+  return has('popupwin') && !get(g:, 'claude_no_popup', 0)
+endfunction
+
+" m — NERDTree's menu key: every action on the project under the cursor, each
+" with the key that does it directly.
+function! s:menu() abort
+  let l:items  = s:menu_items()
+  let l:labels = map(copy(l:items), {_, it -> '(' . it[0] . ') ' . it[1]})
+  let l:rec    = s:project_under_cursor()
+  let l:title  = empty(l:rec) ? ' Projects ' : ' ' . l:rec.name . ' '
+
+  if s:use_popup()
+    let l:keys = map(copy(l:items), {_, it -> it[0]})
+    call popup_menu(l:labels, {
+          \ 'title':    l:title,
+          \ 'filter':   {id, key -> s:menu_filter(l:keys, id, key)},
+          \ 'callback': {_, idx -> s:menu_pick(l:items, idx)},
+          \ 'padding':  [0, 1, 0, 1],
+          \ 'border':   [],
+          \ })
+    return
+  endif
+
+  let l:menu = [trim(l:title) . ':']
+  let l:i = 1
+  for l:label in l:labels
+    call add(l:menu, printf('%d. %s', l:i, l:label))
+    let l:i += 1
+  endfor
+  try
+    let l:choice = inputlist(l:menu)
+  catch /^Vim:Interrupt$/
+    let l:choice = 0
+  endtry
+  redraw
+  call s:menu_pick(l:items, l:choice)
+endfunction
+
+" A hotkey picks its entry at once; everything else is the usual menu.
+function! s:menu_filter(keys, id, key) abort
+  let l:idx = index(a:keys, a:key)
+  if l:idx >= 0
+    call popup_close(a:id, l:idx + 1)
+    return 1
+  endif
+  return popup_filter_menu(a:id, a:key)
+endfunction
+
+function! s:menu_pick(items, idx) abort
+  if a:idx < 1 || a:idx > len(a:items)
+    return
+  endif
+  call call(a:items[a:idx - 1][2], [])
+endfunction
+
+" ── opening a file ───────────────────────────────────────────────────────────
+
+" {file} is {'worktree', 'path'}. <CR> reuses the window the user was last
+" working in, the way NERDTree does; the other modes split it.
+function! s:open_file(file, mode) abort
+  let l:full = a:file.worktree . '/' . a:file.path
+  if !filereadable(l:full)
+    call s:warn(a:file.path . ' no longer exists on disk')
+    return
+  endif
+  if a:mode ==# 'here'
+    let l:target = claude#sidebar#last_main_winid()
+    call claude#sidebar#enter_main(l:target > 0 ? l:target : s:prev_winid)
+  else
+    call s:make_window(a:mode)
+  endif
+  execute 'edit ' . fnameescape(l:full)
+endfunction
+
+" ── revealing a file ─────────────────────────────────────────────────────────
+
+" The project whose worktree holds {path} — the deepest, since the root
+" checkout holds every project under .vim-workspace too — or {}.
+function! s:project_of_file(path) abort
+  let l:root = claude#room#project_of(fnamemodify(a:path, ':h'))
+  if empty(l:root)
+    return {}
+  endif
+  let l:best = {}
+  for l:rec in claude#room#list(l:root)
+    let l:dir = resolve(l:rec.path)
+    if stridx(a:path, l:dir . '/') == 0
+          \ && strlen(l:dir) > strlen(resolve(get(l:best, 'path', '')))
+      let l:best = l:rec
+    endif
+  endfor
+  return l:best
+endfunction
+
+" :ClaudeReveal — NERDTreeFind for the projects panel: open the panel on the
+" projects view, unfold the project holding {path} (default: the current
+" file), its Files and every directory on the way, and put the cursor on the
+" file. Outside any project, NERDTreeFind does what it always did.
+function! claude#panel#reveal(...) abort
+  let l:path = resolve(fnamemodify(a:0 > 0 && !empty(a:1) ? a:1
+        \ : expand('%'), ':p'))
+  let l:rec = filereadable(l:path) ? s:project_of_file(l:path) : {}
+  if empty(l:rec)
+    if exists(':NERDTreeFind') == 2
+      NERDTreeFind
+    else
+      call s:warn('this file is in no project')
+    endif
+    return
+  endif
+
+  let l:wt  = l:rec.path
+  let l:rel = l:path[strlen(resolve(l:wt)) + 1 :]
+  let s:grouping = 'projects'
+  let s:filter   = ''
+  silent! call remove(s:collapsed, s:section_key('pp:', l:rec))
+  let s:opened[s:section_key('x:pf:', l:rec)] = 1
+  let l:dir = ''
+  for l:part in split(l:rel, '/')[: -2]
+    let l:dir = empty(l:dir) ? l:part : l:dir . '/' . l:part
+    let s:opened['x:fd:' . l:wt . '|' . l:dir] = 1
+  endfor
+  " Read the tree afresh: the file may be new since it was last listed.
+  silent! call remove(s:findex, l:wt)
+
+  if claude#panel#is_open()
+    call win_gotoid(bufwinid(s:bufnr))
+    call s:render()
+  else
+    call claude#panel#open()
+  endif
+
+  let l:i = 0
+  for l:node in getbufvar(s:bufnr, 'claude_panel_nodes', [])
+    let l:i += 1
+    if l:node.kind ==# 'file' && l:node.file.worktree ==# l:wt
+          \ && l:node.file.path ==# l:rel && !has_key(l:node.file, 'committed')
+      call cursor(l:i, 1)
+      normal! zz
+      return
+    endif
+  endfor
+  " Not listed: git ignores it. Land on the project at least.
+  call s:goto_project(l:rec)
+  call s:warn(l:rel . ' is not in the file tree (ignored by git?)')
 endfunction
 
 " ── opening a session ────────────────────────────────────────────────────────
@@ -1197,7 +1703,7 @@ endfunction
 
 " ── test seam ────────────────────────────────────────────────────────────────
 
-" Which view the panel is drawing — 'state' or 'place'. Passing a name swaps
+" Which view the panel is drawing — 'projects' or 'state'. Passing a name swaps
 " to it and redraws, which is what the g key does.
 function! claude#panel#_grouping(...) abort
   if a:0 > 0 && a:1 !=# s:grouping
@@ -1234,7 +1740,10 @@ function! claude#panel#_reset() abort
   let s:show_help  = 0
   let s:collapsed  = {'st:done': 1}
   let s:rendered   = []
-  let s:grouping   = 'state'
+  let s:grouping   = 'projects'
+  let s:known      = []
+  let s:findex     = {}
+  let s:opened     = {}
   let s:filter     = ''
   let s:done_all   = 0
   call claude#sidebar#_reset()

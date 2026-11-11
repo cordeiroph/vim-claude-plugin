@@ -18,9 +18,9 @@ endfunction
 
 " Start a new session regardless of what is already running.
 "
-" a:1 args     — the raw command args. A leading `room:` names the room to
-"                run in — `root`, an existing room or sub-room, or a new room
-"                (or `room/sub` for a new sub-room) made on the spot — and
+" a:1 args     — the raw command args. A leading `project:` names the project
+"                to run in — `root`, an existing project, or a new project
+"                made on the spot with the default baseline — and
 "                everything after the colon is the session name. Without a
 "                colon the whole string is the session name, same as always
 "                (spaces and all; nothing to quote); empty asks for both,
@@ -34,7 +34,7 @@ function! claude#new(...) abort
     call claude#session#new(l:args, v:null, l:provider)
     return
   endif
-  " A `room:` prefix is unambiguous, so both answers are already known —
+  " A `project:` prefix is unambiguous, so both answers are already known —
   " straight to spawn() rather than through the name-only
   " claude#session#new(), which cannot express a room at all.
   let l:answer = claude#room#answer_for(l:parts[1])
