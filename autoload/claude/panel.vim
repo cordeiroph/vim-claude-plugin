@@ -472,9 +472,27 @@ function! s:add_group(lines, nodes, kind, key, indent, label, ...) abort
   call add(a:nodes, s:node(a:kind, a:key, '', a:indent, a:label, ''))
 endfunction
 
-" An unselectable note, indented under the group it belongs to.
+" {head} cut from the right, keeping its start, so that {head}{tail} fits in
+" {avail} columns; {tail} is never cut. `pedro.cordeiro/macos-f… Diff`.
+function! s:shorten(head, tail, avail) abort
+  let l:room = a:avail - strchars(a:tail)
+  if strchars(a:head) <= l:room || l:room < 4
+    return a:head . a:tail
+  endif
+  let l:ellipsis = claude#sidebar#ascii() ? '...' : '…'
+  return strcharpart(a:head, 0, l:room - strchars(l:ellipsis)) . l:ellipsis
+        \ . a:tail
+endfunction
+
+" An unselectable note, indented under the group it belongs to. A note is
+" read from its start — `(no changes vs origin/pedro.co…)` — so it is cut from
+" the right, and keeps its closing parenthesis.
 function! s:add_note(lines, nodes, indent, text) abort
-  call add(a:lines, a:indent . claude#sidebar#fit(s:width(), a:indent, a:text))
+  let l:avail = s:width() - strchars(a:indent)
+  let l:text  = a:text =~# ')$'
+        \ ? s:shorten(a:text[: -2], ')', l:avail)
+        \ : s:shorten(a:text, '', l:avail)
+  call add(a:lines, a:indent . l:text)
   call add(a:nodes, s:node('note', '', '', a:indent, a:text, ''))
 endfunction
 
@@ -689,9 +707,11 @@ function! s:add_project(lines, nodes, rec, sessions) abort
   " so moving the baseline with b keeps the section open or shut.
   let l:key  = s:section_key('x:pb:', a:rec)
   let l:base = claude#room#baseline(a:rec)
-  call s:add_section(a:lines, a:nodes, 'diff', l:key, (empty(l:base)
-        \ ? 'Baseline' : claude#room#branch_name(a:rec.project, l:base))
-        \ . ' Diff', a:rec)
+  " A long branch keeps its start and the word Diff: the end of a branch name
+  " is the part least likely to tell two apart.
+  call s:add_section(a:lines, a:nodes, 'diff', l:key, s:shorten(empty(l:base)
+        \ ? 'Baseline' : claude#room#branch_name(a:rec.project, l:base),
+        \ ' Diff', s:width() - 4), a:rec)
   if !s:is_shut(l:key)
     if empty(l:base)
       call s:add_note(a:lines, a:nodes, l:ind, '(no baseline — b to set one)')
@@ -747,7 +767,7 @@ endfunction
 
 " A section row under a project, carrying the project for the keys.
 function! s:add_section(lines, nodes, section, key, label, rec) abort
-  call s:add_group(a:lines, a:nodes, 'section', a:key, '  ', a:label)
+  call s:add_group(a:lines, a:nodes, 'section', a:key, '  ', a:label, 1)
   call s:tag_room(a:nodes[-1], a:rec.project, a:rec)
   let a:nodes[-1].section = a:section
 endfunction

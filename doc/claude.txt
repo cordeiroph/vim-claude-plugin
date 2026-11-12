@@ -1192,9 +1192,17 @@ Creating one~
   stale local branch. The new branch has no upstream, so a `git push` from it
   can never land on the baseline.
 
-  Names are unique: a name already taken — by a project, a directory, or a
-  branch of that name — gains a number. Anything that is not a letter, digit,
-  `.`, `_` or `-` becomes a dash, and runs of dashes collapse to one.
+  The branch is the name as typed — `pedro/fleet` makes branch
+  `pedro/fleet` — behind |g:claude_project_branch_prefix|, unless git refuses
+  it as a branch name (`git check-ref-format --branch`), in which case its
+  slug is used. The project's id and its directory are always the slug:
+  anything that is not a letter, digit, `.`, `_` or `-` becomes a dash, and
+  runs of dashes collapse to one (`pedro-fleet`).
+
+  When a branch of that name already exists, `N` asks whether to check it
+  out in the new project — the default — or make a new branch beside it. A
+  name whose directory is taken, or whose branch is taken and not reused,
+  gains a number.
 
 The baseline~
   A baseline named by its local branch, `main`, is read off the remote when

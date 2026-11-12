@@ -227,10 +227,11 @@ Execute (`root:` runs in the root checkout):
   let recs = filter(claude#session#all(), {_, r -> r.name ==# 'at home'})
   AssertEqual 'root', recs[0].room
 
-Execute (a slashed name that is no project starts nothing):
-  call claude#new('nope/icons: lost')
-  AssertEqual [], filter(claude#session#all(), {_, r -> r.name ==# 'lost'})
-  AssertEqual ['root'], map(claude#room#list(), {_, r -> r.id})
+Execute (a slashed `project:` prefix makes a project on that branch):
+  call claude#new('pedro/icons: draw them')
+  let recs = filter(claude#session#all(), {_, r -> r.name ==# 'draw them'})
+  AssertEqual 'pedro-icons', recs[0].room
+  AssertEqual 'pedro/icons', claude#room#get('pedro-icons').branch
 
 Execute (PiNew's `room:` prefix behaves exactly like ClaudeNew's):
   let g:claude_providers = {'pi': {'cmd': 'sleep 30'}}

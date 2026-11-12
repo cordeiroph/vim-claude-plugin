@@ -202,6 +202,83 @@ Execute (names become one directory- and ref-safe segment):
   AssertEqual 'a-b',        claude#room#unique_name('a--b')
   AssertEqual 'project',    claude#room#unique_name('///')
 
+" ── branch names ─────────────────────────────────────────────────────────────
+
+Execute (a slashed name keeps its slash in the branch, not in the directory):
+  let room = claude#room#create('pedro/fleet-part3', '')
+  AssertEqual 'pedro/fleet-part3', room.branch, 'the branch is what was typed'
+  AssertEqual 'pedro/fleet-part3', room.name,   'and so is the name'
+  AssertEqual 'pedro-fleet-part3', room.id,     'the id is a slug'
+  AssertEqual g:_repo . '/.vim-workspace/pedro-fleet-part3/repo', room.path
+  AssertEqual 'pedro/fleet-part3', Head(room.path)
+  AssertEqual 'pedro/fleet-part3', claude#room#label(room),
+        \ 'the branch is the name, so the label does not repeat it'
+  AssertEqual [], systemlist(g:_git . 'branch --list pedro-fleet-part3'),
+        \ 'no dash branch beside it'
+
+Execute (a name git refuses as a branch falls back to its slug):
+  let room = claude#room#create('bad name', '')
+  AssertEqual 'bad-name', room.branch
+  AssertEqual 'bad name', claude#room#label(room),
+        \ 'the slug is the branch the name implies, so no suffix'
+  let room = claude#room#create('a..b', '')
+  AssertEqual 'a.b', room.branch
+
+Execute (the prefix goes in front of a slashed branch too):
+  let g:claude_project_branch_prefix = 'work/'
+  try
+    let room = claude#room#create('pedro/x', '')
+    AssertEqual 'work/pedro/x', room.branch
+  finally
+    let g:claude_project_branch_prefix = ''
+  endtry
+
+Execute (an existing branch is checked out when asked to reuse it):
+  call system(g:_git . 'branch pedro/fleet feature')
+  let room = claude#room#create('pedro/fleet', '', 1)
+  AssertEqual 'pedro/fleet', room.branch
+  AssertEqual 'pedro-fleet', room.id
+  AssertEqual Head(g:_repo, 'feature'), Head(room.path, 'HEAD'),
+        \ 'the branch was checked out as it is, not cut from the baseline'
+  AssertEqual 'main', room.base, 'the baseline is still what it diffs against'
+
+Execute (without reuse, an existing branch numbers the project around it):
+  call system(g:_git . 'branch pedro/fleet')
+  let room = claude#room#create('pedro/fleet', '')
+  AssertEqual 'pedro/fleet-1', room.branch
+  AssertEqual 'pedro-fleet-1', room.id
+  AssertEqual 'pedro/fleet-1', room.name
+
+Execute (a reused branch keeps its name when only the directory is taken):
+  call system(g:_git . 'branch pedro/fleet')
+  call mkdir(g:_repo . '/.vim-workspace/pedro-fleet/repo', 'p')
+  let room = claude#room#create('pedro/fleet', '', 1)
+  AssertEqual 'pedro/fleet', room.branch
+  AssertEqual 'pedro-fleet-1', room.id
+
+Execute (N offers to reuse a branch of the typed name):
+  call system(g:_git . 'branch pedro/fleet')
+  " name, baseline, then which: 1 checks it out
+  call feedkeys("pedro/fleet\<CR>\<CR>1\<CR>", 't')
+  AssertEqual [1, {'new': 'room', 'name': 'pedro/fleet', 'base': '',
+        \ 'reuse': 1}], claude#room#ask_new()
+
+Execute (a blank answer checks the existing branch out):
+  call system(g:_git . 'branch pedro/fleet')
+  call feedkeys("pedro/fleet\<CR>\<CR>\<CR>", 't')
+  AssertEqual 1, claude#room#ask_new()[1].reuse
+
+Execute (N can make a new branch instead):
+  call system(g:_git . 'branch pedro/fleet')
+  call feedkeys("pedro/fleet\<CR>\<CR>2\<CR>", 't')
+  AssertEqual [1, {'new': 'room', 'name': 'pedro/fleet', 'base': '',
+        \ 'reuse': 0}], claude#room#ask_new()
+
+Execute (a project is found by its typed name or its id):
+  call claude#room#create('pedro/fleet', '')
+  AssertEqual {'room': 'pedro-fleet'}, claude#room#answer_for('pedro/fleet')
+  AssertEqual {'room': 'pedro-fleet'}, claude#room#answer_for('pedro-fleet')
+
 " ── where rooms live ─────────────────────────────────────────────────────────
 
 Execute (an absolute g:claude_room_dir puts rooms outside the project):

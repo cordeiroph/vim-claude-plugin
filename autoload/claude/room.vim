@@ -475,6 +475,7 @@ function! claude#room#label(rec) abort
     return a:rec.name . ' — (missing)'
   endif
   if !empty(a:rec.branch) && a:rec.branch !=# s:branch_for(a:rec.name)
+        \ && a:rec.branch !=# s:branch_for(s:slug(a:rec.name))
         \ && a:rec.branch !=# 'room/' . a:rec.name
     return a:rec.name . ' — ' . a:rec.branch
   endif
@@ -539,25 +540,46 @@ function! s:branch_for(name) abort
   return get(g:, 'claude_project_branch_prefix', '') . a:name
 endfunction
 
-function! s:taken(root, name) abort
-  if a:name ==# 'root'
+" Whether {id} is unavailable as a project id: reserved, stored, or its
+" directory already exists.
+function! s:id_taken(root, id) abort
+  if a:id ==# 'root'
     return 1
   endif
-  let l:data = s:load()
-  if has_key(get(l:data.rooms, a:root, {}), a:name)
+  if has_key(get(s:load().rooms, a:root, {}), a:id)
     return 1
   endif
-  let l:dir = s:dir_for(a:root, a:name)
-  if isdirectory(l:dir) || filereadable(l:dir)
-    return 1
-  endif
-  " An existing branch is somebody's work: a new project takes a fresh name
-  " rather than silently checking that out.
+  let l:dir = s:dir_for(a:root, a:id)
+  return isdirectory(l:dir) || filereadable(l:dir)
+endfunction
+
+" Whether {root} has a local branch called {branch}.
+function! claude#room#branch_exists(root, branch) abort
   return s:git_ok(a:root, 'show-ref --verify --quiet '
-        \ . shellescape('refs/heads/' . s:branch_for(a:name)))
+        \ . shellescape('refs/heads/' . a:branch))
+endfunction
+
+" The branch a project named {name} is given: the name as typed, behind
+" g:claude_project_branch_prefix, when git takes it as a branch name — so
+" pedro/fleet stays pedro/fleet — and the slug of it only when git does not.
+function! claude#room#branch_for_name(root, name) abort
+  let l:typed = s:branch_for(trim(a:name))
+  if !empty(trim(a:name)) && s:git_ok(a:root, 'check-ref-format --branch '
+        \ . shellescape(l:typed))
+    return l:typed
+  endif
+  let l:slug = s:slug(a:name)
+  return s:branch_for(empty(l:slug) ? 'project' : l:slug)
+endfunction
+
+function! s:taken(root, name) abort
+  return s:id_taken(a:root, a:name)
+        \ || claude#room#branch_exists(a:root, s:branch_for(a:name))
 endfunction
 
 " {base}, or base-1, base-2, … until no project, directory or branch holds it.
+" The id a project is filed under, and the directory it lives in, are this
+" slug; its branch keeps the name as typed (see s:names()).
 "
 " a:1 is ignored (it was the parent room); a:2 the repository root.
 function! claude#room#unique_name(base, ...) abort
@@ -574,6 +596,29 @@ function! claude#room#unique_name(base, ...) abort
     let l:n += 1
   endwhile
   return l:base . '-' . l:n
+endfunction
+
+" [id, name, branch] for a new project typed as {typed}. The id and directory
+" are slugged — a / there would be another directory level — while the name
+" and branch keep what was typed. A clash anywhere numbers all three together
+" (panel-1, branch panel-1), except that with {reuse} the existing branch is
+" the point: only the id and name are numbered, the branch is kept.
+function! s:names(root, typed, reuse) abort
+  let l:typed  = trim(a:typed)
+  let l:slug   = s:slug(l:typed)
+  let l:slug   = empty(l:slug) ? 'project' : l:slug
+  let l:name   = empty(l:typed) ? l:slug : l:typed
+  let l:branch = claude#room#branch_for_name(a:root, l:name)
+  let l:n = 0
+  while 1
+    let l:sfx = l:n == 0 ? '' : '-' . l:n
+    let l:b   = a:reuse ? l:branch : l:branch . l:sfx
+    if !s:id_taken(a:root, l:slug . l:sfx)
+          \ && (a:reuse || !claude#room#branch_exists(a:root, l:b))
+      return [l:slug . l:sfx, l:name . l:sfx, l:b]
+    endif
+    let l:n += 1
+  endwhile
 endfunction
 
 " Keep the room directory out of git status, ripgrep and friends by listing it
@@ -648,7 +693,12 @@ endfunction
 " project, cut from the baseline, checked out in a worktree of its own. A
 " blank {base} means the default branch as the remote has it now (fetched
 " first, see s:latest()) — origin/main on most repositories.
-function! claude#room#create(name, base) abort
+"
+" a:1 — 1 to check out the branch of that name when it already exists,
+" rather than numbering the project around it. The baseline is still what
+" the project diffs against; the branch is not cut from it.
+function! claude#room#create(name, base, ...) abort
+  let l:reuse = a:0 > 0 && a:1
   let l:root = claude#room#project_root()
   if empty(l:root)
     call s:warn('not inside a git repository; no project created')
@@ -670,13 +720,14 @@ function! claude#room#create(name, base) abort
     let l:start = l:base
   endif
 
-  let l:name = claude#room#unique_name(a:name, '', l:root)
-  return s:add(l:root, l:name, l:start)
+  let [l:id, l:name, l:branch] = s:names(l:root, a:name, l:reuse)
+  let l:reuse = l:reuse && claude#room#branch_exists(l:root, l:branch)
+  return s:add(l:root, l:id, l:name, l:branch, l:start, l:reuse)
 endfunction
 
-function! s:add(root, name, start) abort
-  let l:dir    = s:dir_for(a:root, a:name)
-  let l:branch = s:branch_for(a:name)
+function! s:add(root, id, name, branch, start, reuse) abort
+  let l:dir    = s:dir_for(a:root, a:id)
+  let l:branch = a:branch
   let l:holder = fnamemodify(l:dir, ':h')
   try
     call mkdir(l:holder, 'p')
@@ -688,10 +739,12 @@ function! s:add(root, name, start) abort
   call claude#room#ensure_excluded(a:root)
 
   " --no-track: cut from a remote branch, the new branch would otherwise take
-  " it as its upstream, and a `git push` would push to the baseline.
-  let [l:ok, l:msg] = s:git_run(a:root, 'worktree add --no-track -b '
-        \ . shellescape(l:branch) . ' ' . shellescape(l:dir) . ' '
-        \ . shellescape(a:start))
+  " it as its upstream, and a `git push` would push to the baseline. A reused
+  " branch is checked out as it is, upstream and all.
+  let [l:ok, l:msg] = s:git_run(a:root, a:reuse
+        \ ? 'worktree add ' . shellescape(l:dir) . ' ' . shellescape(l:branch)
+        \ : 'worktree add --no-track -b ' . shellescape(l:branch) . ' '
+        \   . shellescape(l:dir) . ' ' . shellescape(a:start))
   if !l:ok
     call delete(l:holder, 'd')
     call s:warn('git worktree add failed: ' . l:msg)
@@ -699,7 +752,7 @@ function! s:add(root, name, start) abort
   endif
 
   let l:rec = {
-        \ 'id':      a:name,
+        \ 'id':      a:id,
         \ 'name':    a:name,
         \ 'parent':  '',
         \ 'branch':  l:branch,
@@ -1071,7 +1124,25 @@ function! claude#room#ask_new() abort
     call s:warn('unknown baseline: ' . l:base . '; nothing created')
     return [0, {}]
   endif
-  return [1, {'new': 'room', 'name': l:name, 'base': l:base}]
+  let l:answer = {'new': 'room', 'name': l:name, 'base': l:base}
+
+  " A branch of that name already exists — often the very branch the work is
+  " on. Checking it out is almost always what was meant; numbering the
+  " project around it would leave the work on a branch no project shows.
+  let l:branch = claude#room#branch_for_name(l:root, l:name)
+  if claude#room#branch_exists(l:root, l:branch)
+    " inputlist(), like the other questions, so CTRL-C cancels and a blank
+    " answer takes the default — checking the branch out.
+    let [l:ok, l:pick] = s:inputlist([
+          \ 'Branch ' . l:branch . ' already exists (blank checks it out):',
+          \ '1. Check it out in the new project',
+          \ '2. Make a new branch beside it'])
+    if !l:ok
+      return [0, {}]
+    endif
+    let l:answer.reuse = l:pick != 2
+  endif
+  return [1, l:answer]
 endfunction
 
 " The project an answer from claude#room#ask() means, creating it when the
@@ -1082,25 +1153,39 @@ function! claude#room#realise(answer) abort
     return claude#room#get(a:answer.room)
   endif
   if get(a:answer, 'new', '') ==# 'room'
-    return claude#room#create(a:answer.name, get(a:answer, 'base', ''))
+    return claude#room#create(a:answer.name, get(a:answer, 'base', ''),
+          \ get(a:answer, 'reuse', 0))
   endif
   return {}
 endfunction
 
 " The answer a `project:` prefix on :ClaudeNew/:PiNew stands for, in the shape
 " claude#room#ask() returns, so claude#room#realise() takes it from there.
-" `root` is the root checkout; a project that exists is used as it is; a name
-" that does not is a new project with the default baseline. {} when the text
-" names nothing that can be made.
+" `root` is the root checkout; a project that exists — by its name, as typed
+" (pedro/fleet), or by its id (pedro-fleet) — is used as it is; anything else
+" is a new project with the default baseline, checking out a branch of that
+" name when one already exists. {} when the text names nothing that can be
+" made.
 function! claude#room#answer_for(text) abort
   let l:text = trim(a:text)
+  if l:text ==# 'root'
+    return {'room': 'root'}
+  endif
+  for l:rec in claude#room#list()
+    if l:rec.name ==# l:text || l:rec.id ==# l:text
+      return {'room': l:rec.id}
+    endif
+  endfor
   " A migrated sub-room keeps its '<room>/<sub>' id, and is still found by it.
   let l:id = join(map(split(l:text, '/', 1), {_, p -> s:slug(p)}), '/')
-  if l:id ==# 'root' || !empty(claude#room#get(l:id))
+  if !empty(claude#room#get(l:id))
     return {'room': l:id}
   endif
-  if !empty(s:slug(l:text)) && l:text !~# '/'
-    return {'new': 'room', 'name': l:text, 'base': ''}
+  if !empty(s:slug(l:text))
+    let l:root = claude#room#project_root()
+    return {'new': 'room', 'name': l:text, 'base': '',
+          \ 'reuse': !empty(l:root) && claude#room#branch_exists(l:root,
+          \   claude#room#branch_for_name(l:root, l:text))}
   endif
   call s:warn('no project to make from "' . l:text . '"')
   return {}

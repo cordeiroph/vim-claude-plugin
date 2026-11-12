@@ -323,3 +323,23 @@ Execute (outside any project, NERDTreeFind does what it always did):
   delcommand NERDTreeFind
   AssertEqual 1, g:_found
   Assert !claude#panel#is_open(), 'the panel is left alone'
+
+" ── long names ───────────────────────────────────────────────────────────────
+
+Execute (a long baseline keeps its start, and the word Diff):
+  call system(g:_g . 'branch pedro.cordeiro/macos-fleet-part3')
+  call claude#room#create('e2e', 'pedro.cordeiro/macos-fleet-part3')
+  let lines = Open()
+  let at = match(lines, '^▾ e2e ')
+  let row = lines[at + 1]
+  Assert row =~# '^  ▸ pedro\.cordeiro/macos-.*… Diff$', 'cut on the right: ' . row
+  Assert strchars(row) <= 35, 'and it fits: ' . row
+
+Execute (a long note keeps its start and its closing parenthesis):
+  call system(g:_g . 'branch pedro.cordeiro/macos-fleet-part3')
+  call claude#room#create('e2e', 'pedro.cordeiro/macos-fleet-part3')
+  call Open()
+  let lines = Press('e2e', '^  ▸ pedro', 'o')
+  let note = lines[match(lines, '^  ▾ pedro') + 1]
+  Assert note =~# '^    (no changes vs pedro.*…)$', 'cut on the right: ' . note
+  Assert strchars(note) <= 35, 'and it fits: ' . note
